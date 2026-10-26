@@ -366,6 +366,14 @@ def test_scanned_files_reports_what_was_actually_scanned(tmp_path: Path):
 # --- the real repository ---------------------------------------------------------------
 
 
+@pytest.mark.xfail(
+    strict=False,
+    reason="TODO: .env.example is intentionally absent; the user must add it manually",
+)
+def test_real_repository_ships_an_env_example(repo_root: Path):
+    assert (repo_root / ".env.example").is_file()
+
+
 def test_real_repository_is_clean(repo_root: Path):
     scanned = {p.as_posix() for p in scanned_files(repo_root)}
     assert "pyproject.toml" in scanned, "scan is vacuous: pyproject.toml was not scanned"
