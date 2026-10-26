@@ -15,7 +15,7 @@ CREATE TABLE sources (
     mode            TEXT    NOT NULL CHECK (mode IN ('recorded', 'streaming')),
     credibility     INTEGER NOT NULL
         CHECK (typeof(credibility) = 'integer' AND credibility BETWEEN 1 AND 5),
-    enabled         INTEGER NOT NULL CHECK (typeof(enabled) = 'integer' AND enabled IN (0, 1)),
+    enabled         INTEGER NOT NULL CHECK (enabled IN (0, 1)),
     secret_ref      TEXT,
     -- Type-specific fields (feed_url, keywords, handle, ...) live here as a JSON object.
     config_json     TEXT    NOT NULL

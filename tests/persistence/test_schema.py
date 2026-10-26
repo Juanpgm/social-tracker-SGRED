@@ -285,6 +285,15 @@ def test_events_get_increasing_ids(conn):
     assert rows == [(1, "first"), (2, "second")]
 
 
+def test_event_ids_are_never_reused_even_if_the_guards_are_removed(conn):
+    insert_event(conn, kind="first")
+    insert_event(conn, kind="second")
+    conn.execute("DROP TRIGGER control_events_no_delete")
+    conn.execute("DELETE FROM control_events WHERE id = 2")
+    insert_event(conn, kind="third")
+    assert conn.execute("SELECT id FROM control_events WHERE kind = 'third'").fetchone()[0] == 3
+
+
 def test_events_cannot_be_updated(conn):
     insert_event(conn)
     rejected(conn, lambda c: c.execute("UPDATE control_events SET kind = 'x'"), "append-only")

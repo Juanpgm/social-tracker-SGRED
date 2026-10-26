@@ -194,6 +194,66 @@ def test_corrupt_page_inside_a_valid_database_is_a_storage_error(tmp_path, opene
         Database(path)
 
 
+def _hold_a_read_lock_on_a_rollback_journal_file(path: Path) -> sqlite3.Connection:
+    """Leaves the file in rollback-journal mode with a reader that blocks the switch to WAL."""
+    holder = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    holder.execute("CREATE TABLE seed (x)")
+    holder.execute("BEGIN")
+    holder.execute("SELECT * FROM seed").fetchall()
+    return holder
+
+
+def test_switching_to_wal_waits_for_a_short_lived_reader(tmp_path, opened):
+    path = tmp_path / "wal.db"
+    holder = _hold_a_read_lock_on_a_rollback_journal_file(path)
+    timer = threading.Timer(0.3, lambda: (holder.execute("COMMIT"), holder.close()))
+    timer.start()
+    try:
+        db = opened(path)
+    finally:
+        timer.join(timeout=5)
+    assert db.query("PRAGMA journal_mode")[0][0] == "wal"
+
+
+def test_switching_to_wal_gives_up_after_the_busy_timeout(tmp_path):
+    path = tmp_path / "wal.db"
+    holder = _hold_a_read_lock_on_a_rollback_journal_file(path)
+    try:
+        started = time.monotonic()
+        with pytest.raises(StorageError) as info:
+            Database(path, busy_timeout_ms=300)
+        elapsed = time.monotonic() - started
+    finally:
+        holder.execute("COMMIT")
+        holder.close()
+    assert "SQLITE_BUSY" in str(info.value)
+    assert 0.25 <= elapsed < 5  # it waited for the timeout instead of failing at once
+
+
+def test_a_database_that_cannot_use_wal_is_rejected_and_not_leaked(tmp_path, monkeypatch):
+    real_connect = sqlite3.connect
+
+    class NoWal:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def execute(self, sql, *args):
+            if sql.startswith("PRAGMA journal_mode"):
+                return self._conn.execute("SELECT 'delete'")
+            return self._conn.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: NoWal(real_connect(*a, **k)))
+    path = tmp_path / "nowal.db"
+    with pytest.raises(StorageError) as info:
+        Database(path)
+    assert "write-ahead" in str(info.value)
+    monkeypatch.undo()
+    path.unlink()  # the rejected connection was closed
+
+
 # ---- lifecycle ----
 
 
@@ -383,6 +443,7 @@ def test_a_write_blocked_beyond_the_busy_timeout_is_a_storage_error(tmp_path, op
             conn.execute("UPDATE counter SET n = 1")
         assert time.monotonic() - started < 5
         assert info.value.code == "storage_error"
+        assert "SQLITE_BUSY" in str(info.value)
         assert not isinstance(info.value, ConflictError)
     finally:
         blocker.execute("ROLLBACK")
@@ -514,6 +575,7 @@ def test_database_newer_than_the_known_migrations_is_a_storage_error(tmp_path, o
     with pytest.raises(StorageError) as info:
         Database(path, migrations=[COUNTER])
     assert info.value.code == "storage_error"
+    assert "newer version" in str(info.value)
 
 
 def test_database_with_a_hole_in_the_applied_versions_is_a_storage_error(tmp_path):
@@ -524,8 +586,9 @@ def test_database_with_a_hole_in_the_applied_versions_is_a_storage_error(tmp_pat
     conn.commit()
     conn.close()
     known = [COUNTER, Migration(2, "b", "SELECT 1"), Migration(3, "c", "SELECT 1")]
-    with pytest.raises(StorageError):
+    with pytest.raises(StorageError) as info:
         Database(path, migrations=known)
+    assert "contiguous" in str(info.value)
 
 
 def test_a_failed_open_leaves_no_open_handle_behind(tmp_path):
@@ -586,10 +649,19 @@ def test_discovery_sorts_numerically_and_ignores_non_sql_files(tmp_path):
         "0001-init.sql",
         "00001_x.sql",
         "0001_in it.sql",
+        "0001_init.SQL",
     ],
 )
 def test_misnamed_sql_files_are_rejected(tmp_path, bad_name):
     directory = _write_migrations(tmp_path / "m", {"0001_ok.sql": "SELECT 1", bad_name: "SELECT 2"})
+    with pytest.raises(StorageError):
+        load_migrations(directory)
+
+
+def test_numbers_must_be_zero_padded_to_four_digits(tmp_path):
+    # Valid on their own if the padding rule were loosened (versions 1 and 2), so no other file
+    # in the directory can mask the failure.
+    directory = _write_migrations(tmp_path / "m", {"1_a.sql": "SELECT 1", "2_b.sql": "SELECT 2"})
     with pytest.raises(StorageError):
         load_migrations(directory)
 
@@ -617,6 +689,103 @@ def test_a_non_utf8_migration_file_is_a_storage_error(tmp_path):
         load_migrations(directory)
 
 
+class _ReversedListing:
+    """A directory whose listing comes back in descending order, as some filesystems may."""
+
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+
+    def iterdir(self):
+        return iter(sorted(self._directory.iterdir(), reverse=True))
+
+
+def test_discovery_does_not_depend_on_the_order_the_directory_is_listed(tmp_path):
+    directory = _write_migrations(
+        tmp_path / "m", {f"{n:04d}_step.sql": f"SELECT {n}" for n in (1, 2, 3, 4, 5)}
+    )
+    found = load_migrations(_ReversedListing(directory))  # type: ignore[arg-type]
+    assert [m.version for m in found] == [1, 2, 3, 4, 5]
+
+
+def test_a_loser_of_the_migration_race_leaves_no_transaction_open(tmp_path):
+    path = tmp_path / "race.db"
+    # Prepare an empty WAL database whose migration table exists but records nothing yet.
+    holder = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute(
+        "CREATE TABLE schema_migrations "
+        "(version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    holder.execute("BEGIN IMMEDIATE")  # blocks the racers right where they must take the lock
+    dbs: list[Database] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def racer():
+        try:
+            db = Database(path, migrations=[COUNTER], busy_timeout_ms=3000)
+            with lock:
+                dbs.append(db)
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assert below
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=racer) for _ in range(3)]
+    for t in threads:
+        t.start()
+    time.sleep(0.4)  # let every racer read "nothing applied" and queue on the write lock
+    # The winner applies the migration by hand while the racers wait.
+    holder.execute("CREATE TABLE counter (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
+    holder.execute("INSERT INTO counter VALUES (1, 0)")
+    holder.execute("INSERT INTO schema_migrations VALUES (1, '2026-01-01T00:00:00+00:00')")
+    holder.execute("COMMIT")
+    holder.close()
+    for t in threads:
+        t.join(timeout=30)
+    try:
+        assert errors == []
+        assert len(dbs) == 3
+        for db in dbs:  # a losing racer must not still hold the write lock
+            with db.transaction() as conn:
+                conn.execute("UPDATE counter SET n = n + 1")
+        assert dbs[0].query("SELECT n FROM counter")[0]["n"] == 3
+    finally:
+        for db in dbs:
+            db.close()
+
+
+def test_many_instances_opening_a_new_file_at_once_all_succeed(tmp_path):
+    path = tmp_path / "race.db"
+    count = 6
+    barrier = threading.Barrier(count)
+    opened_dbs: list[Database] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def worker():
+        barrier.wait(timeout=5)
+        try:
+            db = Database(path)
+            with lock:
+                opened_dbs.append(db)
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assert below
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    try:
+        assert errors == []
+        assert len(opened_dbs) == count
+        assert versions(opened_dbs[0]) == [m.version for m in load_migrations()]
+    finally:
+        for db in opened_dbs:
+            db.close()
+
+
 def test_database_can_run_discovered_migrations(tmp_path, opened):
     directory = _write_migrations(
         tmp_path / "m", {"0001_a.sql": "CREATE TABLE a (x)", "0002_b.sql": "CREATE TABLE b (y)"}
@@ -633,6 +802,12 @@ def test_utc_round_trip_keeps_microseconds():
     text = format_utc(moment)
     assert text == "2026-05-06T07:08:09.123456+00:00"
     assert parse_utc(text) == moment
+
+
+def test_parse_utc_converts_other_offsets_to_utc():
+    parsed = parse_utc("2026-01-01T14:00:00+02:00")
+    assert parsed == datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    assert parsed.utcoffset() == timedelta(0)
 
 
 def test_format_utc_converts_other_offsets():

@@ -16,6 +16,7 @@ Design:
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -165,6 +166,24 @@ def _apply_pending(conn: sqlite3.Connection, migrations: Sequence[Migration]) ->
             raise
 
 
+def _enable_wal(conn: sqlite3.Connection, timeout_ms: int) -> Any:
+    """Switch to WAL, retrying while another connection holds the file.
+
+    SQLite does not call the busy handler for this pragma (it returns SQLITE_BUSY at once when
+    it would have to wait for an exclusive lock), so concurrent first opens of a new file need
+    an explicit retry bounded by the same timeout.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        try:
+            return conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            busy = str(getattr(exc, "sqlite_errorname", "")).startswith("SQLITE_BUSY")
+            if not busy or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 # ---- database -------------------------------------------------------------------------
 
 
@@ -209,7 +228,7 @@ class Database:
     def _configure(conn: sqlite3.Connection, busy_timeout_ms: int) -> None:
         # busy_timeout first: switching journal mode already needs the file lock.
         conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
-        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        mode = _enable_wal(conn, busy_timeout_ms)
         if str(mode).lower() != "wal":
             raise StorageError("write-ahead logging is not available for this database")
         conn.execute("PRAGMA synchronous=NORMAL")
