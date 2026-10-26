@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.hygiene import MAX_SCAN_BYTES, find_violations
+from tests import hygiene
+from tests.hygiene import MAX_SCAN_BYTES, find_violations, scanned_files
 
 PW = "pass" + "word"
 TOK = "to" + "ken"
@@ -217,8 +218,58 @@ def test_works_without_git_history_or_repository(tmp_path: Path):
     assert any("secrets/k.txt" in v for v in find_violations(tmp_path))
 
 
+def _fake_git(monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: bytes = b"") -> None:
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout)
+
+    monkeypatch.setattr(hygiene.subprocess, "run", fake_run)
+
+
+def test_git_failure_falls_back_to_walking_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path, "data/risk.db", "x")
+    _fake_git(monkeypatch, returncode=128)
+    assert any("data/risk.db" in v for v in find_violations(tmp_path))
+
+
+def test_git_executable_missing_falls_back_to_walking_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path, "data/risk.db", "x")
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(hygiene.subprocess, "run", boom)
+    assert any("data/risk.db" in v for v in find_violations(tmp_path))
+
+
+def test_git_listing_nothing_for_a_non_empty_tree_is_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A silent empty listing would make the scan vacuous, so it must fail loudly."""
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path, "data/risk.db", "x")
+    _fake_git(monkeypatch, returncode=0, stdout=b"")
+    with pytest.raises(RuntimeError, match="git listed no files"):
+        find_violations(tmp_path)
+
+
+def test_scanned_files_reports_what_was_actually_scanned(tmp_path: Path):
+    _write(tmp_path, "a.py", "x = 1\n")
+    _write(tmp_path, ".venv/skip.py", "x = 1\n")
+    assert [p.as_posix() for p in scanned_files(tmp_path)] == ["a.py"]
+
+
 # --- the real repository ---------------------------------------------------------------
 
 
 def test_real_repository_is_clean(repo_root: Path):
+    scanned = {p.as_posix() for p in scanned_files(repo_root)}
+    assert "pyproject.toml" in scanned, "scan is vacuous: pyproject.toml was not scanned"
+    assert "src/social_tracker/__init__.py" in scanned
+    assert len(scanned) >= 5
     assert find_violations(repo_root) == []

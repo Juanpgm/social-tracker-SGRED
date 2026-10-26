@@ -83,8 +83,22 @@ def _walked_files(root: Path) -> list[Path]:
 
 def _candidate_files(root: Path) -> list[Path]:
     listed = _git_listed_files(root)
-    files = listed if listed is not None else _walked_files(root)
+    if listed is None:
+        files = _walked_files(root)
+    else:
+        files = listed
+        if not any(not _is_pruned(p.parts) for p in files) and any(
+            not _is_pruned(p.parts) for p in _walked_files(root)
+        ):
+            raise RuntimeError(
+                "git listed no files for a non-empty working tree; refusing to pass vacuously"
+            )
     return sorted(p for p in files if not _is_pruned(p.parts))
+
+
+def scanned_files(root: Path) -> list[Path]:
+    """Relative paths the checker considers for scanning (lets tests prove it is not vacuous)."""
+    return _candidate_files(root)
 
 
 def _forbidden_path_reason(rel: Path) -> str | None:
