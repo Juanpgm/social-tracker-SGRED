@@ -284,7 +284,8 @@ def test_backoff_cap_constant():
 
 
 def test_huge_exponent_does_not_blow_up():
-    assert backoff_delay_s(10**9) == 3600
+    # 2**(10**12) would need ~125 GB: only a clamped exponent returns at all.
+    assert backoff_delay_s(10**12) == 3600
 
 
 def test_jitter_is_added_after_the_cap():

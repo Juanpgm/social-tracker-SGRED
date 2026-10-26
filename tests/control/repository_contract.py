@@ -34,6 +34,12 @@ class ControlRepositoryContract:
     def test_global_analysis_defaults_to_false(self, repo: ControlRepository):
         assert repo.get_setting(SETTING_GLOBAL_ANALYSIS_ENABLED) == "false"
 
+    def test_a_fresh_repository_does_not_see_another_ones_settings(self):
+        first = self.make_repo()
+        first.set_setting(SETTING_GLOBAL_ANALYSIS_ENABLED, "true")
+        second = self.make_repo()
+        assert second.get_setting(SETTING_GLOBAL_ANALYSIS_ENABLED) == "false"
+
     def test_unknown_setting_is_none(self, repo: ControlRepository):
         assert repo.get_setting("unknown_key") is None
 
