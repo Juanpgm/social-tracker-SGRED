@@ -4,6 +4,15 @@ Pure standard library. Works with or without git: inside a git repository it hon
 `.gitignore` (tracked + untracked-but-not-ignored files); otherwise it walks the tree and
 skips well-known tooling directories.
 
+Scope and limits:
+- The git file list uses `--exclude-standard`, so it includes tracked files AND untracked files
+  that are not ignored. Results therefore depend on the local `.gitignore`, `.git/info/exclude`
+  and global excludes: an ignored secret is intentionally not reported, but a locally excluded
+  pattern also hides files from the scan. If git fails or lists nothing for a non-empty tree,
+  the checker falls back to walking the tree or raises instead of passing vacuously.
+- Detection is heuristic (path rules plus regexes); it cannot find encoded or split secrets.
+- Symlinks are never followed; those resolving outside the repository are reported.
+
 Violation messages never include the offending value.
 """
 
