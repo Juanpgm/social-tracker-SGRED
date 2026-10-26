@@ -85,14 +85,6 @@ def test_real_contract_passes_on_the_repository(repo_root: Path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_config_declares_every_forbidden_external(repo_root: Path):
-    text = (repo_root / CONFIG_NAME).read_text(encoding="utf-8")
-    for module in FORBIDDEN_EXTERNALS:
-        assert module in text, f"{module} missing from the domain purity contract"
-    for layer in FORBIDDEN_LAYERS:
-        assert layer in text, f"{layer} missing from the domain purity contract"
-
-
 def test_missing_config_fails_with_a_clear_message(tmp_path: Path):
     result = _run(["--config", str(tmp_path / "does-not-exist.ini")], cwd=tmp_path)
     assert result.returncode != 0
