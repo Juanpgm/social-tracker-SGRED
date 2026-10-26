@@ -4,8 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 
 def test_package_imports_and_exposes_version():
     import social_tracker
@@ -46,10 +44,3 @@ def test_import_has_no_filesystem_side_effects(tmp_path: Path):
     )
     assert result.returncode == 0, result.stderr
     assert list(tmp_path.iterdir()) == []
-
-
-@pytest.mark.parametrize("name", ["__version__"])
-def test_public_attribute_present(name: str):
-    import social_tracker
-
-    assert hasattr(social_tracker, name)

@@ -3,6 +3,10 @@
 The real contract lives in `.importlinter`. These tests run `lint-imports` against it, and
 prove it is not vacuous by running the same contract (retargeted at a throwaway package)
 against deliberate violations.
+
+Limitation: import-linter analyses static import statements only. Dynamic imports
+(`__import__`, `importlib.import_module`, `builtins.open`, `eval`) cannot be caught by
+this contract; importing `importlib` itself is forbidden in the domain to narrow that gap.
 """
 
 import subprocess
@@ -13,7 +17,28 @@ from pathlib import Path
 import pytest
 
 CONFIG_NAME = ".importlinter"
-FORBIDDEN_EXTERNALS = ["sqlite3", "yaml", "typer", "httpx", "requests"]
+FORBIDDEN_EXTERNALS = [
+    "sqlite3",
+    "yaml",
+    "typer",
+    "httpx",
+    "requests",
+    "aiohttp",
+    "os",
+    "pathlib",
+    "io",
+    "shutil",
+    "socket",
+    "ssl",
+    "subprocess",
+    "urllib",
+    "http",
+    "asyncio",
+    "importlib",
+    "tempfile",
+    "glob",
+]
+FORBIDDEN_LAYERS = ["adapters", "persistence", "entrypoints", "infrastructure", "storage"]
 
 
 def _lint_imports_cmd() -> list[str]:
@@ -64,7 +89,7 @@ def test_config_declares_every_forbidden_external(repo_root: Path):
     text = (repo_root / CONFIG_NAME).read_text(encoding="utf-8")
     for module in FORBIDDEN_EXTERNALS:
         assert module in text, f"{module} missing from the domain purity contract"
-    for layer in ("adapters", "persistence", "entrypoints"):
+    for layer in FORBIDDEN_LAYERS:
         assert layer in text, f"{layer} missing from the domain purity contract"
 
 
@@ -91,7 +116,7 @@ def test_domain_importing_forbidden_external_fails(repo_root: Path, tmp_path: Pa
     assert "BROKEN" in result.stdout
 
 
-@pytest.mark.parametrize("layer", ["adapters", "persistence", "entrypoints"])
+@pytest.mark.parametrize("layer", FORBIDDEN_LAYERS)
 def test_domain_importing_internal_layer_fails(repo_root: Path, tmp_path: Path, layer: str):
     _make_package(
         tmp_path,

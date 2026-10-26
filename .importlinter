@@ -2,6 +2,8 @@
 root_package = social_tracker
 include_external_packages = True
 
+# Static analysis only: dynamic imports (__import__, importlib.import_module) and builtins
+# such as open() are invisible to import-linter. Importing importlib itself is forbidden.
 [importlinter:contract:domain-purity]
 name = Domain modules must not depend on adapters, persistence, entrypoints or I/O libraries
 type = forbidden
@@ -15,8 +17,26 @@ forbidden_modules =
     social_tracker.**.adapters
     social_tracker.**.persistence
     social_tracker.**.entrypoints
+    social_tracker.infrastructure
+    social_tracker.storage
+    social_tracker.**.infrastructure
+    social_tracker.**.storage
     sqlite3
     yaml
     typer
     httpx
     requests
+    aiohttp
+    os
+    pathlib
+    io
+    shutil
+    socket
+    ssl
+    subprocess
+    urllib
+    http
+    asyncio
+    importlib
+    tempfile
+    glob
