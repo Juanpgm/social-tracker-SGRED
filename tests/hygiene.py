@@ -129,8 +129,9 @@ def scanned_files(root: Path) -> list[Path]:
 
 
 def _forbidden_path_reason(rel: Path) -> str | None:
-    parts = rel.parts
+    parts = tuple(part.casefold() for part in rel.parts)
     name = parts[-1]
+    suffix = Path(name).suffix
     if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
         return "environment file"
     if name.endswith(".cookies"):
@@ -141,7 +142,7 @@ def _forbidden_path_reason(rel: Path) -> str | None:
         or fnmatch.fnmatchcase(name, "*storage_state*.json")
     ):
         return "browser session file"
-    if rel.suffix in _KEY_SUFFIXES or name.startswith(_PRIVATE_KEY_PREFIXES):
+    if suffix in _KEY_SUFFIXES or name.startswith(_PRIVATE_KEY_PREFIXES):
         return "private key or certificate file"
     if name == ".netrc":
         return "netrc credentials file"

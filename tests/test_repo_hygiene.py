@@ -55,6 +55,31 @@ def test_forbidden_paths_are_flagged(tmp_path: Path, rel: str):
 
 @pytest.mark.parametrize(
     "rel",
+    [
+        ".ENV",
+        ".Env.Local",
+        "Session.COOKIES",
+        "Data/risk.json",
+        "DATA/sub/dump.json",
+        "Secrets/a.txt",
+        "pkg/SECRETS/inner.txt",
+        "ID_RSA",
+        "Server.PEM",
+        "Deploy/Private.KEY",
+        "RISK.DB",
+        "Risk.SQLite3",
+        "Cookies.TXT",
+        "Auth/Storage_State.JSON",
+        ".NETRC",
+    ],
+)
+def test_forbidden_paths_are_matched_case_insensitively(tmp_path: Path, rel: str):
+    _write(tmp_path, rel, "x")
+    assert find_violations(tmp_path), rel
+
+
+@pytest.mark.parametrize(
+    "rel",
     ["src/app.py", "docs/data.md", "src/pkg/data/__init__.py", "notes.cookies.md", "env.txt"],
 )
 def test_ordinary_paths_are_not_flagged(tmp_path: Path, rel: str):
