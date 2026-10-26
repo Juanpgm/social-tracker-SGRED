@@ -277,25 +277,36 @@ class SourceRepositoryContract:
             assert len(matches) == 1
 
     def test_two_threads_creating_the_same_id_exactly_one_wins(self, repo: SourceRepository):
-        barrier = threading.Barrier(2)
-        outcomes: list[str] = []
+        # Repeated: a single race is easily won by luck, which let a repository without any
+        # locking slip through roughly one run in four.
         lock = threading.Lock()
+        for trial in range(TRIALS):
+            source_id = f"src_race{trial}"
+            barrier = threading.Barrier(2)
+            outcomes: list[object] = []
 
-        def worker(name: str):
-            source = make_source("src_one", name)
-            barrier.wait(timeout=5)
-            try:
-                repo.add(source)
-                result = "won"
-            except ConflictError:
-                result = "lost"
-            with lock:
-                outcomes.append(result)
+            def worker(
+                name: str,
+                source_id: str = source_id,
+                barrier=barrier,
+                outcomes=outcomes,
+            ):
+                source = make_source(source_id, f"{name} {source_id}")
+                barrier.wait(timeout=5)
+                try:
+                    repo.add(source)
+                    result: object = "won"
+                except ConflictError:
+                    result = "lost"
+                except Exception as exc:  # pragma: no cover - surfaced by the assert below
+                    result = exc
+                with lock:
+                    outcomes.append(result)
 
-        threads = [threading.Thread(target=worker, args=(n,)) for n in ("First", "Second")]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=10)
-        assert sorted(outcomes) == ["lost", "won"]
-        assert len(repo.list()) == 1
+            threads = [threading.Thread(target=worker, args=(n,)) for n in ("First", "Second")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+            assert sorted(map(str, outcomes)) == ["lost", "won"], outcomes
+            assert len([s for s in repo.list() if s.id == source_id]) == 1
