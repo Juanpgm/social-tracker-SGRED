@@ -10,6 +10,7 @@ IGNORED = [
     ".env",
     ".env.local",
     "data/risk.db",
+    "data/raw/posts.json",
     "secrets/token.txt",
     "session.cookies",
     "server.pem",
