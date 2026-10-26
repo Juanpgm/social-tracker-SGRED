@@ -155,6 +155,16 @@ def _forbidden_path_reason(rel: Path) -> str | None:
     return None
 
 
+def _symlink_reason(root: Path, path: Path) -> str | None:
+    """Flag symlinks that point outside the repository; links inside are never followed."""
+    try:
+        target = path.resolve(strict=True)
+        inside = target.is_relative_to(root.resolve())
+    except (OSError, RuntimeError):
+        return None  # dangling or looping link: nothing to read, nothing to leak
+    return None if inside else "symlink resolving outside the repository"
+
+
 def _read_text(path: Path) -> str | None:
     """Return file text, or None when the file should not be scanned."""
     try:
@@ -227,6 +237,11 @@ def find_violations(root: Path) -> list[str]:
     for rel in _candidate_files(root):
         label = rel.as_posix()
         reason = _forbidden_path_reason(rel)
+        if reason is None and (root / rel).is_symlink():
+            reason = _symlink_reason(root, root / rel)
+            if reason is not None:
+                violations.append(f"{label}: {reason}")
+            continue
         if reason is None:
             text = _read_text(root / rel)
             if text is not None:

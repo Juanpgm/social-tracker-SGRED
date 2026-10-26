@@ -17,6 +17,7 @@ from tests import hygiene
 from tests.hygiene import MAX_SCAN_BYTES, find_violations, scanned_files
 
 PW = "pass" + "word"
+_HUNTER = "hunter2" + "hunter2"
 TOK = "to" + "ken"
 KEY = "api" + "_key"
 
@@ -80,7 +81,16 @@ def test_forbidden_paths_are_matched_case_insensitively(tmp_path: Path, rel: str
 
 @pytest.mark.parametrize(
     "rel",
-    ["src/app.py", "docs/data.md", "src/pkg/data/__init__.py", "notes.cookies.md", "env.txt"],
+    [
+        "src/app.py",
+        "docs/data.md",
+        "src/pkg/data/__init__.py",
+        "notes.cookies.md",
+        "env.txt",
+        "data",
+        "secrets",
+        "pkg/data",
+    ],
 )
 def test_ordinary_paths_are_not_flagged(tmp_path: Path, rel: str):
     _write(tmp_path, rel, "x = 1\n")
@@ -162,7 +172,6 @@ def test_violations_are_reported_for_every_offending_file(tmp_path: Path):
 
 # --- realistic secret artifacts ---------------------------------------------------------
 
-_HUNTER = "hunter2" + "hunter2"
 _JWT = "ey" + "Jhbgc" + "iOiJIUzI1" + "." + "ey" + "Jzdwii" + "OiIxMjM0" + "." + "c2lnbmF0dXJl"
 _PEM_HEADER = "-----" + "BEGIN RSA PRIV" + "ATE KEY-----"
 _DB_URL = "postgres://" + "svc_user:" + "s3cr3tpw" + "@db.internal:5432/risk"
@@ -237,26 +246,46 @@ def test_structured_config_without_literal_secrets_is_not_flagged(tmp_path: Path
 # --- robustness ------------------------------------------------------------------------
 
 
+_SECRET_LINE = f'{PW} = "{_HUNTER}"\n'.encode()
+
+
 def test_binary_files_are_skipped_without_crashing(tmp_path: Path):
-    _write(tmp_path, "blob.bin", b"\x00\x01\x02" + f'{PW} = "hunter2hunter2"'.encode())
+    """A NUL after the first bytes (as in real binaries) marks the file as binary."""
+    _write(tmp_path, "blob.bin", b"\x7fELF\x02\x01\x00\x00" + _SECRET_LINE)
     assert find_violations(tmp_path) == []
+
+
+def test_nul_byte_at_the_end_of_the_sniff_window_still_means_binary(tmp_path: Path):
+    window = hygiene._BINARY_SNIFF_BYTES
+    _write(tmp_path, "edge.bin", _SECRET_LINE + b"a" * (window - len(_SECRET_LINE) - 1) + b"\x00")
+    assert find_violations(tmp_path) == []
+
+
+def test_nul_byte_after_the_sniff_window_is_treated_as_text(tmp_path: Path):
+    window = hygiene._BINARY_SNIFF_BYTES
+    _write(tmp_path, "late.txt", _SECRET_LINE + b"a" * (window - len(_SECRET_LINE)) + b"\x00")
+    assert find_violations(tmp_path)
 
 
 def test_non_utf8_files_are_skipped_without_crashing(tmp_path: Path):
-    _write(tmp_path, "latin.txt", b"caf\xe9 \xff\xfe broken bytes\n")
+    _write(tmp_path, "latin.txt", b"caf\xe9 \xff\xfe broken bytes\n" + _SECRET_LINE)
     assert find_violations(tmp_path) == []
 
 
-def test_files_over_the_size_guard_are_not_scanned(tmp_path: Path):
-    payload = f'{PW} = "hunter2hunter2"\n' + "a" * (MAX_SCAN_BYTES + 1)
-    _write(tmp_path, "huge.txt", payload)
-    assert find_violations(tmp_path) == []
+def _sized(total: int) -> bytes:
+    return _SECRET_LINE + b"a" * (total - len(_SECRET_LINE))
 
 
-def test_file_just_under_the_size_guard_is_scanned(tmp_path: Path):
-    line = f'{PW} = "hunter2hunter2"\n'
-    _write(tmp_path, "big.txt", line + "a" * (MAX_SCAN_BYTES - len(line) - 1))
+def test_file_of_exactly_the_size_guard_is_scanned(tmp_path: Path):
+    _write(tmp_path, "limit.txt", _sized(MAX_SCAN_BYTES))
+    assert (tmp_path / "limit.txt").stat().st_size == MAX_SCAN_BYTES
     assert find_violations(tmp_path)
+
+
+def test_file_one_byte_over_the_size_guard_is_not_scanned(tmp_path: Path):
+    _write(tmp_path, "huge.txt", _sized(MAX_SCAN_BYTES + 1))
+    assert (tmp_path / "huge.txt").stat().st_size == MAX_SCAN_BYTES + 1
+    assert find_violations(tmp_path) == []
 
 
 def test_tooling_directories_are_pruned(tmp_path: Path):
@@ -276,6 +305,65 @@ def test_unreadable_entries_do_not_crash(tmp_path: Path):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not permitted on this platform")
     assert find_violations(tmp_path) == []
+
+
+def _fake_symlink(monkeypatch: pytest.MonkeyPatch, name: str, resolves_to: Path | None) -> None:
+    """Make Path(name) look like a symlink; `resolves_to=None` means a dangling target."""
+    real_is_symlink = Path.is_symlink
+    real_resolve = Path.resolve
+
+    def is_symlink(self: Path) -> bool:
+        return self.name == name or real_is_symlink(self)
+
+    def resolve(self: Path, strict: bool = False) -> Path:
+        if self.name == name:
+            if resolves_to is None:
+                raise FileNotFoundError(str(self))
+            return resolves_to
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "is_symlink", is_symlink)
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+
+def test_symlink_resolving_outside_the_repository_is_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo = tmp_path / "repo"
+    _write(repo, "link.txt", "x = 1\n")
+    _fake_symlink(monkeypatch, "link.txt", tmp_path / "elsewhere" / "target.txt")
+    violations = find_violations(repo)
+    assert len(violations) == 1
+    assert "link.txt" in violations[0]
+    assert "symlink" in violations[0]
+
+
+def test_symlink_resolving_inside_the_repository_is_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo = tmp_path / "repo"
+    _write(repo, "link.txt", _SECRET_LINE)
+    _fake_symlink(monkeypatch, "link.txt", repo / "real.txt")
+    assert find_violations(repo) == []
+
+
+def test_dangling_symlink_is_skipped_not_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = tmp_path / "repo"
+    _write(repo, "link.txt", "x = 1\n")
+    _fake_symlink(monkeypatch, "link.txt", None)
+    assert find_violations(repo) == []
+
+
+def test_real_symlink_to_a_file_outside_the_repository_is_flagged(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x = 1\n", encoding="utf-8")
+    try:
+        os.symlink(outside, repo / "link.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted on this platform")
+    assert any("link.txt" in v for v in find_violations(repo))
 
 
 def test_read_errors_do_not_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
