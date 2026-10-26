@@ -11,14 +11,14 @@ from typing import Any
 import pytest
 
 from social_tracker.shared.errors import ConflictError, NotFoundError
-from social_tracker.sources.domain import SourceBase, parse_source
+from social_tracker.sources.domain import Source, parse_source
 from social_tracker.sources.ports import SourceRepository
 from tests.sources.factories import T0, payload
 
 TRIALS = 25
 
 
-def make_source(source_id: str = "src_one", name: str = "Some Source", **extra: Any) -> SourceBase:
+def make_source(source_id: str = "src_one", name: str = "Some Source", **extra: Any) -> Source:
     return parse_source(payload("news_rss", id=source_id, name=name, **extra))
 
 
@@ -96,6 +96,56 @@ class SourceRepositoryContract:
     def test_get_empty_id_raises_not_found(self, repo: SourceRepository):
         with pytest.raises(NotFoundError):
             repo.get("")
+
+    # ---- aliasing: the store owns its copy ----
+
+    def test_tampering_with_a_returned_source_cannot_change_the_stored_copy(
+        self, repo: SourceRepository
+    ):
+        repo.add(make_source())
+        got = repo.get("src_one")
+        object.__setattr__(got, "credibility", 1)  # bypasses the frozen guard on purpose
+        assert repo.get("src_one").credibility == 3
+
+    def test_tampering_with_the_added_source_cannot_change_the_stored_copy(
+        self, repo: SourceRepository
+    ):
+        source = make_source()
+        repo.add(source)
+        object.__setattr__(source, "name", "Hacked")
+        assert repo.get("src_one").name == "Some Source"
+        assert repo.find_by_name_ci("hacked") is None
+        assert repo.find_by_name_ci("some source") is not None
+
+    def test_tampering_with_the_updated_source_cannot_change_the_stored_copy(
+        self, repo: SourceRepository
+    ):
+        repo.add(make_source())
+        changed = make_source(credibility=5)
+        repo.update(changed)
+        object.__setattr__(changed, "credibility", 1)
+        assert repo.get("src_one").credibility == 5
+
+    def test_tampering_with_listed_and_found_sources_cannot_change_the_store(
+        self, repo: SourceRepository
+    ):
+        repo.add(make_source())
+        object.__setattr__(repo.list()[0], "credibility", 1)
+        found = repo.find_by_name_ci("some source")
+        assert found is not None
+        object.__setattr__(found, "credibility", 2)
+        assert repo.get("src_one").credibility == 3
+
+    def test_each_read_returns_an_independent_object(self, repo: SourceRepository):
+        repo.add(make_source())
+        assert repo.get("src_one") is not repo.get("src_one")
+
+    def test_with_changes_results_never_alias_the_stored_source(self, repo: SourceRepository):
+        repo.add(make_source())
+        changed = repo.get("src_one").with_changes(credibility=4)
+        assert repo.get("src_one").credibility == 3
+        repo.update(changed)
+        assert repo.get("src_one").credibility == 4
 
     # ---- list ----
 
