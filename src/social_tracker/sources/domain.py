@@ -27,6 +27,18 @@ from social_tracker.shared.ids import validate_slug
 
 MAX_URL_LENGTH = 2048
 MAX_PATH_LENGTH = 4096
+# Secret-looking URL parameter names. Long names match as substrings ("x-api-key",
+# "access_token"); short ambiguous ones only as whole tokens so "author" and "design" stay valid.
+# All patterns are linear: plain alternation or single bounded character classes.
+_SECRET_NAME_RE = re.compile(
+    r"password|passwd|token|secret|api[_-]?key|signature|session|cookie|access[_-]?key"
+    r"|authorization"
+)
+_SECRET_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+_SECRET_TOKENS = frozenset({"auth", "oauth", "sig", "pwd"})
+_PERCENT_RUN_RE = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+_QUERY_SEPARATOR_RE = re.compile(r"[&;]")
+_MAX_DECODE_PASSES = 3  # servers sometimes decode twice; "%2574oken" must not slip through
 HTTP_SCHEMES = frozenset({"http", "https"})
 STREAM_SCHEMES = frozenset({"http", "https", "rtmp", "icecast"})
 
@@ -57,6 +69,36 @@ def _has_control_chars(value: str) -> bool:
     return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
 
 
+def _percent_decode(text: str) -> str:
+    def decode_run(match: re.Match[str]) -> str:
+        raw = bytes.fromhex(match.group().replace("%", ""))
+        return raw.decode("utf-8", errors="replace")
+
+    for _ in range(_MAX_DECODE_PASSES):
+        decoded = _PERCENT_RUN_RE.sub(decode_run, text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
+
+
+def _is_secret_name(raw_name: str) -> bool:
+    name = unicodedata.normalize("NFKC", _percent_decode(raw_name)).casefold()
+    if _SECRET_NAME_RE.search(name):
+        return True
+    return any(tok in _SECRET_TOKENS for tok in _SECRET_TOKEN_SPLIT_RE.split(name))
+
+
+def _carries_secret_parameter(query: str, *, require_value: bool) -> bool:
+    for pair in _QUERY_SEPARATOR_RE.split(query):
+        name, sep, _ = pair.partition("=")
+        if require_value and not sep:
+            continue
+        if _is_secret_name(name):
+            return True
+    return False
+
+
 def _check_url(value: str, schemes: frozenset[str]) -> str:
     if len(value) > MAX_URL_LENGTH:
         raise ValueError(f"URL is longer than {MAX_URL_LENGTH} characters")
@@ -77,6 +119,13 @@ def _check_url(value: str, schemes: frozenset[str]) -> str:
         host = authority_text.split(":", 1)[0]
     if not host:
         raise ValueError("URL must have a host")
+    tail = rest[len(authority_text) :]
+    before_fragment, _, fragment = tail.partition("#")
+    _, _, query = before_fragment.partition("?")
+    if _carries_secret_parameter(query, require_value=False) or _carries_secret_parameter(
+        fragment, require_value=True
+    ):
+        raise ValueError("URL must not carry credentials in query parameters or fragment")
     return value
 
 
