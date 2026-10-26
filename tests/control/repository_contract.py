@@ -1,4 +1,14 @@
-"""Reusable contract for any `ControlRepository` implementation (fake now, SQLite in 1c)."""
+"""Reusable contract for any `ControlRepository` implementation (fake now, SQLite in 1c).
+
+Rules every implementation must honour (and that this suite pins):
+- Settings validation lives IN the repository: `validate_setting` / `validate_setting_key`
+  from the control domain are applied on every write and key lookup. A SQLite adapter must
+  do the same; the database is not trusted to enforce it.
+- `global_analysis_enabled` accepts only "true" or "false".
+- `save_source_state` does NOT check that the source exists: sources and control state live
+  in separate repositories with no cross-repository foreign key.
+- The event log is append-only and returned in append order, whatever the timestamps or kinds.
+"""
 
 import threading
 from datetime import UTC, datetime, timedelta
@@ -6,6 +16,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from social_tracker.control.domain import (
+    MAX_SETTING_KEY,
+    MAX_SETTING_VALUE,
     SETTING_GLOBAL_ANALYSIS_ENABLED,
     CollectionState,
     ControlEvent,
@@ -13,6 +25,13 @@ from social_tracker.control.domain import (
 )
 from social_tracker.control.ports import ControlRepository
 from social_tracker.shared.errors import ValidationError
+
+# The public surface of the port, read from the Protocol itself so it cannot drift.
+PORT_SURFACE = frozenset(
+    name
+    for name, member in vars(ControlRepository).items()
+    if not name.startswith("_") and callable(member)
+)
 
 AT = datetime(2026, 3, 1, 8, 0, tzinfo=UTC)
 
@@ -22,6 +41,10 @@ def event(kind: str = "paused", source_id: str | None = None, minutes: int = 0) 
 
 
 class ControlRepositoryContract:
+    # Extra public names an implementation may expose (for example `close` on a SQLite
+    # adapter). Subclasses may extend this; none of them may be able to alter the event log.
+    ALLOWED_EXTRA_PUBLIC: frozenset[str] = frozenset()
+
     def make_repo(self) -> ControlRepository:
         raise NotImplementedError
 
@@ -73,6 +96,46 @@ class ControlRepositoryContract:
             repo.set_setting("k_one", None)  # type: ignore[arg-type]
         assert repo.get_setting("k_one") == "ok"
 
+    def test_setting_key_boundaries(self, repo: ControlRepository):
+        edge = "k" * MAX_SETTING_KEY
+        repo.set_setting(edge, "v")
+        assert repo.get_setting(edge) == "v"
+        with pytest.raises(ValidationError):
+            repo.set_setting(edge + "k", "v")
+
+    @pytest.mark.parametrize("size", [MAX_SETTING_VALUE - 1, MAX_SETTING_VALUE])
+    def test_setting_value_up_to_the_limit_round_trips(self, repo: ControlRepository, size: int):
+        repo.set_setting("big_value", "v" * size)
+        assert repo.get_setting("big_value") == "v" * size
+
+    def test_setting_value_over_the_limit_is_rejected_and_keeps_the_old_one(
+        self, repo: ControlRepository
+    ):
+        repo.set_setting("big_value", "small")
+        with pytest.raises(ValidationError):
+            repo.set_setting("big_value", "v" * (MAX_SETTING_VALUE + 1))
+        assert repo.get_setting("big_value") == "small"
+
+    def test_non_string_key_is_rejected(self, repo: ControlRepository):
+        with pytest.raises(ValidationError):
+            repo.set_setting(5, "v")  # type: ignore[arg-type]
+        with pytest.raises(ValidationError):
+            repo.get_setting(None)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("value", ["true", "false"])
+    def test_global_analysis_accepts_only_true_or_false(self, repo: ControlRepository, value: str):
+        repo.set_setting(SETTING_GLOBAL_ANALYSIS_ENABLED, value)
+        assert repo.get_setting(SETTING_GLOBAL_ANALYSIS_ENABLED) == value
+
+    def test_global_analysis_rejects_other_values_and_keeps_the_old_one(
+        self, repo: ControlRepository
+    ):
+        repo.set_setting(SETTING_GLOBAL_ANALYSIS_ENABLED, "true")
+        for value in ["", "TRUE", "False", "1", "0", "yes", " true"]:
+            with pytest.raises(ValidationError):
+                repo.set_setting(SETTING_GLOBAL_ANALYSIS_ENABLED, value)
+            assert repo.get_setting(SETTING_GLOBAL_ANALYSIS_ENABLED) == "true"
+
     # ---- source state ----
 
     def test_missing_source_state_is_none(self, repo: ControlRepository):
@@ -100,6 +163,18 @@ class ControlRepositoryContract:
     def test_get_source_state_with_blank_id_is_none(self, repo: ControlRepository):
         assert repo.get_source_state("") is None
 
+    def test_saving_state_for_an_unregistered_source_is_allowed(self, repo: ControlRepository):
+        # No cross-repository foreign key: control state may exist before/without the source.
+        ghost = SourceState("src_ghost", CollectionState.IDLE)
+        repo.save_source_state(ghost)
+        assert repo.get_source_state("src_ghost") == ghost
+
+    def test_saving_state_does_not_touch_settings_or_events(self, repo: ControlRepository):
+        repo.append_control_event(event("a_kind"))
+        repo.save_source_state(SourceState("src_one", CollectionState.IDLE))
+        assert len(repo.list_control_events()) == 1
+        assert repo.get_setting(SETTING_GLOBAL_ANALYSIS_ENABLED) == "false"
+
     # ---- control events (append-only) ----
 
     def test_no_events_initially(self, repo: ControlRepository):
@@ -114,6 +189,43 @@ class ControlRepositoryContract:
         for e in (first, second, third):
             repo.append_control_event(e)
         assert repo.list_control_events() == [first, second, third]
+
+    def test_append_order_wins_over_timestamp_order_and_kind_order(self, repo: ControlRepository):
+        # Out-of-order timestamps, repeated timestamps and kinds in non-alphabetical order:
+        # sorting by `at` or by `kind` must produce a different list than append order.
+        appended = [
+            event("zulu", minutes=10),
+            event("mike", minutes=0),
+            event("alpha", minutes=10),
+            event("bravo", minutes=5),
+        ]
+        for e in appended:
+            repo.append_control_event(e)
+        assert repo.list_control_events() == appended
+
+    def test_same_timestamp_events_keep_append_order(self, repo: ControlRepository):
+        appended = [event("c_kind"), event("a_kind"), event("b_kind")]
+        for e in appended:
+            repo.append_control_event(e)
+        assert repo.list_control_events() == appended
+
+    def test_filtered_listing_keeps_append_order_too(self, repo: ControlRepository):
+        appended = [
+            event("zulu", "src_one", minutes=9),
+            event("noise", "src_two", minutes=1),
+            event("alpha", "src_one", minutes=2),
+            event("mike", "src_one", minutes=2),
+        ]
+        for e in appended:
+            repo.append_control_event(e)
+        assert repo.list_control_events("src_one") == [appended[0], appended[2], appended[3]]
+
+    def test_an_empty_source_filter_is_not_the_same_as_no_filter(self, repo: ControlRepository):
+        repo.append_control_event(event("global_kind"))
+        repo.append_control_event(event("scoped_kind", "src_one"))
+        assert repo.list_control_events("") == []
+        assert len(repo.list_control_events(None)) == 2
+        assert len(repo.list_control_events()) == 2
 
     def test_events_can_be_filtered_by_source(self, repo: ControlRepository):
         mine, other, global_ = (
@@ -141,15 +253,44 @@ class ControlRepositoryContract:
         repo.list_control_events().clear()
         assert len(repo.list_control_events()) == 1
 
-    def test_the_port_exposes_no_way_to_change_or_remove_events(self, repo: ControlRepository):
+    def test_the_implementation_exposes_nothing_beyond_the_port(self, repo: ControlRepository):
+        # An allow-list, not a blacklist of scary names: `purge_events`, `truncate_log` or any
+        # other public addition fails here, whatever it is called.
         public = {name for name in dir(repo) if not name.startswith("_")}
-        mutators = {
-            n
-            for n in public
-            if "event" in n
-            and n.split("_")[0] in {"update", "delete", "remove", "clear", "set", "edit"}
-        }
-        assert mutators == set()
+        assert public - PORT_SURFACE - self.ALLOWED_EXTRA_PUBLIC == set()
+
+    def test_the_port_surface_is_what_the_contract_expects(self):
+        assert {
+            "get_setting",
+            "set_setting",
+            "get_source_state",
+            "save_source_state",
+            "append_control_event",
+            "list_control_events",
+        } == PORT_SURFACE
+
+    def test_a_long_log_is_never_truncated(self, repo: ControlRepository):
+        appended = [event(f"kind_{i}", minutes=i) for i in range(250)]
+        for e in appended:
+            repo.append_control_event(e)
+        assert repo.list_control_events() == appended
+
+    def test_events_never_change_or_disappear_as_the_log_grows(self, repo: ControlRepository):
+        appended: list[ControlEvent] = []
+        for i in range(60):
+            e = event(f"kind_{i}", source_id="src_one" if i % 2 else None, minutes=60 - i)
+            repo.append_control_event(e)
+            appended.append(e)
+            if i % 7 == 0:
+                assert repo.list_control_events() == appended
+        assert repo.list_control_events() == appended
+
+    def test_other_writes_never_touch_the_log(self, repo: ControlRepository):
+        e = event("a_kind", "src_one")
+        repo.append_control_event(e)
+        repo.set_setting("some_key", "v")
+        repo.save_source_state(SourceState("src_one", CollectionState.COLLECTING))
+        assert repo.list_control_events() == [e]
 
     def test_appending_a_non_event_is_rejected(self, repo: ControlRepository):
         with pytest.raises(ValidationError):

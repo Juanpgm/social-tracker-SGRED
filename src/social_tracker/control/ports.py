@@ -10,8 +10,19 @@ class ControlRepository(Protocol):
     """Persistence port for settings, per-source runtime state and the control event log.
 
     Settings are string key/values; `global_analysis_enabled` defaults to "false" and unknown
-    keys read as None. The event log is append-only: there is deliberately no way to update
-    or delete an event.
+    keys read as None.
+
+    Validation is part of the contract and lives in the repository, not in the database:
+    every implementation (SQLite included) MUST apply `validate_setting` on `set_setting` and
+    `validate_setting_key` on `get_setting`, raising `ValidationError` and leaving the stored
+    value untouched. `global_analysis_enabled` accepts only "true" or "false".
+
+    `save_source_state` does NOT check that the source exists: sources and control state are
+    separate stores with no cross-repository foreign key.
+
+    The event log is append-only and listed in append order (never sorted by timestamp or
+    kind). There is deliberately no way to update or delete an event, and implementations must
+    not expose one under any name.
     """
 
     def get_setting(self, key: str) -> str | None: ...
@@ -27,5 +38,6 @@ class ControlRepository(Protocol):
     def append_control_event(self, event: ControlEvent) -> None: ...
 
     def list_control_events(self, source_id: str | None = None) -> list[ControlEvent]:
-        """Events in append order; filtered by source when `source_id` is given."""
+        """Events in append order. `None` means no filter; any other value, including the empty
+        string, filters by exactly that source id."""
         ...
