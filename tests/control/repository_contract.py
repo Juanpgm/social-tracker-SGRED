@@ -41,8 +41,10 @@ def event(kind: str = "paused", source_id: str | None = None, minutes: int = 0) 
 
 
 class ControlRepositoryContract:
-    # Extra public names an implementation may expose (for example `close` on a SQLite
-    # adapter). Subclasses may extend this; none of them may be able to alter the event log.
+    # Extra public names an implementation may expose. Empty for every implementation today:
+    # the SQLite adapter has no `close()` because the `Database` it is handed owns the
+    # connection and its lifecycle. A subclass that widens this must justify each name and
+    # show it cannot alter the event log.
     ALLOWED_EXTRA_PUBLIC: frozenset[str] = frozenset()
 
     def make_repo(self) -> ControlRepository:
