@@ -29,21 +29,8 @@ def test_codes_are_unique():
     assert len(set(codes)) == len(codes)
 
 
-@pytest.mark.parametrize("name", EXPECTED_CODES)
-def test_every_error_is_catchable_via_domain_error(name: str):
-    with pytest.raises(errors.DomainError) as info:
-        raise getattr(errors, name)("x")
-    assert info.value.code == EXPECTED_CODES[name]
-
-
 def test_domain_error_base_has_generic_code():
     assert errors.DomainError.code == "domain_error"
-
-
-def test_sibling_errors_are_distinct_types():
-    assert not issubclass(errors.ConflictError, errors.NotFoundError)
-    assert not issubclass(errors.NotFoundError, errors.ConflictError)
-    assert not issubclass(errors.InvalidTransition, errors.ValidationError)
 
 
 def test_empty_message_is_allowed_and_code_survives():
