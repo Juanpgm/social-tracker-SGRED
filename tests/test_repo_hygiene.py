@@ -135,6 +135,80 @@ def test_violations_are_reported_for_every_offending_file(tmp_path: Path):
     assert len(violations) == 2
 
 
+# --- realistic secret artifacts ---------------------------------------------------------
+
+_HUNTER = "hunter2" + "hunter2"
+_JWT = "ey" + "Jhbgc" + "iOiJIUzI1" + "." + "ey" + "Jzdwii" + "OiIxMjM0" + "." + "c2lnbmF0dXJl"
+_PEM_HEADER = "-----" + "BEGIN RSA PRIV" + "ATE KEY-----"
+_DB_URL = "postgres://" + "svc_user:" + "s3cr3tpw" + "@db.internal:5432/risk"
+
+SECRET_ARTIFACTS = [
+    pytest.param("config.yaml", f"{PW}: {_HUNTER}\n", id="yaml-lowercase-colon"),
+    pytest.param("settings.ini", f"{PW} = {_HUNTER}\n", id="ini-lowercase-equals"),
+    pytest.param("app.py", f'{PW} = """{_HUNTER}"""\n', id="py-triple-quoted"),
+    pytest.param("app.py", f'{PW} = f"{_HUNTER}{{suffix}}"\n', id="py-fstring"),
+    pytest.param("app.py", f'{PW} = ("{_HUNTER}")\n', id="py-parenthesised"),
+    pytest.param("app.py", f'H = {{"Authorization": "Bearer {_JWT}"}}\n', id="py-bearer-jwt"),
+    pytest.param("notes.txt", f"Authorization: Bearer {_JWT}\n", id="txt-bearer-header"),
+    pytest.param("app.py", f'SESSIONID = "{_HUNTER}"\n', id="py-sessionid"),
+    pytest.param("id_rsa", "x\n", id="path-id_rsa"),
+    pytest.param("server.pem", "x\n", id="path-pem"),
+    pytest.param(".netrc", "x\n", id="path-netrc"),
+    pytest.param("deploy/key.txt", f"{_PEM_HEADER}\nabc\n", id="content-private-key"),
+    pytest.param("app.py", f'URL = "{_DB_URL}"\n', id="py-db-url-inline-password"),
+    pytest.param("cookies.txt", "x\n", id="path-cookies-txt"),
+    pytest.param("auth/storage_state.json", "{}\n", id="path-storage-state"),
+    pytest.param("risk.sqlite", "x\n", id="path-sqlite-outside-data"),
+    pytest.param("local.db", "x\n", id="path-db-outside-data"),
+]
+
+
+@pytest.mark.parametrize(("rel", "content"), SECRET_ARTIFACTS)
+def test_realistic_secret_artifacts_are_flagged(tmp_path: Path, rel: str, content: str):
+    _write(tmp_path, rel, content)
+    violations = find_violations(tmp_path)
+    assert violations, rel
+    joined = " ".join(violations)
+    for leaked in (_HUNTER, _JWT, "s3cr3tpw"):
+        assert leaked not in joined, "must not leak value"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'TOKEN_URL = "https://x.example/oauth"',
+        'api_key_env = "SOCIAL_API_KEY"',
+        'secret_ref = "vault/social/api"',
+        'PASSWORD_ENV_VAR = "DB_PASSWORD"',
+        'COOKIE_NAME = "sid"',
+        'AUTHOR = "Jane Doe"',
+        'URL = "http://localhost:8080/path"',
+        'URL = "https://user@example.org/path"',
+        'URL = "https://user:${DB_PASS}@host/db"',
+        "Authorization = 'Bearer ' + value",
+        'session = "main"',
+    ],
+)
+def test_config_constants_and_env_var_names_are_not_flagged(tmp_path: Path, line: str):
+    _write(tmp_path, "src/settings.py", f"{line}\n")
+    assert find_violations(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"{PW}: null\n",
+        f"{PW}: ${{DB_PASSWORD}}\n",
+        f"{TOK}_url: https://x.example/oauth\n",
+        f"{KEY}_env: SOCIAL_API_KEY\n",
+        f"{PW}:\n",
+    ],
+)
+def test_structured_config_without_literal_secrets_is_not_flagged(tmp_path: Path, content: str):
+    _write(tmp_path, "config.yaml", content)
+    assert find_violations(tmp_path) == []
+
+
 # --- robustness ------------------------------------------------------------------------
 
 

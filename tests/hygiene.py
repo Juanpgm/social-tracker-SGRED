@@ -7,6 +7,7 @@ skips well-known tooling directories.
 Violation messages never include the offending value.
 """
 
+import fnmatch
 import os
 import re
 import subprocess
@@ -28,17 +29,43 @@ PRUNED_DIRS = frozenset(
     }
 )
 
-_KEYWORDS = r"(?:password|passwd|secret|token|api[_-]?key)"
+_SENSITIVE_KEY = re.compile(
+    r"(?i)password|passwd|secret|token|api[_-]?key|authorization"
+    r"|(?:^|[_.-])auth(?:$|[_.-])|bearer|cookie|session[_-]?id"
+)
+# Keys that name a reference to a secret (env var, vault path, URL...) rather than the secret.
+_BENIGN_KEY_SUFFIX = re.compile(
+    r"(?i)[_.-](?:ref|env|var|env_var|url|uri|name|file|path|header|endpoint|count|ttl|type|prefix)$"
+)
+# key = "literal" / key: 'literal' / "key": "literal" / key = f"..." / key = ("...") / triple quotes
+_ASSIGNMENT = re.compile(
+    r"""(?ix)
+    (?P<key>[\w.-]+) ["']? \s* [:=] \s* [frbu]{0,2} \(? \s*
+    (?:\"\"\"|'''|"|') (?P<val>[^"'\s]{3,}) ["']
+    """
+)
+# key = value / key: value on its own line (env, ini, yaml, toml style files)
+_UNQUOTED = re.compile(
+    r"""(?ix) ^\s* (?P<key>[\w.-]+) \s* (?P<sep>[:=]) \s* (?P<val>[^\s#'"]{3,}) \s* (?:\#.*)? $"""
+)
+_ENV_VAR_NAME = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+_URL_WITHOUT_CREDENTIALS = re.compile(r"(?i)^[a-z][a-z0-9+.-]*://[^@\s]*$")
+_NON_SECRET_WORDS = frozenset({"null", "none", "true", "false", "yes", "no"})
 
-# key = "literal" / key: 'literal' / "key": "literal" (quoted literal of 3+ chars)
-_QUOTED_CREDENTIAL = re.compile(
-    rf"""(?ix) {_KEYWORDS} [\w.-]* ["']? \s* [:=] \s* ["'] [^"'\s]{{3,}} ["']"""
+_CONTENT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key material"),
+    (re.compile(r"eyJ[\w-]+\.eyJ[\w-]+\."), "JWT-like token"),
+    (
+        re.compile(r"(?i)[a-z][a-z0-9+.-]*://[^\s/:@\"']+:(?![${<])[^\s/@\"']+@"),
+        "URL with inline credentials",
+    ),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"), "bearer token"),
 )
-# KEY=value in env/ini style files (uppercase keys, unquoted literal)
-_UNQUOTED_CREDENTIAL = re.compile(
-    rf"""(?x) ^\s* [A-Z0-9_]* {_KEYWORDS.upper()} [A-Z0-9_]* \s* = \s* [^\s#'"]{{3,}} \s*$""",
-)
+
 _CODE_SUFFIXES = frozenset({".py", ".pyi", ".md", ".rst", ".txt"})
+_COLON_SUFFIXES = frozenset({".yaml", ".yml", ".ini", ".cfg", ".toml", ".json"})
+_KEY_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx"})
+_PRIVATE_KEY_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
 
 
 def _is_pruned(parts: tuple[str, ...]) -> bool:
@@ -108,6 +135,18 @@ def _forbidden_path_reason(rel: Path) -> str | None:
         return "environment file"
     if name.endswith(".cookies"):
         return "cookies file"
+    if (
+        fnmatch.fnmatchcase(name, "cookies*.txt")
+        or fnmatch.fnmatchcase(name, "cookies*.json")
+        or fnmatch.fnmatchcase(name, "*storage_state*.json")
+    ):
+        return "browser session file"
+    if rel.suffix in _KEY_SUFFIXES or name.startswith(_PRIVATE_KEY_PREFIXES):
+        return "private key or certificate file"
+    if name == ".netrc":
+        return "netrc credentials file"
+    if fnmatch.fnmatchcase(name, "*.db") or fnmatch.fnmatchcase(name, "*.sqlite*"):
+        return "local database file"
     if "secrets" in parts[:-1]:
         return "file under a secrets directory"
     if parts[0] == "data" and len(parts) > 1:
@@ -142,13 +181,42 @@ def _env_example_reason(text: str) -> str | None:
     return None
 
 
+def _is_benign_value(value: str) -> bool:
+    return (
+        value.casefold() in _NON_SECRET_WORDS
+        or value.startswith(("$", "{", "<", "%("))
+        or _ENV_VAR_NAME.match(value) is not None
+        or _URL_WITHOUT_CREDENTIALS.match(value) is not None
+    )
+
+
+def _is_credential_assignment(key: str, value: str) -> bool:
+    return (
+        _SENSITIVE_KEY.search(key) is not None
+        and _BENIGN_KEY_SUFFIX.search(key) is None
+        and not _is_benign_value(value)
+    )
+
+
 def _credential_reason(rel: Path, text: str) -> str | None:
-    scan_unquoted = rel.suffix not in _CODE_SUFFIXES
+    suffix = rel.suffix.casefold()
+    scan_unquoted = suffix not in _CODE_SUFFIXES
+    allow_colon = suffix in _COLON_SUFFIXES
     for number, line in enumerate(text.splitlines(), start=1):
-        if _QUOTED_CREDENTIAL.search(line):
-            return f"line {number}: credential-like assignment with a literal value"
-        if scan_unquoted and _UNQUOTED_CREDENTIAL.match(line):
-            return f"line {number}: credential-like assignment with a literal value"
+        for pattern, reason in _CONTENT_RULES:
+            if pattern.search(line):
+                return f"line {number}: {reason}"
+        for match in _ASSIGNMENT.finditer(line):
+            if _is_credential_assignment(match["key"], match["val"]):
+                return f"line {number}: credential-like assignment with a literal value"
+        if scan_unquoted:
+            match = _UNQUOTED.match(line)
+            if (
+                match
+                and (match["sep"] == "=" or allow_colon)
+                and _is_credential_assignment(match["key"], match["val"])
+            ):
+                return f"line {number}: credential-like assignment with a literal value"
     return None
 
 
