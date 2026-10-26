@@ -34,8 +34,9 @@ class FixedClock:
         return self._now
 
     def advance(self, delta: timedelta) -> None:
-        if not isinstance(delta, timedelta):
-            raise ValidationError(f"advance() needs a timedelta, got {type(delta).__name__}")
         if delta < timedelta(0):
             raise ValidationError("clock cannot move backwards")
-        self._now = self._now + delta
+        try:
+            self._now = self._now + delta
+        except OverflowError:
+            raise ValidationError("clock overflow: the resulting time is out of range") from None

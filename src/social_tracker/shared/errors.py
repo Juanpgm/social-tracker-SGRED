@@ -12,7 +12,13 @@ class DomainError(Exception):
 
 
 class ValidationError(DomainError):
+    """Invalid input. `fields` lists the KNOWN field names involved (never user-supplied keys)."""
+
     code = "validation_error"
+
+    def __init__(self, message: str = "", fields: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.fields: tuple[str, ...] = tuple(fields)
 
 
 class ConflictError(DomainError):

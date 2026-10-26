@@ -50,3 +50,20 @@ def test_empty_message_is_allowed_and_code_survives():
     exc = errors.NotFoundError()
     assert exc.message == ""
     assert exc.code == "not_found"
+
+
+def test_validation_error_carries_known_field_names():
+    exc = errors.ValidationError("bad", fields=("id", "name"))
+    assert exc.fields == ("id", "name")
+    assert str(exc) == "bad"
+
+
+def test_validation_error_fields_default_to_empty_tuple():
+    assert errors.ValidationError("bad").fields == ()
+    assert errors.ValidationError().fields == ()
+
+
+def test_validation_error_fields_are_immutable_even_when_given_a_list():
+    exc = errors.ValidationError("bad", fields=["id"])  # type: ignore[arg-type]
+    assert exc.fields == ("id",)
+    assert isinstance(exc.fields, tuple)

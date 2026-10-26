@@ -1,6 +1,6 @@
 """Clock port: tz-aware UTC only, deterministic fixed clock, no silent time travel."""
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 
 import pytest
 
@@ -69,7 +69,28 @@ def test_advance_rejects_negative_delta_and_keeps_time():
     assert clock.now() == T0
 
 
-def test_advance_rejects_non_timedelta():
+def test_advance_overflow_is_a_domain_error_and_keeps_time():
     clock = FixedClock(T0)
-    with pytest.raises(ValidationError, match="timedelta"):
-        clock.advance(5)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="overflow"):
+        clock.advance(timedelta.max)
+    assert clock.now() == T0
+
+
+class _OffsetlessTz(tzinfo):
+    """An aware-looking tzinfo whose utcoffset() is None, which Python treats as naive."""
+
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
+
+    def tzname(self, dt):
+        return "offsetless"
+
+
+def test_ensure_utc_rejects_tzinfo_without_an_offset():
+    value = datetime(2026, 1, 1, 12, 0, tzinfo=_OffsetlessTz())
+    assert value.tzinfo is not None
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        ensure_utc(value)
