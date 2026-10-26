@@ -1,12 +1,13 @@
 """Fields shared by every source type: id, name, credibility, enabled, timestamps, mode."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from typing import get_type_hints
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from social_tracker.shared.errors import ValidationError
-from social_tracker.sources.domain import normalize_name, parse_source
+from social_tracker.sources.domain import Source, normalize_name, parse_source
 from tests.sources.factories import CANARY, T0, payload, without
 
 TYPES = ["news_rss", "instagram", "live_stream", "recorded_audio"]
@@ -53,7 +54,21 @@ def test_id_accepts_boundaries(slug: str):
 
 @pytest.mark.parametrize(
     "slug",
-    ["", "ab", "a" * 65, "Abc", "a-b", "a b", "café", "abc\n", None, 123],
+    [
+        "",
+        "ab",
+        "a" * 65,
+        "Abc",
+        "a-b",
+        "a b",
+        "café",
+        "abc\n",
+        None,
+        123,
+        b"src_one",
+        bytearray(b"src_one"),
+        True,
+    ],
 )
 def test_id_rejects_bad_slugs(slug):
     with pytest.raises(ValidationError, match="id"):
@@ -157,7 +172,30 @@ def test_timestamps_are_required(field: str):
 
 
 def test_aware_iso_string_is_accepted():
+    # Documented: ISO-8601 strings are accepted because config files and JSON carry them.
     assert parse_source(payload(created_at="2026-01-01T12:00:00Z")).created_at == T0
+    assert parse_source(payload(created_at="2026-01-01T15:00:00+03:00")).created_at == T0
+
+
+@pytest.mark.parametrize("field", ["created_at", "updated_at"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        1767268800,  # integer epoch
+        1767268800.5,  # float epoch
+        "1767268800",  # numeric string
+        True,
+        b"2026-01-01T12:00:00Z",  # bytes
+        None,
+        "",
+        "yesterday",
+        "2026-01-01",  # date only is naive
+        date(2026, 1, 1),
+    ],
+)
+def test_timestamps_reject_epochs_bytes_and_non_iso_text(field: str, bad):
+    with pytest.raises(ValidationError, match=field):
+        parse_source(payload(**{field: bad}))
 
 
 def test_updated_before_created_is_rejected():
@@ -263,3 +301,59 @@ def test_repeated_problems_on_one_field_are_listed_once():
     with pytest.raises(ValidationError) as info:
         parse_source(payload("recorded_audio", feed_url="", watch_dir=""))
     assert len(set(info.value.fields)) == len(info.value.fields)
+
+
+# ---- typing / with_changes ------------------------------------------------------------
+
+
+def test_parse_source_is_typed_as_the_source_union():
+    assert get_type_hints(parse_source)["return"] == Source
+
+
+def test_with_changes_returns_a_new_validated_source():
+    original = parse_source(payload(credibility=2))
+    changed = original.with_changes(credibility=5, name="Renamed")
+    assert changed is not original
+    assert (changed.credibility, changed.name) == (5, "Renamed")
+    assert original.credibility == 2
+    assert changed.id == original.id
+
+
+def test_with_changes_without_arguments_is_an_equal_copy():
+    original = parse_source(payload("instagram"))
+    assert original.with_changes() == original
+
+
+@pytest.mark.parametrize(
+    ("changes", "field"),
+    [
+        ({"credibility": 99}, "credibility"),
+        ({"name": ""}, "name"),
+        ({"id": "X"}, "id"),
+        ({"updated_at": T0 - timedelta(days=1)}, "updated_at"),
+        ({"enabled": "yes"}, "enabled"),
+        ({"surprise": 1}, "unknown field"),
+        ({"feed_url": "https://x.org/rss?api_key=1"}, "feed_url"),
+    ],
+)
+def test_with_changes_revalidates_like_parse_source(changes: dict, field: str):
+    original = parse_source(payload())
+    with pytest.raises(ValidationError, match=field):
+        original.with_changes(**changes)
+    assert original.credibility == 3  # the original is untouched
+
+
+def test_with_changes_keeps_per_type_rules():
+    ig = parse_source(payload("instagram"))
+    with pytest.raises(ValidationError, match="poll_interval_s"):
+        ig.with_changes(poll_interval_s=10)
+    audio = parse_source(payload("recorded_audio"))
+    with pytest.raises(ValidationError, match="exactly one"):
+        audio.with_changes(watch_dir="/data/audio")
+
+
+@pytest.mark.parametrize("type_", TYPES)
+def test_dump_and_json_round_trip_preserve_equality(type_: str):
+    source = parse_source(payload(type_))
+    assert parse_source(source.model_dump()) == source
+    assert parse_source(source.model_dump(mode="json")) == source

@@ -5,7 +5,16 @@ import time
 import pytest
 
 from social_tracker.shared.errors import ValidationError
-from social_tracker.sources.domain import parse_source
+from social_tracker.sources.domain import (
+    CHUNK_SECONDS_MAX,
+    CHUNK_SECONDS_MIN,
+    INSTAGRAM_MIN_POLL_S,
+    KEYWORD_MAX_LENGTH,
+    KEYWORDS_MAX_ITEMS,
+    NEWS_RSS_MIN_POLL_S,
+    RECORDED_AUDIO_MIN_POLL_S,
+    parse_source,
+)
 from tests.sources.factories import EMBEDDED_CREDENTIALS_URL, payload, without
 
 # ---- news_rss -------------------------------------------------------------------------
@@ -99,19 +108,49 @@ def test_url_check_on_one_megabyte_input_is_fast():
 
 def test_keywords_are_trimmed_and_optional():
     src = parse_source(payload("news_rss", keywords=[" fire ", "flood"]))
-    assert src.keywords == ["fire", "flood"]
+    assert src.keywords == ("fire", "flood")
 
 
-@pytest.mark.parametrize("keywords", [[""], ["  "], [1], "fire", ["a" * 101], ["k"] * 51, {"a": 1}])
+def test_keywords_are_stored_as_an_immutable_tuple():
+    src = parse_source(payload("news_rss", keywords=["a", "b"]))
+    assert isinstance(src.keywords, tuple)
+    assert not hasattr(src.keywords, "append")
+
+
+def test_keywords_accept_list_or_tuple_input():
+    assert parse_source(payload("news_rss", keywords=("a", "b"))).keywords == ("a", "b")
+
+
+def test_keywords_do_not_alias_the_caller_list():
+    raw = ["a"]
+    src = parse_source(payload("news_rss", keywords=raw))
+    raw.append("b")
+    assert src.keywords == ("a",)
+
+
+@pytest.mark.parametrize(
+    "keywords",
+    [[""], ["  "], [1], "fire", ["a" * 201], ["k"] * 201, {"a": 1}, {"a"}, b"ab", [None], 5],
+)
 def test_keywords_reject_bad_values(keywords):
     with pytest.raises(ValidationError, match="keywords"):
         parse_source(payload("news_rss", keywords=keywords))
 
 
-def test_keywords_accept_bounds():
-    assert parse_source(payload("news_rss", keywords=["k"] * 50)).keywords == ["k"] * 50
-    assert parse_source(payload("news_rss", keywords=["a" * 100])).keywords == ["a" * 100]
-    assert parse_source(payload("news_rss", keywords=[])).keywords == []
+def test_keywords_accept_generous_bounds():
+    assert KEYWORDS_MAX_ITEMS == 200
+    assert KEYWORD_MAX_LENGTH == 200
+    items = parse_source(payload("news_rss", keywords=["k"] * KEYWORDS_MAX_ITEMS)).keywords
+    assert items == ("k",) * KEYWORDS_MAX_ITEMS
+    longest = "a" * KEYWORD_MAX_LENGTH
+    assert parse_source(payload("news_rss", keywords=[longest])).keywords == (longest,)
+    assert parse_source(payload("news_rss", keywords=[])).keywords == ()
+
+
+def test_keywords_json_round_trip_uses_lists():
+    src = parse_source(payload("news_rss", keywords=["a", "b"]))
+    assert src.model_dump(mode="json")["keywords"] == ["a", "b"]
+    assert src.model_dump()["keywords"] == ("a", "b")
 
 
 # ---- instagram ------------------------------------------------------------------------
@@ -231,7 +270,40 @@ def test_live_stream_requires_stream_url():
         parse_source(without(payload("live_stream"), "stream_url"))
 
 
-@pytest.mark.parametrize("lang", ["", "  ", "x" * 17, None, 5])
+def test_documented_minimums_are_named_constants():
+    assert (NEWS_RSS_MIN_POLL_S, INSTAGRAM_MIN_POLL_S, RECORDED_AUDIO_MIN_POLL_S) == (120, 900, 1)
+    assert (CHUNK_SECONDS_MIN, CHUNK_SECONDS_MAX) == (10, 60)
+
+
+@pytest.mark.parametrize("lang", ["es", "en", "spa", "es-AR", "zh-Hant-TW", "en-US", "pt-BR"])
+def test_live_stream_language_accepts_bcp47_like_tags(lang: str):
+    assert parse_source(payload("live_stream", language=lang)).language == lang
+
+
+@pytest.mark.parametrize(
+    "lang",
+    [
+        "",
+        "  ",
+        "e",
+        "english",
+        "es_AR",
+        "es-",
+        "-es",
+        "es--AR",
+        "es-A",
+        "es-ARGENTINA9",
+        "e1",
+        "es AR",
+        " es",
+        "es\n",
+        "x" * 17,
+        "es-" + "a" * 40,
+        "és",
+        None,
+        5,
+    ],
+)
 def test_live_stream_language_rejects(lang):
     with pytest.raises(ValidationError, match="language"):
         parse_source(payload("live_stream", language=lang))
