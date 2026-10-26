@@ -177,7 +177,7 @@ def _symlink_reason(root: Path, path: Path) -> str | None:
 def _read_text(path: Path) -> str | None:
     """Return file text, or None when the file should not be scanned."""
     try:
-        if path.is_symlink() or path.stat().st_size > MAX_SCAN_BYTES:
+        if path.stat().st_size > MAX_SCAN_BYTES:
             return None
         raw = path.read_bytes()
     except OSError:
