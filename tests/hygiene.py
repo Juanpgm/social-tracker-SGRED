@@ -13,6 +13,13 @@ Scope and limits:
 - Detection is heuristic (path rules plus regexes); it cannot find encoded or split secrets.
 - Symlinks are never followed; those resolving outside the repository are reported.
 
+Known false negatives (by design, to keep false positives low and the scan cheap):
+- passwords containing spaces, and multi-line or encoded (base64, hex...) secrets;
+- keys that are very short (for example `pw`) or longer than 64 characters;
+- any line longer than `MAX_LINE_CHARS` is skipped entirely (minified one-line JSON dumps
+  included); this also bounds the cost of the regexes on pathological input;
+- purely numeric values (PINs) and the benign words in `_NON_SECRET_WORDS`.
+
 Violation messages never include the offending value.
 """
 
@@ -23,6 +30,7 @@ import subprocess
 from pathlib import Path
 
 MAX_SCAN_BYTES = 1_000_000
+MAX_LINE_CHARS = 4096
 _BINARY_SNIFF_BYTES = 8192
 
 PRUNED_DIRS = frozenset(
@@ -38,10 +46,14 @@ PRUNED_DIRS = frozenset(
     }
 )
 
+# Keywords must END on a word boundary (end of key or a `_`, `.`, `-` separator), so `max_tokens`
+# and `tokenizer` do not match `token`. camelCase keys are split first (see `_split_camel_case`).
 _SENSITIVE_KEY = re.compile(
-    r"(?i)password|passwd|secret|token|api[_-]?key|authorization"
-    r"|(?:^|[_.-])auth(?:$|[_.-])|bearer|cookie|session[_-]?id"
+    r"(?i)(?:password|passwd|secret|api[_-]?key|cookie)s?(?![a-z0-9])"
+    r"|(?:token|authorization|bearer|session[_-]?id)(?![a-z0-9])"
+    r"|(?<![a-z0-9])auth(?![a-z0-9])"
 )
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 # Keys that name a reference to a secret (env var, vault path, URL...) rather than the secret.
 _BENIGN_KEY_SUFFIX = re.compile(
     r"(?i)[_.-](?:ref|env|var|env_var|url|uri|name|file|path|header|endpoint|count|ttl|type|prefix)$"
@@ -49,26 +61,35 @@ _BENIGN_KEY_SUFFIX = re.compile(
 # key = "literal" / key: 'literal' / "key": "literal" / key = f"..." / key = ("...") / triple quotes
 _ASSIGNMENT = re.compile(
     r"""(?ix)
-    (?P<key>[\w.-]+) ["']? \s* [:=] \s* [frbu]{0,2} \(? \s*
+    (?<![\w.-]) (?P<key>[\w.-]{1,64}) ["']? \s* [:=] \s* [frbu]{0,2} \(? \s*
     (?:\"\"\"|'''|"|') (?P<val>[^"'\s]{3,}) ["']
     """
 )
 # key = value / key: value on its own line (env, ini, yaml, toml style files)
 _UNQUOTED = re.compile(
-    r"""(?ix) ^\s* (?P<key>[\w.-]+) \s* (?P<sep>[:=]) \s* (?P<val>[^\s#'"]{3,}) \s* (?:\#.*)? $"""
+    r"""(?ix)
+    ^\s* (?:export\s+)? (?P<key>[\w.-]{1,64}) \s* (?P<sep>[:=]) \s*
+    (?P<val>[^\s#'"]{3,}) \s* (?:\#.*)? $
+    """
 )
 _ENV_VAR_NAME = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
 _URL_WITHOUT_CREDENTIALS = re.compile(r"(?i)^[a-z][a-z0-9+.-]*://[^@\s]*$")
-_NON_SECRET_WORDS = frozenset({"null", "none", "true", "false", "yes", "no"})
+_NON_SECRET_WORDS = frozenset(
+    {"null", "none", "true", "false", "yes", "no", "inherit", "lax", "strict", "oauth2"}
+)
+_NUMBER = re.compile(r"^\d+(?:\.\d+)?$")
 
 _CONTENT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key material"),
-    (re.compile(r"eyJ[\w-]+\.eyJ[\w-]+\."), "JWT-like token"),
+    (re.compile(r"(?<![\w-])eyJ[\w-]{1,4096}\.eyJ[\w-]{1,4096}\."), "JWT-like token"),
     (
-        re.compile(r"(?i)[a-z][a-z0-9+.-]*://[^\s/:@\"']+:(?![${<])[^\s/@\"']+@"),
+        re.compile(
+            r"(?i)(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://[^\s/:@\"']{1,128}"
+            r":(?![${<])[^\s/@\"']{1,128}@"
+        ),
         "URL with inline credentials",
     ),
-    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"), "bearer token"),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16}"), "bearer token"),
 )
 
 _CODE_SUFFIXES = frozenset({".py", ".pyi", ".md", ".rst", ".txt"})
@@ -205,6 +226,7 @@ def _is_benign_value(value: str) -> bool:
     return (
         value.casefold() in _NON_SECRET_WORDS
         or value.startswith(("$", "{", "<", "%("))
+        or _NUMBER.match(value) is not None
         or _ENV_VAR_NAME.match(value) is not None
         or _URL_WITHOUT_CREDENTIALS.match(value) is not None
     )
@@ -212,7 +234,7 @@ def _is_benign_value(value: str) -> bool:
 
 def _is_credential_assignment(key: str, value: str) -> bool:
     return (
-        _SENSITIVE_KEY.search(key) is not None
+        _SENSITIVE_KEY.search(_CAMEL_BOUNDARY.sub("_", key)) is not None
         and _BENIGN_KEY_SUFFIX.search(key) is None
         and not _is_benign_value(value)
     )
@@ -223,6 +245,8 @@ def _credential_reason(rel: Path, text: str) -> str | None:
     scan_unquoted = suffix not in _CODE_SUFFIXES
     allow_colon = suffix in _COLON_SUFFIXES
     for number, line in enumerate(text.splitlines(), start=1):
+        if len(line) > MAX_LINE_CHARS:
+            continue  # documented limit: bounds regex cost on minified or hostile input
         for pattern, reason in _CONTENT_RULES:
             if pattern.search(line):
                 return f"line {number}: {reason}"

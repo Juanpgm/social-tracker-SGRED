@@ -9,6 +9,7 @@ not trip the very scanner it tests.
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,9 @@ PW = "pass" + "word"
 _HUNTER = "hunter2" + "hunter2"
 TOK = "to" + "ken"
 KEY = "api" + "_key"
+SEC_WORD = "sec" + "ret"
+CKIE_WORD = "coo" + "kie"
+AUTH_WORD = "Au" + "th"
 
 
 def _write(root: Path, rel: str, content: str | bytes = "") -> Path:
@@ -175,6 +179,7 @@ def test_violations_are_reported_for_every_offending_file(tmp_path: Path):
 # --- realistic secret artifacts ---------------------------------------------------------
 
 _JWT = "ey" + "Jhbgc" + "iOiJIUzI1" + "." + "ey" + "Jzdwii" + "OiIxMjM0" + "." + "c2lnbmF0dXJl"
+_OPAQUE = "q9Zx" + "L2mP4vB7nR1s"  # exactly 16 chars, no JWT shape
 _PEM_HEADER = "-----" + "BEGIN RSA PRIV" + "ATE KEY-----"
 _DB_URL = "postgres://" + "svc_user:" + "s3cr3tpw" + "@db.internal:5432/risk"
 
@@ -187,6 +192,10 @@ SECRET_ARTIFACTS = [
     pytest.param("app.py", f'H = {{"Authorization": "Bearer {_JWT}"}}\n', id="py-bearer-jwt"),
     pytest.param("notes.txt", f"Authorization: Bearer {_JWT}\n", id="txt-bearer-header"),
     pytest.param("app.py", f'SESSIONID = "{_HUNTER}"\n', id="py-sessionid"),
+    pytest.param("app.py", f"X = '{_JWT}'\n", id="py-bare-jwt-non-sensitive-key"),
+    pytest.param("dump.json", f'{{"x": "{_JWT}"}}\n', id="json-bare-jwt-non-sensitive-key"),
+    pytest.param("notes.txt", f"Authorization: Bearer {_OPAQUE}\n", id="txt-bearer-opaque"),
+    pytest.param("notes.txt", f"curl -H 'bearer {_OPAQUE}'\n", id="txt-bearer-lowercase"),
     pytest.param("id_rsa", "x\n", id="path-id_rsa"),
     pytest.param("server.pem", "x\n", id="path-pem"),
     pytest.param(".netrc", "x\n", id="path-netrc"),
@@ -207,6 +216,64 @@ def test_realistic_secret_artifacts_are_flagged(tmp_path: Path, rel: str, conten
     joined = " ".join(violations)
     for leaked in (_HUNTER, _JWT, "s3cr3tpw"):
         assert leaked not in joined, "must not leak value"
+
+
+# Keywords inside longer words and well-known benign values must not be flagged.
+BENIGN_STRUCTURED = [
+    pytest.param(".github/workflows/ci.yml", "secrets: inherit\n", id="gha-secrets-inherit"),
+    pytest.param("config.yaml", "max_tokens: 1024\n", id="yaml-max-tokens-number"),
+    pytest.param("config.yaml", "tokenizer: cl100k_base\n", id="yaml-tokenizer"),
+    pytest.param("settings.py", 'auth = "oauth2"\n', id="py-auth-oauth2"),
+    pytest.param("settings.py", 'csrf_cookie_samesite = "Lax"\n', id="py-cookie-samesite"),
+    pytest.param("settings.py", 'SESSION_COOKIE_SAMESITE = "Strict"\n', id="py-cookie-strict"),
+    pytest.param("settings.py", 'max_tokens = "2048"\n', id="py-max-tokens-quoted"),
+    pytest.param("settings.py", 'maxTokens = "gpt-4-turbo"\n', id="py-camelcase-max-tokens"),
+    pytest.param("config.toml", "token_limit = 4096\n", id="toml-numeric-value"),
+    pytest.param("config.yaml", "tokenizer_name: bert-base\n", id="yaml-tokenizer-name"),
+    pytest.param("config.yaml", "cookie_policy: none\n", id="yaml-none-value"),
+    pytest.param("settings.py", 'author = "janedoe123"' + chr(10), id="py-author-is-not-auth"),
+    pytest.param("settings.py", 'authority = "example"' + chr(10), id="py-authority"),
+    pytest.param("config.yaml", "passwordless: enabled" + chr(10), id="yaml-passwordless"),
+    pytest.param("settings.py", 'secretary = "janedoe123"' + chr(10), id="py-secretary"),
+]
+
+
+@pytest.mark.parametrize(("rel", "content"), BENIGN_STRUCTURED)
+def test_keywords_inside_longer_words_and_benign_values_are_not_flagged(
+    tmp_path: Path, rel: str, content: str
+):
+    _write(tmp_path, rel, content)
+    assert find_violations(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("rel", "content"),
+    [
+        pytest.param(
+            "settings.py", f'access{TOK.capitalize()} = "abcdef123456"\n', id="py-camelcase-token"
+        ),
+        pytest.param("settings.py", f'DB{PW.upper()} = "{_HUNTER}"\n', id="py-prefixed-password"),
+        pytest.param("config.yaml", f"client_{SEC_WORD}: abcdef123456\n", id="yaml-client-secret"),
+        pytest.param("config.yaml", f"{CKIE_WORD}: abcdef123456\n", id="yaml-cookie-literal"),
+        pytest.param("settings.py", f'user{AUTH_WORD} = "abcdef123456"\n', id="py-camelcase-auth"),
+        pytest.param("config.yaml", f"{SEC_WORD}s: abcdef123456\n", id="yaml-secrets-literal"),
+        pytest.param("run.sh", f"export {PW.upper()}={_HUNTER}\n", id="shell-export-password"),
+        pytest.param("run.sh", f"export {KEY.upper()}=abcdef123456\n", id="shell-export-key"),
+        pytest.param("CFG.YAML", f"{PW}: {_HUNTER}\n", id="uppercase-suffix-colon-secret"),
+    ],
+)
+def test_real_secrets_next_to_the_benign_cases_are_still_flagged(
+    tmp_path: Path, rel: str, content: str
+):
+    _write(tmp_path, rel, content)
+    assert find_violations(tmp_path), content
+
+
+def test_bearer_value_length_boundary(tmp_path: Path):
+    _write(tmp_path, "ok.txt", f"Authorization: Bearer {_OPAQUE[:15]}\n")
+    assert find_violations(tmp_path) == []
+    _write(tmp_path, "bad.txt", f"Authorization: Bearer {_OPAQUE}\n")
+    assert [v.split(":")[0] for v in find_violations(tmp_path)] == ["bad.txt"]
 
 
 @pytest.mark.parametrize(
@@ -377,6 +444,69 @@ def test_read_errors_do_not_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(Path, "read_bytes", deny)
     assert find_violations(tmp_path) == []
+
+
+# --- scan cost and line-length limit ----------------------------------------------------
+
+_LINE_LIMIT = hygiene.MAX_LINE_CHARS
+
+
+def _padded_secret_line(total: int) -> str:
+    base = f'{PW} = "{_HUNTER}"'
+    return base + " " * (total - len(base)) + "\n"
+
+
+def test_line_at_the_length_limit_is_still_scanned(tmp_path: Path):
+    _write(tmp_path, "edge.py", _padded_secret_line(_LINE_LIMIT))
+    assert find_violations(tmp_path)
+
+
+def test_line_over_the_length_limit_is_skipped(tmp_path: Path):
+    """Documented limit: lines longer than MAX_LINE_CHARS are not scanned."""
+    _write(tmp_path, "long.py", _padded_secret_line(_LINE_LIMIT + 1))
+    assert find_violations(tmp_path) == []
+
+
+def test_secret_on_the_line_after_a_skipped_long_line_is_still_found(tmp_path: Path):
+    _write(tmp_path, "mix.py", "a" * (_LINE_LIMIT + 10) + "\n" + _padded_secret_line(60))
+    assert find_violations(tmp_path)
+
+
+_PATHOLOGICAL_SHAPES = {
+    "a-run": lambda n: "a" * n,
+    "dotted": lambda n: "a." * (n // 2),
+    "keyword-run": lambda n: PW * (n // len(PW)),
+    "url-scheme": lambda n: "http://" + "a" * n,
+    "scheme-repeat": lambda n: "http://" * (n // 7),
+    "jwt-prefix-run": lambda n: ("ey" + "J") * (n // 3),
+    "bearer-run": lambda n: "bearer " * (n // 7),
+    "assign-run": lambda n: "a=" * (n // 2),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_PATHOLOGICAL_SHAPES))
+@pytest.mark.parametrize("suffix", [".py", ".yaml"])
+def test_single_megabyte_line_is_scanned_in_bounded_time(tmp_path: Path, shape: str, suffix: str):
+    line = _PATHOLOGICAL_SHAPES[shape](MAX_SCAN_BYTES)
+    _write(tmp_path, f"huge{suffix}", line)
+    started = time.perf_counter()
+    find_violations(tmp_path)
+    elapsed = time.perf_counter() - started
+    print(f"timing {shape}{suffix}: {elapsed:.4f}s")
+    assert elapsed < 2.0, f"{shape}: {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize("shape", sorted(_PATHOLOGICAL_SHAPES))
+def test_many_lines_just_under_the_limit_are_scanned_in_bounded_time(tmp_path: Path, shape: str):
+    """Worst case the line cap still allows: ~1 MB of lines of exactly MAX_LINE_CHARS."""
+    line = _PATHOLOGICAL_SHAPES[shape](_LINE_LIMIT)[:_LINE_LIMIT]
+    count = MAX_SCAN_BYTES // (_LINE_LIMIT + 1)
+    _write(tmp_path, "many.py", "\n".join([line] * count))
+    started = time.perf_counter()
+    find_violations(tmp_path)
+    elapsed = time.perf_counter() - started
+    print(f"timing many-lines {shape}: {elapsed:.4f}s")
+    assert elapsed < 2.0, f"{shape}: {elapsed:.2f}s"
 
 
 # --- git awareness ---------------------------------------------------------------------
