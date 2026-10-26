@@ -3,6 +3,30 @@ data/
 .env
 *.cookies
 secrets/
+.env.*
+!.env.example
+
+# Credentials, keys and browser/session state
+*.pem
+*.key
+*.p12
+id_rsa*
+.netrc
+cookies*.txt
+cookies*.json
+*storage_state*.json
+
+# Local databases, logs and audio artifacts
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.wav
+*.mp3
+*.m4a
+*.opus
+*.ogg
+*.flac
 
 # Python / tooling caches
 .venv/
