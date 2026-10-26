@@ -174,3 +174,51 @@ def analysis_effective(global_state: GlobalState | str, source_analysis_enabled:
     return _coerce(GlobalState, global_state, "global state") is GlobalState.ACTIVE and (
         source_analysis_enabled
     )
+
+
+# ---- control events and settings -------------------------------------------------------
+
+SETTING_GLOBAL_ANALYSIS_ENABLED = "global_analysis_enabled"
+DEFAULT_SETTINGS: dict[str, str] = {SETTING_GLOBAL_ANALYSIS_ENABLED: "false"}
+MAX_SETTING_KEY = 100
+MAX_SETTING_VALUE = 1000
+MAX_EVENT_KIND = 64
+MAX_EVENT_DETAIL = 2000
+
+
+def validate_setting(key: Any, value: Any) -> tuple[str, str]:
+    validate_setting_key(key)
+    if not isinstance(value, str) or len(value) > MAX_SETTING_VALUE:
+        raise ValidationError(f"setting value must be a string up to {MAX_SETTING_VALUE} chars")
+    return key, value
+
+
+def validate_setting_key(key: Any) -> str:
+    if not isinstance(key, str) or not key.strip() or len(key) > MAX_SETTING_KEY:
+        raise ValidationError(
+            f"setting key must be a non-blank string up to {MAX_SETTING_KEY} chars"
+        )
+    return key
+
+
+@dataclass(frozen=True)
+class ControlEvent:
+    """Immutable audit record of a control action (append-only log entry)."""
+
+    at: datetime
+    kind: str
+    source_id: str | None = None
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "at", ensure_utc(self.at))
+        if (
+            not isinstance(self.kind, str)
+            or not self.kind.strip()
+            or len(self.kind) > MAX_EVENT_KIND
+        ):
+            raise ValidationError(f"kind must be a non-blank string up to {MAX_EVENT_KIND} chars")
+        if self.source_id is not None:
+            validate_slug(self.source_id)
+        if not isinstance(self.detail, str) or len(self.detail) > MAX_EVENT_DETAIL:
+            raise ValidationError(f"detail must be a string up to {MAX_EVENT_DETAIL} chars")
