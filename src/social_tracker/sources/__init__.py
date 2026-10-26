@@ -1,0 +1,1 @@
+"""Source registry module."""
