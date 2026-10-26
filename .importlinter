@@ -1,0 +1,22 @@
+[importlinter]
+root_package = social_tracker
+include_external_packages = True
+
+[importlinter:contract:domain-purity]
+name = Domain modules must not depend on adapters, persistence, entrypoints or I/O libraries
+type = forbidden
+source_modules =
+    social_tracker.domain
+    social_tracker.**.domain
+forbidden_modules =
+    social_tracker.adapters
+    social_tracker.persistence
+    social_tracker.entrypoints
+    social_tracker.**.adapters
+    social_tracker.**.persistence
+    social_tracker.**.entrypoints
+    sqlite3
+    yaml
+    typer
+    httpx
+    requests
