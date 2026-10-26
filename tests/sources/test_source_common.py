@@ -3,10 +3,11 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from social_tracker.shared.errors import ValidationError
 from social_tracker.sources.domain import normalize_name, parse_source
-from tests.sources.factories import T0, payload, without
+from tests.sources.factories import CANARY, T0, payload, without
 
 TYPES = ["news_rss", "instagram", "live_stream", "recorded_audio"]
 
@@ -195,14 +196,46 @@ def test_explicit_matching_mode_is_accepted(type_: str, mode: str):
 
 
 @pytest.mark.parametrize("type_", TYPES)
-def test_unknown_extra_keys_are_rejected(type_: str):
-    with pytest.raises(ValidationError, match="surprise"):
+def test_unknown_extra_keys_are_rejected_with_a_generic_message(type_: str):
+    with pytest.raises(ValidationError, match="unknown field") as info:
         parse_source(payload(type_, surprise=1))
+    assert "surprise" not in str(info.value)
+    assert "surprise" not in info.value.fields
+
+
+def test_mistyped_secret_looking_key_is_never_echoed():
+    leaky = "my_pas" + "sword_typo"
+    with pytest.raises(ValidationError) as info:
+        parse_source(payload("news_rss", **{leaky: CANARY}))
+    assert leaky not in str(info.value)
+    assert leaky not in info.value.fields
+    assert CANARY not in str(info.value)
+
+
+def test_huge_unknown_key_does_not_inflate_the_error():
+    with pytest.raises(ValidationError) as info:
+        parse_source(payload("news_rss", **{"k" * 100_000: 1}))
+    assert len(info.value.message) < 200
+
+
+def test_unknown_key_next_to_a_known_problem_reports_only_the_known_field():
+    with pytest.raises(ValidationError) as info:
+        parse_source(payload("news_rss", surprise=1, credibility=9))
+    assert info.value.fields == ("credibility",)
+    assert "credibility" in info.value.message
+    assert "unknown field" in info.value.message
+
+
+def test_unknown_type_value_is_not_echoed():
+    bad_type = "tele" + "gram-" + CANARY
+    with pytest.raises(ValidationError, match="type") as info:
+        parse_source(payload(type=bad_type))
+    assert CANARY not in str(info.value)
 
 
 def test_source_is_immutable():
     source = parse_source(payload())
-    with pytest.raises(Exception, match="frozen"):
+    with pytest.raises(PydanticValidationError, match="frozen"):
         source.enabled = True  # type: ignore[misc]
 
 
@@ -211,3 +244,22 @@ def test_error_message_for_multiple_problems_lists_each_field():
         parse_source(payload(id="X", credibility=9))
     assert "id" in info.value.message
     assert "credibility" in info.value.message
+    assert info.value.fields == ("id", "credibility")
+
+
+def test_fields_name_the_top_level_field_for_nested_problems():
+    with pytest.raises(ValidationError) as info:
+        parse_source(payload("news_rss", keywords=["ok", ""]))
+    assert info.value.fields == ("keywords",)
+
+
+def test_problems_without_a_field_use_a_source_placeholder_and_no_fields():
+    with pytest.raises(ValidationError, match="<source>") as info:
+        parse_source("not a mapping")
+    assert info.value.fields == ()
+
+
+def test_repeated_problems_on_one_field_are_listed_once():
+    with pytest.raises(ValidationError) as info:
+        parse_source(payload("recorded_audio", feed_url="", watch_dir=""))
+    assert len(set(info.value.fields)) == len(info.value.fields)

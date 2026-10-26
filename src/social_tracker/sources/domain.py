@@ -242,12 +242,37 @@ SOURCE_TYPES: tuple[str, ...] = ("news_rss", "instagram", "live_stream", "record
 _ADAPTER: TypeAdapter[Any] = TypeAdapter(Source)
 
 
-def _format_errors(exc: _PydanticValidationError) -> str:
-    parts = []
+_KNOWN_FIELDS = frozenset(
+    name
+    for model in (NewsRssSource, InstagramSource, LiveStreamSource, RecordedAudioSource)
+    for name in model.model_fields
+)
+_UNKNOWN_FIELD_MESSAGE = "unknown field (not part of this source type)"
+
+
+def _describe_errors(exc: _PydanticValidationError) -> tuple[str, tuple[str, ...]]:
+    """Build a message and the KNOWN field names involved, without echoing user input.
+
+    Unknown keys and unknown type tags are user-controlled (a mistyped key may well be a
+    pasted secret), so they never reach the message or `fields`.
+    """
+    parts: dict[str, None] = {}
+    fields: dict[str, None] = {}
     for err in exc.errors(include_url=False, include_input=False, include_context=False):
         loc = [str(p) for p in err["loc"] if p not in SOURCE_TYPES]
-        parts.append(f"{'.'.join(loc) or '<source>'}: {err['msg']}")
-    return "; ".join(parts)
+        kind = err["type"]
+        if kind == "extra_forbidden":
+            parts[f"<source>: {_UNKNOWN_FIELD_MESSAGE}"] = None
+        elif kind == "union_tag_invalid":
+            parts[f"type: unknown source type; expected one of {', '.join(SOURCE_TYPES)}"] = None
+            fields["type"] = None
+        else:
+            parts[f"{'.'.join(loc) or '<source>'}: {err['msg']}"] = None
+            if kind == "union_tag_not_found":
+                fields["type"] = None
+            elif loc and loc[0] in _KNOWN_FIELDS:
+                fields[loc[0]] = None
+    return "; ".join(parts), tuple(fields)
 
 
 def parse_source(data: Any) -> SourceBase:
@@ -255,4 +280,5 @@ def parse_source(data: Any) -> SourceBase:
     try:
         return _ADAPTER.validate_python(data)
     except _PydanticValidationError as exc:
-        raise ValidationError(_format_errors(exc)) from None
+        message, fields = _describe_errors(exc)
+        raise ValidationError(message, fields) from None
