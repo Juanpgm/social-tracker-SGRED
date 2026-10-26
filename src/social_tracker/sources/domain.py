@@ -1,12 +1,12 @@
 """Source entity: a pydantic v2 discriminated union on `type`. Pure, no I/O.
 
-Credentials never live in a source: Instagram sources point at a secret by name
-(`secret_ref`) and any inline secret-looking key is rejected at any nesting depth.
+Credentials never live in a source: sources point at a secret by name (`secret_ref`).
+Every other unknown key is rejected by `extra="forbid"`; the model has no dict-typed
+fields, so there is no nested place for a credential to hide and no key blacklist to evade.
 """
 
 import re
 import unicodedata
-from collections.abc import Iterator, Mapping
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -29,11 +29,6 @@ MAX_URL_LENGTH = 2048
 MAX_PATH_LENGTH = 4096
 HTTP_SCHEMES = frozenset({"http", "https"})
 STREAM_SCHEMES = frozenset({"http", "https", "rtmp", "icecast"})
-
-# Linear-time patterns: plain alternation / single character classes, no nested quantifiers.
-_SECRET_KEY_RE = re.compile(r"password|token|cookie|session|secret|api[_-]?key", re.IGNORECASE)
-_LIVE_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
-_REF_FIELD = "secret_ref"
 
 
 # ---- helpers --------------------------------------------------------------------------
@@ -103,30 +98,6 @@ def _watch_dir(value: str) -> str:
     return value
 
 
-def _iter_keys(data: Any) -> Iterator[Any]:
-    """Yield every mapping key at any depth. Iterative and cycle-safe."""
-    stack = [data]
-    seen: set[int] = set()
-    while stack:
-        node = stack.pop()
-        if isinstance(node, Mapping):
-            if id(node) in seen:
-                continue
-            seen.add(id(node))
-            for key, child in node.items():
-                yield key
-                stack.append(child)
-        elif isinstance(node, list | tuple | set | frozenset):
-            if id(node) in seen:
-                continue
-            seen.add(id(node))
-            stack.extend(node)
-
-
-def _shorten(key: str) -> str:
-    return key if len(key) <= 64 else key[:64] + "..."
-
-
 # ---- field types ----------------------------------------------------------------------
 
 Slug = Annotated[str, AfterValidator(_slug)]
@@ -162,17 +133,6 @@ class SourceBase(_PydanticBase):
     created_at: Timestamp
     updated_at: Timestamp
 
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_inline_secrets(cls, data: Any) -> Any:
-        for key in _iter_keys(data):
-            if isinstance(key, str) and key != _REF_FIELD and _SECRET_KEY_RE.search(key):
-                raise ValueError(
-                    f"inline secret key not allowed: {_shorten(key)!r}; "
-                    f"reference secrets by name with {_REF_FIELD!r}"
-                )
-        return data
-
     @model_validator(mode="after")
     def _check_timestamps(self) -> "SourceBase":
         if self.updated_at < self.created_at:
@@ -200,17 +160,6 @@ class InstagramSource(SourceBase):
     include_stories: bool = Field(default=True, strict=True)
     include_posts: bool = Field(default=True, strict=True)
     poll_interval_s: int = Field(default=1800, strict=True, ge=900)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_lives(cls, data: Any) -> Any:
-        for key in _iter_keys(data):
-            if not isinstance(key, str):
-                continue
-            lowered = key.lower()
-            if "lives" in lowered or "live" in _LIVE_TOKEN_SPLIT_RE.split(lowered):
-                raise ValueError(f"Instagram Lives are not supported (field {_shorten(key)!r})")
-        return data
 
 
 class LiveStreamSource(SourceBase):

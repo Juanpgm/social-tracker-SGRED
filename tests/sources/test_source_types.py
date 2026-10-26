@@ -180,8 +180,9 @@ def test_instagram_flags_can_be_disabled_and_must_be_bool(flag: str):
     "key", ["include_lives", "lives", "live", "includeLives", "INCLUDE_LIVES", "live_capture"]
 )
 @pytest.mark.parametrize("value", [True, False])
-def test_instagram_lives_are_rejected_with_a_clear_message(key: str, value: bool):
-    with pytest.raises(ValidationError, match="Instagram Lives"):
+def test_instagram_has_no_lives_option(key: str, value: bool):
+    # Lives are out of scope: any such key is an unknown field, never a supported toggle.
+    with pytest.raises(ValidationError):
         parse_source(payload("instagram", **{key: value}))
 
 
