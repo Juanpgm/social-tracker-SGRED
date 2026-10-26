@@ -288,6 +288,22 @@ def test_events_come_back_in_insertion_order_not_timestamp_order(repo):
     assert repo.list_control_events() == appended
 
 
+def test_event_listing_states_its_order_explicitly(repo, db):
+    # SQLite only guarantees an order when asked for one; relying on rowid scan order would be
+    # an accident of the query planner, so the SQL itself must say ORDER BY id.
+    repo.append_control_event(event("a_kind", "src_a"))
+    statements: list[str] = []
+    db._conn.set_trace_callback(statements.append)  # type: ignore[union-attr]
+    try:
+        repo.list_control_events()
+        repo.list_control_events("src_a")
+    finally:
+        db._conn.set_trace_callback(None)  # type: ignore[union-attr]
+    selects = [s for s in statements if "FROM control_events" in s]
+    assert len(selects) == 2
+    assert all(s.rstrip().endswith("ORDER BY id") for s in selects), selects
+
+
 def test_source_filter_is_exact(repo):
     repo.append_control_event(event("g_kind"))
     repo.append_control_event(event("a_kind", "src_a"))

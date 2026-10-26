@@ -2,6 +2,7 @@
 
 import json
 import threading
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -232,6 +233,23 @@ def test_every_type_specific_field_round_trips(repo, overrides):
     assert repo.get(source.id).model_dump() == source.model_dump()
 
 
+EXPECTED_CONFIG_KEYS = {
+    "news_rss": {"feed_url", "poll_interval_s", "keywords"},
+    "instagram": {"handle", "include_stories", "include_posts", "poll_interval_s"},
+    "live_stream": {"stream_url", "chunk_seconds", "language"},
+    "recorded_audio": {"feed_url", "watch_dir", "poll_interval_s"},
+}
+
+
+@pytest.mark.parametrize("type_", sorted(EXPECTED_CONFIG_KEYS))
+def test_config_json_holds_exactly_the_type_specific_fields(repo, db, type_):
+    repo.add(parse_source(payload(type_, id="src_cfg", name="cfg")))
+    stored = json.loads(db.query("SELECT config_json FROM sources")[0][0])
+    assert set(stored) == EXPECTED_CONFIG_KEYS[type_]
+    text = db.query("SELECT config_json FROM sources")[0][0]
+    assert text == json.dumps(stored, sort_keys=True)  # canonical, so stored text is stable
+
+
 def test_common_fields_round_trip_including_disabled_and_enabled(repo):
     on = make_source("src_on", "On", enabled=True, credibility=5)
     off = make_source("src_off", "Off", enabled=False, credibility=1)
@@ -248,6 +266,19 @@ def test_timestamps_keep_microseconds(repo):
     repo.add(make_source(created_at=moment, updated_at=moment))
     got = repo.get("src_one")
     assert (got.created_at, got.updated_at) == (moment, moment)
+
+
+def test_created_and_updated_timestamps_are_stored_in_their_own_columns(repo, db):
+    created, updated = T0, T0 + timedelta(hours=5, microseconds=7)
+    repo.add(make_source(created_at=created, updated_at=updated))
+    got = repo.get("src_one")
+    assert (got.created_at, got.updated_at) == (created, updated)
+    later = updated + timedelta(days=1)
+    repo.update(make_source(created_at=created, updated_at=later))
+    got = repo.get("src_one")
+    assert (got.created_at, got.updated_at) == (created, later)
+    row = db.query("SELECT created_at, updated_at FROM sources")[0]
+    assert tuple(row) == ("2026-01-01T12:00:00+00:00", "2026-01-02T17:00:00.000007+00:00")
 
 
 def test_update_replaces_the_whole_type_specific_payload(repo):
