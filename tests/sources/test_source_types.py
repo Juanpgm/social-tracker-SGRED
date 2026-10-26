@@ -50,6 +50,13 @@ def test_news_rss_requires_feed_url():
         "https://exa mple.org/feed",
         "https://example.org/fe\ned",
         "https://example.org/" + "a" * 2100,
+        "file://localhost/etc/passwd",
+        "javascript://example.org/%0aalert(1)",
+        "https://[]:8080/x",
+        "https://[",
+        "https://example.org/a\x00b",
+        "https://example.org/a\x07b",
+        "https://example.org/a\x7fb",
         None,
         42,
     ],
@@ -65,6 +72,20 @@ def test_news_rss_rejects_bad_urls(url):
 )
 def test_news_rss_accepts_http_and_https(url: str):
     assert parse_source(payload("news_rss", feed_url=url)).feed_url == url
+
+
+def test_url_length_boundary():
+    prefix = "https://example.org/"
+    at_limit = prefix + "a" * (2048 - len(prefix))
+    assert parse_source(payload("news_rss", feed_url=at_limit)).feed_url == at_limit
+    with pytest.raises(ValidationError, match="longer than"):
+        parse_source(payload("news_rss", feed_url=at_limit + "a"))
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_url_is_reported_as_blank(blank: str):
+    with pytest.raises(ValidationError, match="blank"):
+        parse_source(payload("news_rss", feed_url=blank))
 
 
 def test_url_check_on_one_megabyte_input_is_fast():
@@ -261,10 +282,21 @@ def test_recorded_audio_blank_feed_url_rejected(blank: str):
         parse_source(payload("recorded_audio", feed_url=blank))
 
 
-@pytest.mark.parametrize("bad", ["/data/\x00x", "/data/a\nb", 5])
+@pytest.mark.parametrize("bad", ["/data/\x00x", "/data/a\nb", "/data/\x1fx", "/data/\x7fx", 5])
 def test_recorded_audio_watch_dir_rejects_control_chars_and_non_str(bad):
     with pytest.raises(ValidationError, match="watch_dir"):
         parse_source(without(payload("recorded_audio", watch_dir=bad), "feed_url"))
+
+
+def test_watch_dir_length_boundary_and_space_allowed():
+    ok = "/" + "d" * 4095
+    got = parse_source(without(payload("recorded_audio", watch_dir=ok), "feed_url"))
+    assert got.watch_dir == ok
+    spaced = "/data/my audio"
+    got = parse_source(without(payload("recorded_audio", watch_dir=spaced), "feed_url"))
+    assert got.watch_dir == spaced
+    with pytest.raises(ValidationError, match="longer than"):
+        parse_source(without(payload("recorded_audio", watch_dir=ok + "d"), "feed_url"))
 
 
 def test_recorded_audio_feed_url_scheme_checked():

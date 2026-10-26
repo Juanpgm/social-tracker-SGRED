@@ -74,6 +74,12 @@ def test_error_message_never_echoes_the_secret_value():
     assert "password" in info.value.message
 
 
+def test_very_long_offending_key_is_truncated_in_the_message():
+    with pytest.raises(ValidationError) as info:
+        parse_source(payload("news_rss", **{"password" + "x" * 10_000: 1}))
+    assert len(info.value.message) < 500
+
+
 def test_self_referencing_input_does_not_hang():
     loop: dict = {}
     loop["me"] = loop

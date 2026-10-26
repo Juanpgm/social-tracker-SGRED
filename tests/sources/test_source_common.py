@@ -72,7 +72,9 @@ def test_name_is_trimmed_before_the_length_check():
     assert parse_source(payload(name=padded)).name == "a" * 100
 
 
-@pytest.mark.parametrize("name", ["", " ", "\t\n  ", "a" * 101, "  " + "a" * 101 + "  ", None, 7])
+@pytest.mark.parametrize(
+    "name", ["", " ", "\t\n  ", "a" * 101, "  " + "a" * 101 + "  ", None, 7, b"bytes-name"]
+)
 def test_name_rejects_bad_values(name):
     with pytest.raises(ValidationError, match="name"):
         parse_source(payload(name=name))
