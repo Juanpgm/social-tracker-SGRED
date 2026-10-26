@@ -1,0 +1,17 @@
+# Runtime data and secrets
+data/
+.env
+*.cookies
+secrets/
+
+# Python / tooling caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.import_linter_cache/
+.hypothesis/
+*.egg-info/
+dist/
+build/
