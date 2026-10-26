@@ -16,7 +16,7 @@ from social_tracker.shared.ids import validate_slug
 
 MAX_CONSECUTIVE_FAILURES = 5
 BACKOFF_BASE_S = 60
-BACKOFF_CAP_S = 3600
+BACKOFF_CAP_S = 3600  # hard upper bound on the FINAL delay, jitter included
 _MAX_EXPONENT = 12  # 60 * 2**12 is far above the cap; avoids huge integers for big inputs
 
 
@@ -52,6 +52,16 @@ def _coerce[E: StrEnum](enum_cls: type[E], value: Any, what: str) -> E:
 
 @dataclass(frozen=True)
 class SourceState:
+    """Runtime state of one source.
+
+    Invariants enforced at construction (so no persisted or hand-built state can be incoherent):
+    - `BACKOFF` <=> `next_run_at` is set.
+    - `FAILED` <=> `consecutive_failures == MAX_CONSECUTIVE_FAILURES`; every other state has
+      strictly fewer.
+    - `DISABLED` always has 0 failures: disabling zeroes them (as does `RESET`/`SUCCEED`), so
+      re-enabling a source starts it from a clean slate.
+    """
+
     source_id: str
     state: CollectionState
     consecutive_failures: int = 0
@@ -63,6 +73,14 @@ class SourceState:
         failures = self.consecutive_failures
         if not isinstance(failures, int) or isinstance(failures, bool) or failures < 0:
             raise ValidationError("consecutive_failures must be a non-negative integer")
+        if (failures == MAX_CONSECUTIVE_FAILURES) != (self.state is CollectionState.FAILED):
+            raise ValidationError(
+                f"consecutive_failures is {MAX_CONSECUTIVE_FAILURES} only in failed"
+            )
+        if failures > MAX_CONSECUTIVE_FAILURES:
+            raise ValidationError(f"consecutive_failures cannot exceed {MAX_CONSECUTIVE_FAILURES}")
+        if self.state is CollectionState.DISABLED and failures != 0:
+            raise ValidationError("consecutive_failures must be 0 while disabled")
         if self.next_run_at is not None:
             object.__setattr__(self, "next_run_at", ensure_utc(self.next_run_at))
         if (self.state is CollectionState.BACKOFF) != (self.next_run_at is not None):
@@ -93,7 +111,7 @@ def _check_jitter(jitter_s: Any) -> float:
 
 
 def backoff_delay_s(failures_before: int, jitter_s: float = 0.0) -> float:
-    """Seconds to wait after a failure: 60 * 2**n capped at 3600, plus injected jitter."""
+    """Seconds to wait after a failure: `60 * 2**n + jitter`, never more than `BACKOFF_CAP_S`."""
     if (
         not isinstance(failures_before, int)
         or isinstance(failures_before, bool)
@@ -102,20 +120,23 @@ def backoff_delay_s(failures_before: int, jitter_s: float = 0.0) -> float:
         raise ValidationError("failure count must be a non-negative integer")
     jitter = _check_jitter(jitter_s)
     exponent = min(failures_before, _MAX_EXPONENT)
-    return float(min(BACKOFF_BASE_S * 2**exponent, BACKOFF_CAP_S)) + jitter
+    return min(float(BACKOFF_BASE_S * 2**exponent) + jitter, float(BACKOFF_CAP_S))
 
 
 def _noop(current: SourceState) -> TransitionResult:
     return TransitionResult(current, changed=False)
 
 
-def _moved(current: SourceState, state: CollectionState, **fields: Any) -> TransitionResult:
-    new = SourceState(
-        current.source_id,
-        state,
-        fields.get("consecutive_failures", current.consecutive_failures),
-        fields.get("next_run_at"),
-    )
+def _moved(
+    current: SourceState,
+    state: CollectionState,
+    *,
+    failures: int,
+    next_run_at: datetime | None = None,
+) -> TransitionResult:
+    """Build the successor state. Nothing is inherited implicitly: `failures` is always passed
+    and `next_run_at` is None unless the new state is BACKOFF."""
+    new = SourceState(current.source_id, state, failures, next_run_at)
     return TransitionResult(new, changed=True)
 
 
@@ -130,33 +151,34 @@ def apply_event(
 
     if event is Event.ENABLE:
         if state is S.DISABLED:
-            return _moved(current, S.IDLE, consecutive_failures=0)
+            return _moved(current, S.IDLE, failures=0)
         return _noop(current)
     if event is Event.DISABLE:
         if state is S.DISABLED:
             return _noop(current)
-        return _moved(current, S.DISABLED, consecutive_failures=0)
+        return _moved(current, S.DISABLED, failures=0)
     if event is Event.START and state is S.IDLE:
-        return _moved(current, S.COLLECTING)
+        return _moved(current, S.COLLECTING, failures=current.consecutive_failures)
     if event is Event.SUCCEED and state is S.COLLECTING:
-        return _moved(current, S.IDLE, consecutive_failures=0)
+        return _moved(current, S.IDLE, failures=0)
     if event is Event.FAIL and state is S.COLLECTING:
+        jitter = _check_jitter(jitter_s)  # validated whatever the outcome, even into FAILED
         failures = current.consecutive_failures + 1
         if failures >= MAX_CONSECUTIVE_FAILURES:
-            return _moved(current, S.FAILED, consecutive_failures=failures)
-        delay = backoff_delay_s(current.consecutive_failures, jitter_s)
+            return _moved(current, S.FAILED, failures=failures)
+        delay = backoff_delay_s(current.consecutive_failures, jitter)
         return _moved(
             current,
             S.BACKOFF,
-            consecutive_failures=failures,
+            failures=failures,
             next_run_at=now + timedelta(seconds=delay),
         )
     if event is Event.RETRY and state is S.BACKOFF:
         if current.next_run_at is not None and now >= current.next_run_at:
-            return _moved(current, S.IDLE)
+            return _moved(current, S.IDLE, failures=current.consecutive_failures)
         raise InvalidTransition("cannot leave backoff before next_run_at")
     if event is Event.RESET and state is S.FAILED:
-        return _moved(current, S.IDLE, consecutive_failures=0)
+        return _moved(current, S.IDLE, failures=0)
     raise InvalidTransition(f"cannot apply {event.value!r} while {state.value}")
 
 
@@ -179,6 +201,7 @@ def analysis_effective(global_state: GlobalState | str, source_analysis_enabled:
 # ---- control events and settings -------------------------------------------------------
 
 SETTING_GLOBAL_ANALYSIS_ENABLED = "global_analysis_enabled"
+BOOLEAN_SETTING_VALUES = frozenset({"true", "false"})  # exact, lowercase: "TRUE"/"1" are invalid
 DEFAULT_SETTINGS: dict[str, str] = {SETTING_GLOBAL_ANALYSIS_ENABLED: "false"}
 MAX_SETTING_KEY = 100
 MAX_SETTING_VALUE = 1000
@@ -186,19 +209,27 @@ MAX_EVENT_KIND = 64
 MAX_EVENT_DETAIL = 2000
 
 
+def _require_text(value: Any, what: str, max_len: int, *, non_blank: bool) -> str:
+    """The one place that checks 'a string of at most `max_len` chars (optionally non-blank)'."""
+    if not isinstance(value, str) or len(value) > max_len or (non_blank and not value.strip()):
+        qualifier = "a non-blank string" if non_blank else "a string"
+        raise ValidationError(f"{what} must be {qualifier} up to {max_len} chars")
+    return value
+
+
 def validate_setting(key: Any, value: Any) -> tuple[str, str]:
+    """Validate a setting pair. Repositories MUST apply this on write (SQLite included)."""
     validate_setting_key(key)
-    if not isinstance(value, str) or len(value) > MAX_SETTING_VALUE:
-        raise ValidationError(f"setting value must be a string up to {MAX_SETTING_VALUE} chars")
+    _require_text(value, "setting value", MAX_SETTING_VALUE, non_blank=False)
+    if key == SETTING_GLOBAL_ANALYSIS_ENABLED and value not in BOOLEAN_SETTING_VALUES:
+        raise ValidationError(
+            f"setting value for {key} must be one of: {', '.join(sorted(BOOLEAN_SETTING_VALUES))}"
+        )
     return key, value
 
 
 def validate_setting_key(key: Any) -> str:
-    if not isinstance(key, str) or not key.strip() or len(key) > MAX_SETTING_KEY:
-        raise ValidationError(
-            f"setting key must be a non-blank string up to {MAX_SETTING_KEY} chars"
-        )
-    return key
+    return _require_text(key, "setting key", MAX_SETTING_KEY, non_blank=True)
 
 
 @dataclass(frozen=True)
@@ -212,13 +243,7 @@ class ControlEvent:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "at", ensure_utc(self.at))
-        if (
-            not isinstance(self.kind, str)
-            or not self.kind.strip()
-            or len(self.kind) > MAX_EVENT_KIND
-        ):
-            raise ValidationError(f"kind must be a non-blank string up to {MAX_EVENT_KIND} chars")
+        _require_text(self.kind, "kind", MAX_EVENT_KIND, non_blank=True)
         if self.source_id is not None:
             validate_slug(self.source_id)
-        if not isinstance(self.detail, str) or len(self.detail) > MAX_EVENT_DETAIL:
-            raise ValidationError(f"detail must be a string up to {MAX_EVENT_DETAIL} chars")
+        _require_text(self.detail, "detail", MAX_EVENT_DETAIL, non_blank=False)

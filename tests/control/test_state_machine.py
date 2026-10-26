@@ -1,5 +1,6 @@
 """Pure control state machine: transitions, no-ops, backoff, failure counting, gates."""
 
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -24,8 +25,11 @@ E = Event
 
 
 def state(
-    s: CollectionState, failures: int = 0, next_run_at: datetime | None = None
+    s: CollectionState, failures: int | None = None, next_run_at: datetime | None = None
 ) -> SourceState:
+    """A coherent state: FAILED always carries the maximum failure count."""
+    if failures is None:
+        failures = MAX_CONSECUTIVE_FAILURES if s is S.FAILED else 0
     if s is S.BACKOFF and next_run_at is None:
         next_run_at = NOW + timedelta(seconds=60)
     return SourceState("src_one", s, failures, next_run_at)
@@ -120,10 +124,18 @@ def test_state_strings_are_coerced():
 # ---- specific rules --------------------------------------------------------------------
 
 
-def test_enable_resets_failure_bookkeeping():
-    result = apply_event(state(S.DISABLED, failures=3), E.ENABLE, NOW)
-    assert result.state.consecutive_failures == 0
-    assert result.state.next_run_at is None
+def test_enable_starts_from_a_clean_slate():
+    result = apply_event(state(S.DISABLED), E.ENABLE, NOW)
+    assert result.state == SourceState("src_one", S.IDLE, 0, None)
+
+
+@pytest.mark.parametrize("start", [S.IDLE, S.COLLECTING, S.BACKOFF, S.FAILED])
+def test_disable_zeroes_failures_so_a_reenabled_source_starts_fresh(start: CollectionState):
+    # Documented decision: DISABLED always carries 0 failures; disable and reset both zero them.
+    failures = None if start is S.FAILED else 3
+    disabled = apply_event(state(start, failures=failures), E.DISABLE, NOW)
+    assert disabled.state.consecutive_failures == 0
+    assert apply_event(disabled.state, E.ENABLE, NOW).state.consecutive_failures == 0
 
 
 def test_disable_clears_backoff_schedule_and_failures():
@@ -226,10 +238,31 @@ def test_non_datetime_now_is_rejected():
         apply_event(state(S.IDLE), E.START, "2026-03-01")  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("jitter", [-0.001, float("nan"), float("inf"), True, "1", None])
-def test_invalid_jitter_is_rejected_on_failure(jitter):
+@pytest.mark.parametrize("jitter", [-0.001, -1, float("nan"), float("inf"), True, "1", None])
+@pytest.mark.parametrize("prior", [0, 3, MAX_CONSECUTIVE_FAILURES - 1])
+def test_invalid_jitter_is_rejected_on_every_failure_outcome(prior: int, jitter):
+    # prior == MAX-1 goes to FAILED, where jitter is unused: it must still be validated.
     with pytest.raises(ValidationError, match="jitter"):
-        apply_event(state(S.COLLECTING), E.FAIL, NOW, jitter_s=jitter)
+        apply_event(state(S.COLLECTING, failures=prior), E.FAIL, NOW, jitter_s=jitter)
+
+
+def test_rejected_failure_leaves_the_input_state_untouched():
+    current = state(S.COLLECTING, failures=MAX_CONSECUTIVE_FAILURES - 1)
+    with pytest.raises(ValidationError):
+        apply_event(current, E.FAIL, NOW, jitter_s=-1)
+    assert current.consecutive_failures == MAX_CONSECUTIVE_FAILURES - 1
+
+
+def test_valid_jitter_is_accepted_when_the_failure_ends_in_failed():
+    result = apply_event(
+        state(S.COLLECTING, failures=MAX_CONSECUTIVE_FAILURES - 1), E.FAIL, NOW, jitter_s=12.5
+    )
+    assert result.state.state is S.FAILED
+
+
+def test_failure_delay_never_exceeds_the_cap_even_with_jitter():
+    result = apply_event(state(S.COLLECTING, failures=3), E.FAIL, NOW, jitter_s=10_000)
+    assert result.state.next_run_at == NOW + timedelta(seconds=BACKOFF_CAP_S)
 
 
 # ---- SourceState invariants ------------------------------------------------------------
@@ -253,14 +286,52 @@ def test_backoff_requires_next_run_at():
 
 @pytest.mark.parametrize("other", [S.DISABLED, S.IDLE, S.COLLECTING, S.FAILED])
 def test_only_backoff_may_carry_next_run_at(other: CollectionState):
+    failures = MAX_CONSECUTIVE_FAILURES if other is S.FAILED else 0
     with pytest.raises(ValidationError, match="next_run_at"):
-        SourceState("src_one", other, 0, NOW)
+        SourceState("src_one", other, failures, NOW)
 
 
 @pytest.mark.parametrize("bad", ["", "Bad Id", "ab", None])
 def test_source_id_must_be_a_slug(bad):
     with pytest.raises(ValidationError):
         SourceState(bad, S.IDLE)  # type: ignore[arg-type]
+
+
+# Coherent combinations: DISABLED has no failures, FAILED has exactly the maximum,
+# every other state has strictly fewer than the maximum.
+VALID_COMBOS = [
+    (S.DISABLED, 0),
+    (S.IDLE, 0),
+    (S.IDLE, MAX_CONSECUTIVE_FAILURES - 1),
+    (S.COLLECTING, 0),
+    (S.COLLECTING, MAX_CONSECUTIVE_FAILURES - 1),
+    (S.BACKOFF, 1),
+    (S.BACKOFF, MAX_CONSECUTIVE_FAILURES - 1),
+    (S.FAILED, MAX_CONSECUTIVE_FAILURES),
+]
+INVALID_COMBOS = [
+    (S.DISABLED, 3),
+    (S.DISABLED, 1),
+    (S.IDLE, 99),
+    (S.IDLE, MAX_CONSECUTIVE_FAILURES),
+    (S.COLLECTING, MAX_CONSECUTIVE_FAILURES),
+    (S.COLLECTING, MAX_CONSECUTIVE_FAILURES + 1),
+    (S.BACKOFF, MAX_CONSECUTIVE_FAILURES),
+    (S.FAILED, 0),
+    (S.FAILED, MAX_CONSECUTIVE_FAILURES - 1),
+    (S.FAILED, MAX_CONSECUTIVE_FAILURES + 1),
+]
+
+
+@pytest.mark.parametrize(("which", "failures"), VALID_COMBOS)
+def test_coherent_state_and_failure_combinations_are_accepted(which, failures):
+    assert state(which, failures=failures).consecutive_failures == failures
+
+
+@pytest.mark.parametrize(("which", "failures"), INVALID_COMBOS)
+def test_incoherent_state_and_failure_combinations_are_rejected(which, failures):
+    with pytest.raises(ValidationError, match="consecutive_failures"):
+        state(which, failures=failures)
 
 
 def test_source_state_is_immutable():
@@ -288,9 +359,22 @@ def test_huge_exponent_does_not_blow_up():
     assert backoff_delay_s(10**12) == 3600
 
 
-def test_jitter_is_added_after_the_cap():
-    assert backoff_delay_s(100, jitter_s=7.5) == 3607.5
+def test_cap_applies_after_jitter_so_the_final_delay_never_exceeds_it():
+    # Decision: BACKOFF_CAP_S bounds the FINAL delay (spec: capped at 3600 s), jitter included.
+    assert backoff_delay_s(100, jitter_s=7.5) == BACKOFF_CAP_S
+    assert backoff_delay_s(6, jitter_s=1e9) == BACKOFF_CAP_S
+
+
+def test_jitter_below_the_cap_is_added_as_is():
     assert backoff_delay_s(0, jitter_s=0.5) == 60.5
+    assert backoff_delay_s(5, jitter_s=100) == 2020  # 1920 + 100
+
+
+@pytest.mark.parametrize(
+    ("jitter", "expected"), [(1679.0, 3599.0), (1680.0, 3600.0), (1681.0, 3600.0)]
+)
+def test_cap_boundary_with_jitter(jitter: float, expected: float):
+    assert backoff_delay_s(5, jitter_s=jitter) == expected  # base delay 1920
 
 
 @pytest.mark.parametrize("n", [-1, -100, True, 1.5, "2", None])
@@ -303,6 +387,56 @@ def test_invalid_exponent_is_rejected(n):
 def test_invalid_jitter_value_is_rejected(jitter):
     with pytest.raises(ValidationError, match="jitter"):
         backoff_delay_s(1, jitter_s=jitter)
+
+
+# ---- results are values -------------------------------------------------------------------
+
+
+def test_transition_result_is_frozen():
+    result = apply_event(state(S.IDLE), E.START, NOW)
+    with pytest.raises(FrozenInstanceError):
+        result.changed = False  # type: ignore[misc]
+
+
+def test_global_result_is_frozen():
+    result = apply_global(GlobalState.ACTIVE, "paused")
+    with pytest.raises(FrozenInstanceError):
+        result.state = GlobalState.ACTIVE  # type: ignore[misc]
+
+
+# ---- persisted wire strings (unit 1c stores these verbatim) --------------------------------
+
+
+def test_collection_state_wire_strings_are_pinned():
+    assert {s.name: s.value for s in S} == {
+        "DISABLED": "disabled",
+        "IDLE": "idle",
+        "COLLECTING": "collecting",
+        "BACKOFF": "backoff",
+        "FAILED": "failed",
+    }
+
+
+def test_global_state_wire_strings_are_pinned():
+    assert {s.name: s.value for s in GlobalState} == {"ACTIVE": "active", "PAUSED": "paused"}
+
+
+def test_event_wire_strings_are_pinned():
+    assert {e.name: e.value for e in E} == {
+        "ENABLE": "enable",
+        "DISABLE": "disable",
+        "START": "start",
+        "SUCCEED": "succeed",
+        "FAIL": "fail",
+        "RETRY": "retry",
+        "RESET": "reset",
+    }
+
+
+@pytest.mark.parametrize("member", [*S, *GlobalState])
+def test_enum_members_round_trip_through_their_string_value(member):
+    assert type(member)(member.value) is member
+    assert str(member) == member.value
 
 
 # ---- global state and analysis gate ----------------------------------------------------

@@ -6,6 +6,10 @@ import pytest
 
 from social_tracker.control.domain import (
     DEFAULT_SETTINGS,
+    MAX_EVENT_DETAIL,
+    MAX_EVENT_KIND,
+    MAX_SETTING_KEY,
+    MAX_SETTING_VALUE,
     SETTING_GLOBAL_ANALYSIS_ENABLED,
     ControlEvent,
     validate_setting,
@@ -87,3 +91,45 @@ def test_bad_setting_value_rejected(value):
 
 def test_empty_setting_value_is_allowed():
     assert validate_setting("k", "") == ("k", "")
+
+
+@pytest.mark.parametrize("size", [MAX_SETTING_VALUE - 1, MAX_SETTING_VALUE])
+def test_setting_value_boundary_accepted(size: int):
+    assert validate_setting("k", "v" * size) == ("k", "v" * size)
+
+
+def test_setting_value_over_the_boundary_rejected():
+    with pytest.raises(ValidationError, match="value"):
+        validate_setting("k", "v" * (MAX_SETTING_VALUE + 1))
+
+
+def test_documented_limits():
+    assert (MAX_SETTING_KEY, MAX_SETTING_VALUE) == (100, 1000)
+    assert (MAX_EVENT_KIND, MAX_EVENT_DETAIL) == (64, 2000)
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_global_analysis_accepts_only_lowercase_booleans(value: str):
+    assert validate_setting(SETTING_GLOBAL_ANALYSIS_ENABLED, value) == (
+        SETTING_GLOBAL_ANALYSIS_ENABLED,
+        value,
+    )
+
+
+@pytest.mark.parametrize(
+    "value", ["", "TRUE", "False", "1", "0", "yes", " true", "true\n", "maybe"]
+)
+def test_global_analysis_rejects_everything_else(value: str):
+    with pytest.raises(ValidationError, match=SETTING_GLOBAL_ANALYSIS_ENABLED):
+        validate_setting(SETTING_GLOBAL_ANALYSIS_ENABLED, value)
+
+
+def test_other_settings_are_free_form_strings():
+    assert validate_setting("other_key", "maybe") == ("other_key", "maybe")
+
+
+def test_blank_event_kind_and_detail_rules_differ():
+    # `kind` must be non-blank; `detail` may be empty or blank.
+    assert ControlEvent(at=AT, kind="paused", detail="   ").detail == "   "
+    with pytest.raises(ValidationError, match="kind"):
+        ControlEvent(at=AT, kind="   ")
