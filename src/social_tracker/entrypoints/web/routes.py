@@ -42,7 +42,14 @@ from social_tracker.shared.errors import (
     ValidationError,
 )
 from social_tracker.shared.ids import is_valid_slug
-from social_tracker.sources.domain import SOURCE_TYPES, Source
+from social_tracker.sources.domain import (
+    CHUNK_SECONDS_MAX,
+    CHUNK_SECONDS_MIN,
+    INSTAGRAM_MIN_POLL_S,
+    NEWS_RSS_MIN_POLL_S,
+    SOURCE_TYPES,
+    Source,
+)
 
 router = APIRouter(dependencies=[Depends(read_form)])
 Form = Annotated[dict[str, str], Depends(read_form)]
@@ -354,3 +361,16 @@ def delete_source(request: Request, source_id: str, form: Form) -> Response:
     except NotFoundError:
         return _redirect("not_found")
     return _redirect("deleted")
+
+
+@router.get("/howto", response_class=HTMLResponse)
+def howto(request: Request) -> HTMLResponse:
+    return render(
+        request,
+        "howto.html",
+        types=TYPE_LABELS,
+        news_poll_min=NEWS_RSS_MIN_POLL_S,
+        instagram_poll_min=INSTAGRAM_MIN_POLL_S,
+        chunk_min=CHUNK_SECONDS_MIN,
+        chunk_max=CHUNK_SECONDS_MAX,
+    )

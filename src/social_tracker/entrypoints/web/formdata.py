@@ -11,7 +11,7 @@ from fastapi import Request
 from starlette.exceptions import HTTPException
 
 from social_tracker.entrypoints.web.pages import WebContext
-from social_tracker.entrypoints.web.security import CSRF_COOKIE, CSRF_FIELD
+from social_tracker.entrypoints.web.security import CSRF_COOKIE_NAME, CSRF_FIELD
 
 MAX_BODY_BYTES = 16 * 1024
 MAX_FIELDS = 100
@@ -56,6 +56,6 @@ async def read_form(request: Request) -> dict[str, str]:
     for key, value in pairs:
         form.setdefault(key, value)
     ctx: WebContext = request.app.state.ctx
-    if not ctx.tokens.valid(request.cookies.get(CSRF_COOKIE), form.get(CSRF_FIELD)):
+    if not ctx.tokens.valid(request.cookies.get(CSRF_COOKIE_NAME), form.get(CSRF_FIELD)):
         raise HTTPException(403)
     return form

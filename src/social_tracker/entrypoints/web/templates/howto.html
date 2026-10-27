@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}How-to{% endblock %}
+{% block content %}
+<h1>How to register a source</h1>
+<p>Pick the type that matches where the content comes from. Nothing is collected until you enable the source, and nothing is ever published or sent anywhere.</p>
+<ul>
+{% for type, label in types.items() %}<li><a href="#{{ type }}">{{ label }}</a></li>{% endfor %}
+</ul>
+
+<section id="news_rss" aria-labelledby="h-news_rss">
+<h2 id="h-news_rss">News RSS feed</h2>
+<h3>What to enter</h3>
+<p>The address of an RSS or Atom feed (http or https) and a name. Optionally a list of keywords, one per line, to focus on.</p>
+<h3>Example</h3>
+<p><code>https://example.org/rss.xml</code></p>
+<h3>Limits</h3>
+<p>The feed is checked at most every {{ news_poll_min }} seconds (default 600). Addresses that embed a login or a secret in the query string are refused, and so are file: addresses.</p>
+<p><a href="/sources/new/news_rss">Add a news feed</a></p>
+</section>
+
+<section id="instagram" aria-labelledby="h-instagram">
+<h2 id="h-instagram">Instagram account</h2>
+<h3>What to enter</h3>
+<p>The account handle (letters, digits, dots, underscores) and a secret reference, which names where the login is kept: <code>env:NAME</code> (an environment variable), <code>keyring:NAME</code> or <code>file:NAME</code>. Never type the password into this form.</p>
+<h3>Example</h3>
+<p>Handle <code>some.handle</code>, reference <code>env:IG_MAIN</code>.</p>
+<h3>Limits</h3>
+<p>Collection from Instagram is best-effort: it can stop working without notice and is checked at most every {{ instagram_poll_min }} seconds. Use a dedicated account, not a personal one. Posts and stories only: no Lives. The credentials stay on this machine, in the place the reference points to, and are never tracked by git or shown in this interface.</p>
+<p><a href="/sources/new/instagram">Add an Instagram account</a></p>
+</section>
+
+<section id="live_stream" aria-labelledby="h-live_stream">
+<h2 id="h-live_stream">Live audio stream</h2>
+<h3>What to enter</h3>
+<p>The address of a direct audio stream (http, https, rtmp or icecast), such as a radio station's stream. A web page that plays the stream is not enough: the address must serve the audio itself.</p>
+<h3>Example</h3>
+<p><code>https://example.org/live.m3u8</code></p>
+<h3>Limits</h3>
+<p>Audio is cut into chunks of {{ chunk_min }} to {{ chunk_max }} seconds (default 30). The language is a tag such as <code>es</code>. Video-only or login-protected streams do not work.</p>
+<p><a href="/sources/new/live_stream">Add a live stream</a></p>
+</section>
+
+<section id="recorded_audio" aria-labelledby="h-recorded_audio">
+<h2 id="h-recorded_audio">Recorded audio</h2>
+<h3>What to enter</h3>
+<p>Either the address of a podcast-style feed or the path of a local directory that holds audio files. Give one of them, not both.</p>
+<h3>Example</h3>
+<p><code>https://example.org/podcast.xml</code> or <code>/srv/audio/incoming</code></p>
+<h3>Limits</h3>
+<p>Files are processed in batches, not in real time. Common audio formats such as MP3, M4A, WAV, OGG and FLAC are expected; a file that cannot be decoded is skipped.</p>
+<p><a href="/sources/new/recorded_audio">Add recorded audio</a></p>
+</section>
+{% endblock %}

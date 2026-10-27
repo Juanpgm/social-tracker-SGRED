@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from social_tracker.entrypoints.web.app import create_app
 from social_tracker.entrypoints.web.formdata import MAX_BODY_BYTES, MAX_FIELDS
 from social_tracker.entrypoints.web.routes import router
-from social_tracker.entrypoints.web.security import CSRF_COOKIE, CSRF_FIELD
+from social_tracker.entrypoints.web.security import CSRF_COOKIE_NAME, CSRF_FIELD
 from tests.entrypoints.web.conftest import BASE, TOKEN_FIELD, Web
 
 SOURCE_ID = "src_one"
@@ -82,11 +82,11 @@ def test_a_token_from_before_a_restart_is_refused(web: Web):
 
 
 def test_a_forged_or_malformed_cookie_is_replaced_and_gets_no_access(web: Web):
-    web.client.cookies.set(CSRF_COOKIE, "short")
+    web.client.cookies.set(CSRF_COOKIE_NAME, "short")
     token = web.csrf()  # the page issued a fresh cookie, so this token matches it
     assert web.post("/analysis", {"on": "1"}, token=token).status_code == 303
     attacker = TestClient(web.client.app, base_url=BASE)
-    attacker.cookies.set(CSRF_COOKIE, "A" * 43)
+    attacker.cookies.set(CSRF_COOKIE_NAME, "A" * 43)
     assert attacker.post("/analysis", data={CSRF_FIELD: token}).status_code == 403
 
 
@@ -98,7 +98,7 @@ def test_the_token_works_more_than_once_in_a_session_for_several_tabs(web: Web):
 
 def test_the_cookie_is_http_only_and_same_site_strict(web: Web):
     cookie = web.client.get("/").headers["set-cookie"].lower()
-    assert CSRF_COOKIE in cookie
+    assert CSRF_COOKIE_NAME in cookie
     assert "httponly" in cookie
     assert "samesite=strict" in cookie
 

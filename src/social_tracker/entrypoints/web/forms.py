@@ -25,7 +25,7 @@ DEFAULT_REASON = "via web UI"
 _INT = re.compile(r"[+-]?[0-9]{1,18}")
 _UNKNOWN_FIELD_PREFIX = "<source>: "
 _VALUE_ERROR_PREFIX = "Value error, "
-SECRET_FIELD = "secret_ref"
+REF_FIELD = "secret_ref"
 
 # How a blank input is sent: REQUIRED as an empty value (the domain rejects it), DEFAULT not at
 # all (the stored or default value stays), CLEAR as null on an edit and not at all on an add.
@@ -77,7 +77,7 @@ TYPE_FIELDS: dict[str, tuple[FormField, ...]] = {
     "instagram": (
         FormField("handle", "Instagram handle", hint="Letters, digits, dots and underscores."),
         FormField(
-            SECRET_FIELD,
+            REF_FIELD,
             "Secret reference",
             hint="Where the login lives, as env:NAME, keyring:NAME or file:NAME. "
             "Never the password itself.",
@@ -132,7 +132,7 @@ def _value(field: FormField, form: Mapping[str, str], *, editing: bool) -> tuple
         return True, field.name in form
     raw = form.get(field.name, "").strip()
     if not raw:
-        if field.blank == DEFAULT or (field.name == SECRET_FIELD and editing):
+        if field.blank == DEFAULT or (field.name == REF_FIELD and editing):
             return False, None  # the stored or default value stays
         if field.blank == CLEAR:
             return editing, None  # an edit empties the field; an add leaves it unset
@@ -206,7 +206,7 @@ def values_from_source(source: Source) -> tuple[dict[str, str], dict[str, bool]]
     values: dict[str, str] = {"reason": DEFAULT_REASON}
     checked: dict[str, bool] = {}
     for name, value in source.model_dump().items():
-        if name == SECRET_FIELD or value is None:
+        if name == REF_FIELD or value is None:
             continue
         if isinstance(value, bool):
             checked[name] = value
@@ -238,7 +238,7 @@ def view_fields(
     views: list[FieldView] = []
     for spec in (*fields_for(source_type, editing=editing), REASON_FIELD):
         error = errors.get(spec.name, "")
-        hidden = spec.name == SECRET_FIELD or (spec.sensitive and bool(error))
+        hidden = spec.name == REF_FIELD or (spec.sensitive and bool(error))
         value = "" if hidden else values.get(spec.name, "")
         views.append(FieldView(spec, value, checked.get(spec.name, False), error))
     return views

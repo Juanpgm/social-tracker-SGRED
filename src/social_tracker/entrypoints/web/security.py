@@ -17,7 +17,7 @@ from hashlib import sha256
 from social_tracker.shared.errors import ValidationError
 
 LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
-CSRF_COOKIE = "st_csrf"
+CSRF_COOKIE_NAME = "st_csrf"
 CSRF_FIELD = "csrf_token"
 _COOKIE_SHAPE = re.compile(r"[A-Za-z0-9_-]{43}")  # token_urlsafe(32)
 

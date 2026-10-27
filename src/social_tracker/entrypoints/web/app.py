@@ -22,7 +22,7 @@ from social_tracker.entrypoints.web.pages import (
     error_page,
 )
 from social_tracker.entrypoints.web.security import (
-    CSRF_COOKIE,
+    CSRF_COOKIE_NAME,
     SECURITY_HEADERS,
     CsrfTokens,
     allowed_hosts,
@@ -76,7 +76,7 @@ def create_app(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         ctx: WebContext = request.app.state.ctx
-        cookie = request.cookies.get(CSRF_COOKIE)
+        cookie = request.cookies.get(CSRF_COOKIE_NAME)
         issue = not ctx.tokens.well_formed(cookie)
         cookie = ctx.tokens.new_cookie() if issue or cookie is None else cookie
         request.state.csrf_token = ctx.tokens.token_for(cookie)
@@ -90,7 +90,7 @@ def create_app(
                 logger.error("unexpected failure (%s)", type(exc).__name__)
                 response = error_page(request, 500, "Something went wrong.")
             if issue:
-                response.set_cookie(CSRF_COOKIE, cookie, httponly=True, samesite="strict")
+                response.set_cookie(CSRF_COOKIE_NAME, cookie, httponly=True, samesite="strict")
         response.headers.update(SECURITY_HEADERS)
         return response
 

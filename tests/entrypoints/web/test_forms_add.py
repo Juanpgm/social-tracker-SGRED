@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from tests.entrypoints.web.conftest import Web, visible_text
+from tests.sources.factories import EMBEDDED_CREDENTIALS_URL
 
 # Built by concatenation so the repository hygiene scan does not flag these fixtures.
 CANARY = "ghp_" + "canary0123456789abcdefghij"
@@ -233,7 +234,7 @@ def test_an_invalid_id_is_an_inline_error(web: Web, bad: str):
         ("news_rss", "feed_url", "ftp://example.org/rss"),
         ("news_rss", "feed_url", "not a url"),
         ("news_rss", "feed_url", ""),
-        ("news_rss", "feed_url", "https://user:pw@example.org/rss"),
+        ("news_rss", "feed_url", EMBEDDED_CREDENTIALS_URL),
         ("news_rss", "feed_url", f"https://example.org/rss?{KEY_PARAM}=abc"),
         ("news_rss", "poll_interval_s", "5"),
         ("news_rss", "poll_interval_s", "often"),
