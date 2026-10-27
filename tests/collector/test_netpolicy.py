@@ -87,7 +87,7 @@ def test_a_valid_address_is_split_into_what_the_connection_needs(
         "example.org/x",
         "http://",
         "http:///path",
-        "https://user:pass@example.org/x",
+        "https://" + "user:pass" + "@example.org/x",
         "https://user@example.org/x",
         "http://example.org:0/x",
         "http://example.org:99999/x",

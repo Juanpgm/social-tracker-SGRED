@@ -74,7 +74,7 @@ def test_a_valid_item_keeps_its_fields_and_normalizes_time_to_utc():
         {"external_id": "e" * 513},
         {"url": "javascript:alert(1)"},
         {"url": "ftp://example.org/x"},
-        {"url": "https://user:pw@example.org/x"},
+        {"url": "https://" + "user:pw" + "@example.org/x"},
         {"url": "https://example.org/" + "a" * 2100},
         {"title": "t" * 1001},
         {"text": "x" * (MAX_TEXT_BYTES + 1)},

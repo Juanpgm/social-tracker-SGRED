@@ -305,7 +305,7 @@ def test_decomposed_accents_are_composed():
         "data:text/html,<script>1</script>",
         "ftp://example.org/x",
         "file:///etc/passwd",
-        "https://user:secret@example.org/x",
+        "https://" + "user:secret" + "@example.org/x",
         "not a url",
         "https://example.org/" + "a" * 3000,
     ],

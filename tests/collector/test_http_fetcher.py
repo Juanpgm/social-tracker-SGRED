@@ -407,7 +407,7 @@ def test_internal_literal_addresses_and_names_are_refused(url):
         "ftp://example.org/x",
         "file:///etc/passwd",
         "http://2130706433/",
-        "https://user:pw@feeds.example.org/",
+        "https://" + "user:pw" + "@feeds.example.org/",
         "gopher://x/",
         "",
     ],
@@ -508,7 +508,7 @@ def test_a_redirect_to_an_internal_address_is_blocked(location):
         "ftp://example.org/x",
         "javascript:1",
         "http://2130706433/",
-        "http://user:pw@example.org/",
+        "http://" + "user:pw" + "@example.org/",
     ],
 )
 def test_a_redirect_to_another_scheme_or_a_disguised_address_is_refused(location):

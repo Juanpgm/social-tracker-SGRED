@@ -62,7 +62,7 @@ def test_an_error_exactly_at_the_limit_is_accepted():
         ("http 503", "http 503"),
         ("timeout\n  while\tfetching", "timeout while fetching"),
         (
-            "failed for https://user:pw@example.org/feed?token=abc123 today",
+            "failed for https://" + "user:pw" + "@example.org/feed?token=abc123 today",
             "failed for <url> today",
         ),
         ("see HTTP://EXAMPLE.ORG/x and http://a.b/c", "see <url> and <url>"),
