@@ -16,7 +16,11 @@ It is stored as text and is NOT HTML-escaped: the template that draws it escapes
 
 import re
 
-from social_tracker.alerts.domain import MAX_EXCERPT_CHARS, MAX_SOURCE_NAME_CHARS
+from social_tracker.alerts.domain import (
+    MAX_EXCERPT_CHARS,
+    MAX_RATIONALE_CHARS,
+    MAX_SOURCE_NAME_CHARS,
+)
 
 ELLIPSIS = chr(0x2026)
 TITLE_SEPARATOR = " | "
@@ -90,3 +94,20 @@ def clean_name(name: str, fallback: str) -> str:
     source id stands in for a name with nothing visible."""
     flat = _SPACES_RE.sub(" ", _visible(name)).strip()[:MAX_SOURCE_NAME_CHARS].strip()
     return flat or fallback
+
+
+def clean_text(value: str, limit: int, fallback: str) -> str:
+    """Text a MODEL (or a file it influenced) wrote, as an alert keeps it: plain, one line,
+    redacted like an excerpt and at most `limit` characters (cut with an ellipsis). Redacting can
+    make a text longer (a short secret becomes `[redacted]`), so the cut comes after it. The
+    fallback stands in for a text with nothing left."""
+    flat = _SPACES_RE.sub(" ", redact(_visible(value)[:_WORK_CHARS])).strip()
+    if len(flat) > limit:
+        flat = flat[: limit - 1].rstrip() + ELLIPSIS
+    return flat or fallback
+
+
+def make_rationale(value: str) -> str:
+    """The rationale of a verdict as an alert keeps it (A10): the verdict may carry the words of
+    a language model, which are untrusted like the item text they were written about."""
+    return clean_text(value, MAX_RATIONALE_CHARS, "(no rationale)")

@@ -287,12 +287,21 @@ def test_a_verdict_the_model_raises_updates_the_alert_it_does_not_add_one(w):
     assert kinds(w, alert.id) == [AlertEventKind.CREATED, AlertEventKind.UPDATED]
 
 
-def test_a_verdict_the_model_clears_withdraws_the_alert_instead_of_deleting_it(w):
+def clear_by_the_cascade(w, item_id, label="no_risk", confidence=0.95):
+    """A reclassification by the cascade (not by the model): the verdict is replaced in place."""
+    with w.db.transaction() as conn:
+        conn.execute(
+            "UPDATE classifications SET label = ?, confidence = ?, stage = 'rules' "
+            "WHERE item_id = ?",
+            (label, confidence, item_id),
+        )
+
+
+def test_a_verdict_the_cascade_clears_withdraws_the_alert_instead_of_deleting_it(w):
     stored = w.llm.seed(1, confidence=0.55)
     w.refresh()
     alert_id = w.only().id
-    w.llm.judge.default = response(label=Label.NO_RISK, confidence=0.95)
-    w.llm.escalate()
+    clear_by_the_cascade(w, stored.item_id)
     report = w.refresh()
     assert (report.withdrawn, report.created) == (1, 0)
     assert w.alerts() == []  # hidden from the default list...
@@ -305,15 +314,40 @@ def test_a_verdict_the_model_clears_withdraws_the_alert_instead_of_deleting_it(w
     assert kinds(w, alert_id) == [AlertEventKind.CREATED, AlertEventKind.WITHDRAWN]
 
 
+def test_a_verdict_the_model_clears_keeps_the_alert_in_view_instead_of_withdrawing_it(w):
+    """A11: what the language model says never hides an alert on its own."""
+    stored = w.llm.seed(1, confidence=0.55)
+    w.refresh()
+    alert_id = w.only().id
+    w.llm.judge.default = response(label=Label.NO_RISK, confidence=0.95)
+    w.llm.escalate()
+    report = w.refresh()
+    assert (report.withdrawn, report.created) == (0, 0)
+    kept = w.only()  # in the default list
+    assert (kept.id, kept.withdrawn, kept.downgraded_by_model) == (alert_id, False, True)
+    assert (kept.label, kept.confidence) == (RUMOR, 0.55)  # it keeps what it showed
+    assert w.repo.member(stored.item_id).active is False  # the member says the truth
+    assert AlertEventKind.WITHDRAWN not in kinds(w, alert_id)
+
+
 def test_a_verdict_that_falls_under_the_threshold_withdraws_the_alert(w):
+    stored = w.llm.seed(1, confidence=0.6)
+    w.refresh()
+    clear_by_the_cascade(w, stored.item_id, label="unintentional_rumor", confidence=0.3)
+    w.refresh()
+    assert w.only(status="withdrawn").withdrawn_reason == (
+        "the confidence fell under the alert threshold"
+    )
+
+
+def test_a_verdict_the_model_lowers_under_the_threshold_is_flagged_not_withdrawn(w):
     w.llm.seed(1, confidence=0.6)
     w.refresh()
     w.llm.judge.default = response(label=RUMOR, confidence=0.3)
     w.llm.escalate()
     w.refresh()
-    assert w.only(status="withdrawn").withdrawn_reason == (
-        "the confidence fell under the alert threshold"
-    )
+    assert w.alerts(status="withdrawn") == []
+    assert w.only().downgraded_by_model is True
 
 
 def test_a_withdrawn_alert_comes_back_when_the_verdict_qualifies_again(w):
@@ -321,8 +355,7 @@ def test_a_withdrawn_alert_comes_back_when_the_verdict_qualifies_again(w):
     w.refresh()
     alert_id = w.only().id
     w.service.set_status(alert_id, "seen", actor="tester", reason="looked")
-    w.llm.judge.default = response(label=Label.NO_RISK, confidence=0.95)
-    w.llm.escalate()
+    clear_by_the_cascade(w, stored.item_id)
     w.refresh()
     assert w.alerts() == []
     with w.db.transaction() as conn:  # the verdict returns (a reclassification that agrees again)
@@ -337,13 +370,28 @@ def test_a_withdrawn_alert_comes_back_when_the_verdict_qualifies_again(w):
     assert back.id == alert_id
     assert back.withdrawn is False
     assert (back.severity, back.confidence, back.occurrences) == (Severity.HIGH, 0.8, 1)
-    assert back.status.value == "seen"  # what the operator decided is kept
+    # the verdict is MORE severe than the one the person looked at (medium -> high): A1
+    assert back.status.value == "new"
     assert kinds(w, alert_id) == [
         AlertEventKind.CREATED,
         AlertEventKind.STATUS_CHANGED,
         AlertEventKind.WITHDRAWN,
+        AlertEventKind.STATUS_CHANGED,
         AlertEventKind.REACTIVATED,
     ]
+
+
+def test_a_withdrawn_alert_that_comes_back_no_stronger_keeps_what_the_operator_decided(w):
+    stored = w.llm.seed(1, confidence=0.55)
+    w.refresh()
+    alert_id = w.only().id
+    w.service.set_status(alert_id, "seen", actor="tester", reason="looked")
+    clear_by_the_cascade(w, stored.item_id)
+    w.refresh()
+    clear_by_the_cascade(w, stored.item_id, label="unintentional_rumor", confidence=0.56)
+    assert w.refresh().reactivated == 1
+    back = w.only()
+    assert (back.severity, back.status.value) == (Severity.MEDIUM, "seen")
 
 
 def test_a_verdict_that_nobody_changed_is_left_alone_even_when_asked_twice(w):

@@ -210,10 +210,14 @@ def test_one_member_that_stops_qualifying_leaves_the_alert_to_the_others(w):
 
 
 def test_a_copy_that_arrives_after_the_alert_was_withdrawn_brings_it_back(w):
-    w.llm.seed(1, text=SAME, confidence=0.55)
+    stored = w.llm.seed(1, text=SAME, confidence=0.55)
     w.refresh()
-    w.llm.judge.default = response(label=Label.NO_RISK, confidence=0.95)
-    w.llm.escalate()
+    with w.db.transaction() as conn:  # a reclassification by the cascade (not the model)
+        conn.execute(
+            "UPDATE classifications SET label = 'no_risk', confidence = 0.95, stage = 'rules' "
+            "WHERE item_id = ?",
+            (stored.item_id,),
+        )
     w.refresh()
     assert w.alerts() == []
     w.put(

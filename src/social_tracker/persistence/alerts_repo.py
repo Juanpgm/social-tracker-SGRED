@@ -34,10 +34,11 @@ from social_tracker.shared.errors import DomainError, StorageError, ValidationEr
 _ALERT_COLUMNS = (
     "id, label, severity, confidence, rationale, source_id, source_name, item_id, excerpt, tags, "
     "evidence, linked_sources, status, occurrences, first_seen_at, last_seen_at, created_at, "
-    "updated_at, status_changed_at, withdrawn_at, withdrawn_reason"
+    "updated_at, status_changed_at, withdrawn_at, withdrawn_reason, downgraded_by_model, overflow, "
+    "events_dropped"
 )
 _UPSERT_ALERT = (
-    f"INSERT INTO alerts ({_ALERT_COLUMNS}) VALUES ({', '.join('?' * 21)}) "
+    f"INSERT INTO alerts ({_ALERT_COLUMNS}) VALUES ({', '.join('?' * 24)}) "
     "ON CONFLICT (id) DO UPDATE SET "
     + ", ".join(
         f"{name} = excluded.{name}"
@@ -99,6 +100,9 @@ def _alert_from_row(row: sqlite3.Row) -> Alert:
             withdrawn_at=_optional_time(row["withdrawn_at"]),
             withdrawn_reason=row["withdrawn_reason"],
             linked_sources=tuple((str(i), str(n)) for i, n in json.loads(row["linked_sources"])),
+            downgraded_by_model=bool(row["downgraded_by_model"]),
+            overflow=row["overflow"],
+            events_dropped=row["events_dropped"],
         )
     except (DomainError, ValueError, TypeError):
         raise StorageError("stored alert is invalid") from None
@@ -157,6 +161,9 @@ def _alert_params(a: Alert) -> tuple[Any, ...]:
         _text_or_none(a.status_changed_at),
         _text_or_none(a.withdrawn_at),
         a.withdrawn_reason,
+        int(a.downgraded_by_model),
+        a.overflow,
+        a.events_dropped,
     )
 
 
@@ -268,8 +275,8 @@ class SqliteAlertRepository:
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO alert_events "
-                "(alert_id, at, kind, actor, reason, from_value, to_value) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(alert_id, at, kind, actor, reason, from_value, to_value, from_absorbed) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     event.alert_id,
                     format_utc(event.at),
@@ -278,12 +285,14 @@ class SqliteAlertRepository:
                     event.reason,
                     event.before,
                     event.after,
+                    int(event.from_absorbed),
                 ),
             )
 
     def events(self, alert_id: str) -> list[AlertEvent]:
         rows = self._db.query(
-            "SELECT alert_id, at, kind, actor, reason, from_value, to_value FROM alert_events "
+            "SELECT alert_id, at, kind, actor, reason, from_value, to_value, from_absorbed "
+            "FROM alert_events "
             "WHERE alert_id = ? ORDER BY seq",
             (alert_id,),
         )
@@ -297,6 +306,7 @@ class SqliteAlertRepository:
                     r["reason"],
                     r["from_value"],
                     r["to_value"],
+                    bool(r["from_absorbed"]),
                 )
                 for r in rows
             ]

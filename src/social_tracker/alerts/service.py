@@ -52,12 +52,13 @@ from social_tracker.alerts.domain import (
     assess,
     event_age,
     project,
+    severity_rank,
     tags_for,
     validate_page,
 )
-from social_tracker.alerts.excerpt import clean_name, make_excerpt
+from social_tracker.alerts.excerpt import clean_name, clean_text, make_excerpt, make_rationale
 from social_tracker.alerts.ports import AlertRepository
-from social_tracker.classification.domain import RISK_LABELS, Classification, Label
+from social_tracker.classification.domain import RISK_LABELS, Classification, Label, Stage
 from social_tracker.classification.ports import ClassificationRepository
 from social_tracker.control.domain import validate_actor, validate_reason
 from social_tracker.control.service import ControlService
@@ -234,7 +235,9 @@ class AlertService:
         alert_id = targets[0] if targets else alert_id_for(item.id)
         member = self._member(alert_id, verdict, item, severity, age, now)
         previous = self._alerts.get(alert_id)
-        status = self._decisive_status(previous, targets[1:]) if previous is not None else None
+        status, basis = (
+            self._decisive_status(previous, targets[1:]) if previous is not None else (None, None)
+        )
         for other in targets[1:]:
             self._absorb(alert_id, other, now)
         members = [*self._alerts.members(alert_id), member]
@@ -242,6 +245,11 @@ class AlertService:
         if status is not None:
             alert = replace(alert, status=status)
         alert = self._with_withdrawal(previous, alert, members, member)
+        if previous is not None and not any(m.active for m in members[:-1]):
+            alert = replace(alert, downgraded_by_model=False)  # a live copy: nothing to flag
+        rise = self._rise(alert, basis)
+        if rise is not None:
+            alert = replace(alert, status=AlertStatus.NEW, status_changed_at=now)
         self._alerts.save(alert)
         self._alerts.save_member(member)
         if previous is None:
@@ -255,10 +263,36 @@ class AlertService:
             str(previous.occurrences),
             str(alert.occurrences),
         )
+        self._write_rise(alert_id, rise, status, now)
         if previous.withdrawn and not alert.withdrawn:
             self._event(alert_id, now, AlertEventKind.REACTIVATED, "a new occurrence qualifies")
             return Outcome.REACTIVATED
         return Outcome.MERGED
+
+    @staticmethod
+    def _rise(alert: Alert, basis: Severity | None, why: str = "") -> str | None:
+        """A5/A1: the reason to put an alert back to `new`, when a person had handled it
+        (seen, dismissed) at the severity `basis` and it is now more severe. Equal or lower
+        severity keeps what the person decided."""
+        if basis is None or alert.withdrawn or alert.status is AlertStatus.NEW:
+            return None
+        if severity_rank(alert.severity) <= severity_rank(basis):
+            return None
+        reason = f"severity rose from {basis.value} to {alert.severity.value}"
+        return f"{reason}: {why}" if why else reason
+
+    def _write_rise(
+        self, alert_id: str, reason: str | None, was: AlertStatus | None, now: datetime
+    ) -> None:
+        if reason is not None and was is not None:
+            self._event(
+                alert_id,
+                now,
+                AlertEventKind.STATUS_CHANGED,
+                reason,
+                was.value,
+                AlertStatus.NEW.value,
+            )
 
     def _absorb(self, keep_id: str, other_id: str, now: datetime) -> None:
         """Move the members of `other_id` under `keep_id` and forget the empty alert."""
@@ -267,18 +301,18 @@ class AlertService:
         self._alerts.delete(other_id)
         self._event(keep_id, now, AlertEventKind.MERGED, f"absorbed alert {other_id}")
 
-    def _decisive_status(self, kept: Alert, others: list[str]) -> AlertStatus:
+    def _decisive_status(self, kept: Alert, others: list[str]) -> tuple[AlertStatus, Severity]:
         """The status of alerts that become one: what needs attention most decides (new, then
-        seen, then dismissed), so merging can never hide an alert nobody has looked at."""
-        statuses = {kept.status}
-        for other_id in others:
-            absorbed = self._alerts.get(other_id)
-            if absorbed is not None:
-                statuses.add(absorbed.status)
+        seen, then dismissed), so merging can never hide an alert nobody has looked at. With it,
+        the severity that status was chosen at (the highest among the alerts that held it): the
+        merged alert goes back to `new` only if it is MORE severe than that."""
+        held = [kept, *(a for a in (self._alerts.get(o) for o in others) if a is not None)]
+        statuses = {a.status for a in held}
         for status in (AlertStatus.NEW, AlertStatus.SEEN, AlertStatus.DISMISSED):
             if status in statuses:
-                return status
-        return kept.status
+                basis = max((a.severity for a in held if a.status is status), key=severity_rank)
+                return status, basis
+        return kept.status, kept.severity
 
     def _member(
         self,
@@ -299,7 +333,7 @@ class AlertService:
             label=verdict.label,
             confidence=verdict.confidence,
             stage=verdict.stage.value,
-            rationale=verdict.rationale,
+            rationale=make_rationale(verdict.rationale),
             severity=severity,
             tags=tags_for(
                 [t.value for t in verdict.topics],
@@ -315,18 +349,20 @@ class AlertService:
         )
 
     def _evidence(self, verdict: Classification) -> Evidence:
+        """The cross-check behind a verdict. Every string of it is cleaned like the excerpt (A10):
+        a model name or a reason can come from a file or an answer that an outsider influenced."""
         judgment = self._escalations.get_judgment(verdict.item_id)
         judged = judgment is not None and judgment.llm_model is not None
         return Evidence(
             catalog_status=verdict.catalog_status,
             stage=verdict.stage.value,
-            classifier_version=verdict.classifier_version,
+            classifier_version=clean_text(verdict.classifier_version, 64, "unknown"),
             signals=tuple((s.name, s.label.value, s.weight) for s in verdict.signals),
             topics=tuple(t.value for t in verdict.topics),
-            settle_reason=verdict.settle_reason,
+            settle_reason=_tidy(verdict.settle_reason),
             provisional=verdict.needs_llm or verdict.awaiting_original,
-            llm_model=judgment.llm_model if judged and judgment else None,
-            prompt_version=judgment.prompt_version if judged and judgment else None,
+            llm_model=_tidy(judgment.llm_model) if judged and judgment else None,
+            prompt_version=_tidy(judgment.prompt_version) if judged and judgment else None,
             duplicate_of=verdict.duplicate_of,
             near_of=verdict.near_of,
             recycled_of=verdict.recycled_of,
@@ -351,7 +387,7 @@ class AlertService:
             label=verdict.label,
             confidence=verdict.confidence,
             stage=verdict.stage.value,
-            rationale=verdict.rationale,
+            rationale=make_rationale(verdict.rationale),
             severity=severity if severity is not None else old.severity,
             tags=tags_for(
                 [t.value for t in verdict.topics],
@@ -372,23 +408,53 @@ class AlertService:
             fresh if m.item_id == old.item_id else m for m in self._alerts.members(old.alert_id)
         ]
         projected = project(previous.id, members, previous=previous, now=now)
-        alert = self._with_withdrawal(previous, projected, members, fresh)
+        # A11: the language model made this verdict (it settled a waiting one). A verdict it
+        # lowers, or one that stops qualifying, is flagged and kept in view, never silently hidden
+        model_made = verdict.stage is Stage.LLM and (
+            old.stage != Stage.LLM.value or old.settled_at != verdict.settled_at
+        )
+        dark = not any(m.active for m in members)
+        lowered = not previous.withdrawn and (
+            severity_rank(projected.severity) < severity_rank(previous.severity)
+        )
+        downgrade = model_made and (dark or lowered)
+        flag = True if downgrade else (False if model_made else previous.downgraded_by_model)
+        alert = self._with_withdrawal(
+            previous, projected, members, fresh, keep_visible=dark and flag
+        )
+        alert = replace(alert, downgraded_by_model=flag)
+        if downgrade and dark:
+            alert = replace(alert, rationale=fresh.rationale)  # what the model said
+        reason = None
+        if downgrade and alert.status is not AlertStatus.NEW:
+            reason = f"the language model settled a lower verdict: {_says(verdict)}"
+        elif not alert.withdrawn:
+            reason = self._rise(alert, previous.severity, "verdict upgraded" if model_made else "")
+        if reason is not None:
+            alert = replace(alert, status=AlertStatus.NEW, status_changed_at=now)
         self._alerts.save(alert)
         self._alerts.save_member(fresh)
         if alert.withdrawn and not previous.withdrawn:
-            reason = alert.withdrawn_reason or "withdrawn"
-            self._event(alert.id, now, AlertEventKind.WITHDRAWN, reason)
+            self._event(
+                alert.id, now, AlertEventKind.WITHDRAWN, alert.withdrawn_reason or "withdrawn"
+            )
             return Outcome.WITHDRAWN
+        self._write_rise(alert.id, reason, previous.status, now)
         if previous.withdrawn and not alert.withdrawn:
             self._event(alert.id, now, AlertEventKind.REACTIVATED, "the verdict qualifies again")
             return Outcome.REACTIVATED
         shown = (alert.severity, alert.label, alert.confidence)
-        if shown != (previous.severity, previous.label, previous.confidence):
+        if shown != (previous.severity, previous.label, previous.confidence) or (
+            alert.downgraded_by_model and not previous.downgraded_by_model
+        ):
+            what = (
+                "the language model settled a lower verdict" if downgrade else "the verdict changed"
+            )
             self._event(
                 alert.id,
                 now,
                 AlertEventKind.UPDATED,
-                f"the verdict changed: {_says(verdict)}",
+                f"{what}: {_says(verdict)}",
                 previous.severity.value,
                 alert.severity.value,
             )
@@ -396,11 +462,18 @@ class AlertService:
 
     @staticmethod
     def _with_withdrawal(
-        previous: Alert | None, alert: Alert, members: list[AlertMember], changed: AlertMember
+        previous: Alert | None,
+        alert: Alert,
+        members: list[AlertMember],
+        changed: AlertMember,
+        *,
+        keep_visible: bool = False,
     ) -> Alert:
         """Set or clear the withdrawal of `alert`: it stands while any member is active; with none
-        left it is withdrawn, once, with the reason the member that changed gives."""
-        if any(m.active for m in members):
+        left it is withdrawn, once, with the reason the member that changed gives. `keep_visible`
+        is the one exception (A11): the language model made the last member stop qualifying, and
+        an alert is not hidden by what a model said."""
+        if keep_visible or any(m.active for m in members):
             return replace(alert, withdrawn_at=None, withdrawn_reason=None)
         if previous is not None and previous.withdrawn:
             return replace(
@@ -442,7 +515,9 @@ class AlertService:
             if not change.changed:
                 return StatusResult(alert, changed=False, previous=alert.status)
             now = self._clock.now()
-            updated = replace(alert, status=wanted, status_changed_at=now)
+            updated = replace(
+                alert, status=wanted, status_changed_at=now, downgraded_by_model=False
+            )
             self._alerts.save(updated)
             self._alerts.add_event(
                 AlertEvent(
@@ -519,6 +594,11 @@ class AlertService:
         if days == 0:
             return self._alerts.purge(before=None, handled=True, now=now)
         return self._alerts.purge(before=now - timedelta(days=days), handled=False, now=now)
+
+
+def _tidy(value: str | None) -> str | None:
+    """A short optional string of the evidence, cleaned (A10); None when nothing is left."""
+    return (clean_text(value, 100, "") or None) if value is not None else None
 
 
 def _says(verdict: Classification) -> str:

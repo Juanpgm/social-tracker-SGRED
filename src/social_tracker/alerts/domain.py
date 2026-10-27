@@ -54,6 +54,10 @@ MAX_WINDOW = timedelta(days=30)
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 200
 MAX_OFFSET = 1_000_000
+DEFAULT_MAX_MEMBERS = 500  # the items stored behind one alert
+MAX_MEMBERS_LIMIT = 5_000
+DEFAULT_MAX_EVENTS = 200  # the entries of the trail stored and shown per alert
+MAX_EVENTS_LIMIT = 2_000
 CATALOG_MISMATCH = "mismatch"
 WITHDRAWN = "withdrawn"  # a lifecycle state a list can be filtered by, next to the three statuses
 ACTOR_SYSTEM = "system:alerts"
@@ -169,6 +173,11 @@ class AlertSettings:
       other are one alert.
     - `retention_days`: an alert is kept this many days after its latest occurrence (strictly
       older goes); 0 keeps an alert only until it has been looked at (seen or dismissed).
+    - `max_members`: the items stored behind one alert. Past it a copy is only counted (and a
+      stronger one takes the place of the weakest), so a flood of near copies cannot grow an alert
+      or the cost of merging into it without bound.
+    - `max_events`: the entries of the trail stored (and shown) per alert; past it routine
+      entries (merged, updated) are only counted.
     """
 
     critical_disinformation: float = 0.85
@@ -178,6 +187,8 @@ class AlertSettings:
     critical_window: timedelta = timedelta(hours=24)
     dedup_window: timedelta = timedelta(hours=24)
     retention_days: int = DEFAULT_RETENTION_DAYS
+    max_members: int = DEFAULT_MAX_MEMBERS
+    max_events: int = DEFAULT_MAX_EVENTS
 
     def __post_init__(self) -> None:
         for name in ("critical_disinformation", "critical_catalog", "high", "medium"):
@@ -193,6 +204,14 @@ class AlertSettings:
         if not _whole(self.retention_days, 0, MAX_RETENTION_DAYS):
             raise ValidationError(
                 f"retention days must be a whole number from 0 to {MAX_RETENTION_DAYS}"
+            )
+        if not _whole(self.max_members, 1, MAX_MEMBERS_LIMIT):
+            raise ValidationError(
+                f"max members must be a whole number from 1 to {MAX_MEMBERS_LIMIT}"
+            )
+        if not _whole(self.max_events, 10, MAX_EVENTS_LIMIT):
+            raise ValidationError(
+                f"max events must be a whole number from 10 to {MAX_EVENTS_LIMIT}"
             )
 
 
@@ -486,7 +505,9 @@ class AlertMember:
 @dataclass(frozen=True)
 class Alert:
     """AL-3. The fields from `label` to `evidence` are those of the leading member (the most
-    severe active one); `occurrences` counts the active members; `tags` merge those of all."""
+    severe active one); `occurrences` counts the active members plus the copies that were only
+    counted (`overflow`); `tags` merge those of all. `downgraded_by_model` marks an alert whose
+    provisional verdict the language model settled lower: it stays visible until a person looks."""
 
     id: str
     label: Label
@@ -509,12 +530,19 @@ class Alert:
     withdrawn_at: datetime | None = None
     withdrawn_reason: str | None = None
     linked_sources: tuple[tuple[str, str], ...] = field(default=())
+    downgraded_by_model: bool = False
+    overflow: int = 0
+    events_dropped: int = 0
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
         validate_slug(self.id)
         validate_slug(self.source_id)
         validate_slug(self.item_id)
+        if not isinstance(self.downgraded_by_model, bool):
+            raise ValidationError("downgraded_by_model is a flag")
+        if not _whole(self.overflow, 0, 10**9) or not _whole(self.events_dropped, 0, 10**9):
+            raise ValidationError("overflow and dropped events are whole numbers")
         set_(self, "label", _coerce(Label, self.label, "label"))
         set_(self, "severity", _coerce(Severity, self.severity, "severity"))
         set_(self, "status", _coerce(AlertStatus, self.status, "status"))
@@ -544,7 +572,8 @@ class Alert:
 
 @dataclass(frozen=True)
 class AlertEvent:
-    """One line of the audit trail of an alert: what happened, who did it and why."""
+    """One line of the audit trail of an alert: what happened, who did it and why.
+    `from_absorbed` marks a line copied (with its original time) from an alert that was absorbed."""
 
     alert_id: str
     at: datetime
@@ -553,9 +582,12 @@ class AlertEvent:
     reason: str
     before: str = ""
     after: str = ""
+    from_absorbed: bool = False
 
     def __post_init__(self) -> None:
         validate_slug(self.alert_id)
+        if not isinstance(self.from_absorbed, bool):
+            raise ValidationError("from_absorbed is a flag")
         object.__setattr__(self, "at", _aware(self.at, "event time"))
         object.__setattr__(self, "kind", _coerce(AlertEventKind, self.kind, "event kind"))
         _printable(self.actor, "actor", 1, 100)
@@ -564,40 +596,14 @@ class AlertEvent:
         _printable(self.after, "after", 0, 100)
 
 
-def project(
-    alert_id: str,
-    members: Sequence[AlertMember],
-    *,
-    previous: Alert | None,
-    now: datetime,
-) -> Alert:
-    """The alert that `members` make: the most severe active member (then the most confident,
-    then the earliest, then by item id) leads. With no active member the alert keeps what it
-    showed and is withdrawn by the caller. Nothing here depends on the order of `members`."""
-    if not members:
-        raise ValidationError("an alert needs at least one member")
-    active = [m for m in members if m.active]
-    pool = active or list(members)
-    lead = min(
-        pool, key=lambda m: (-severity_rank(m.severity), -m.confidence, m.occurred_at, m.item_id)
-    )
-    tags = tuple(sorted({t for m in pool for t in m.tags}))[:MAX_TAGS]
-    sources: dict[str, str] = {}
-    for member in sorted(members, key=lambda m: (m.occurred_at, m.item_id)):
-        sources.setdefault(member.source_id, member.source_name)
-    base = {
-        "id": alert_id,
-        "tags": tags,
-        "occurrences": len(active),
-        "first_seen_at": min(m.occurred_at for m in members),
-        "last_seen_at": max(m.occurred_at for m in members),
-        "linked_sources": tuple(sorted(sources.items())),
-        "updated_at": now,
-    }
-    if not active and previous is not None:
-        # nothing qualifies any more: show what it showed, the caller withdraws it
-        return replace(previous, **{**base, "tags": previous.tags})
-    shown = {
+def lead_key(member: AlertMember) -> tuple[int, float, datetime, str]:
+    """Who leads an alert: the most severe, then the most confident, then the earliest, then the
+    smallest item id (the least key leads)."""
+    return (-severity_rank(member.severity), -member.confidence, member.occurred_at, member.item_id)
+
+
+def _shown(lead: AlertMember) -> dict[str, Any]:
+    return {
         "label": lead.label,
         "severity": lead.severity,
         "confidence": lead.confidence,
@@ -608,14 +614,71 @@ def project(
         "excerpt": lead.excerpt,
         "evidence": lead.evidence,
     }
+
+
+def project(
+    alert_id: str,
+    members: Sequence[AlertMember],
+    *,
+    previous: Alert | None,
+    now: datetime,
+    overflow: int = 0,
+) -> Alert:
+    """The alert that `members` make: the most severe active member (then the most confident,
+    then the earliest, then by item id) leads. With no active member the alert keeps what it
+    showed and is withdrawn by the caller. `overflow` is the number of copies that were counted
+    but are not stored as members. Nothing here depends on the order of `members`."""
+    if not members:
+        raise ValidationError("an alert needs at least one member")
+    active = [m for m in members if m.active]
+    pool = active or list(members)
+    lead = min(pool, key=lead_key)
+    tags = tuple(sorted({t for m in pool for t in m.tags}))[:MAX_TAGS]
+    sources: dict[str, str] = {}
+    for member in sorted(members, key=lambda m: (m.occurred_at, m.item_id)):
+        sources.setdefault(member.source_id, member.source_name)
+    base = {
+        "id": alert_id,
+        "tags": tags,
+        "occurrences": len(active) + overflow,
+        "overflow": overflow,
+        "first_seen_at": min(m.occurred_at for m in members),
+        "last_seen_at": max(m.occurred_at for m in members),
+        "linked_sources": tuple(sorted(sources.items())),
+        "updated_at": now,
+    }
+    if not active and previous is not None:
+        # nothing qualifies any more: show what it showed, the caller withdraws it
+        return replace(previous, **{**base, "tags": previous.tags})
     if previous is None:
-        return Alert(
-            **base,
-            **shown,
-            status=AlertStatus.NEW,
-            created_at=now,
-        )
-    return replace(previous, **base, **shown)
+        return Alert(**base, **_shown(lead), status=AlertStatus.NEW, created_at=now)
+    return replace(previous, **base, **_shown(lead))
+
+
+def merge_member(
+    previous: Alert, lead: AlertMember | None, member: AlertMember, *, now: datetime
+) -> Alert:
+    """`previous` with one more ACTIVE member, without reading the others: the incremental form of
+    `project` (same result as projecting all the members again, for the alert's own columns).
+    `lead` is the member `previous` shows. A withdrawn alert (or one whose lead is gone) restarts
+    from the new member alone, as `project` does when exactly one member is active."""
+    restart = previous.withdrawn or lead is None or not lead.active
+    sources = dict(previous.linked_sources)
+    if member.source_id not in sources or member.occurred_at < previous.first_seen_at:
+        sources[member.source_id] = member.source_name
+    tags = set() if restart else set(previous.tags)
+    tags |= set(member.tags)
+    leads = restart or lead_key(member) < lead_key(lead)  # type: ignore[arg-type]
+    return replace(
+        previous,
+        **(_shown(member) if leads else {}),
+        tags=tuple(sorted(tags))[:MAX_TAGS],
+        occurrences=(1 + previous.overflow) if restart else previous.occurrences + 1,
+        first_seen_at=min(previous.first_seen_at, member.occurred_at),
+        last_seen_at=max(previous.last_seen_at, member.occurred_at),
+        linked_sources=tuple(sorted(sources.items())),
+        updated_at=now,
+    )
 
 
 # ---- filters (AL-4) ----
