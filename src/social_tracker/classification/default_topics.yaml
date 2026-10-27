@@ -1,0 +1,150 @@
+# Default topic configuration of the risk classifier.
+#
+# Matching is by whole words and phrases, ignoring case, accents and punctuation, so "Sísmo",
+# "SISMO!" and "sismo" are one term. A word is NOT matched inside another one ("sismografo" is not
+# "sismo"): list each form you want (singular, plural, adjective). A place term alone never puts a
+# text in scope. A crime term only matters when no disaster term is present.
+#
+# Edit a copy and load it with `social-tracker topics set-file FILE --reason "..."`;
+# `social-tracker topics reset` returns to this file.
+
+version: 1
+
+# Primary focus (a): earthquakes, aftershocks, damage, rumors and the people who talk about them.
+earthquake:
+  - sismo
+  - sismos
+  - sísmico
+  - sísmica
+  - sísmicos
+  - sísmicas
+  - temblor
+  - temblores
+  - temblar
+  - tembló
+  - terremoto
+  - terremotos
+  - réplica
+  - réplicas
+  - magnitud
+  - epicentro
+  - hipocentro
+  - movimiento telúrico
+  - movimientos telúricos
+  - richter
+  - escala richter
+  - alerta sísmica
+  - actividad sísmica
+  - sismología
+  - sismólogo
+  - falla geológica
+  - fallas geológicas
+  - licuefacción
+  - sacudón
+
+# Primary focus (b): what is said about the Secretaría de Gestión del Riesgo de Emergencias y
+# Desastres of Cali (formerly the DAGRD), under its official name variants.
+secretariat:
+  - Secretaría de Gestión del Riesgo de Emergencias y Desastres
+  - Secretaría de Gestión del Riesgo de Emergencias y Desastres de Cali
+  - Secretaría de Gestión del Riesgo de Desastres
+  - Secretaría de Gestión del Riesgo
+  - Secretaría de Gestión de Riesgo
+  - Secretario de Gestión del Riesgo
+  - Departamento Administrativo de Gestión del Riesgo de Desastres
+  - Departamento Administrativo de Gestión del Riesgo
+  - DAGRD
+  - SGRED
+
+# Secondary: other natural disasters and the vocabulary of damage and emergency response.
+other_disaster:
+  - inundación
+  - inundaciones
+  - creciente súbita
+  - desbordamiento
+  - deslizamiento
+  - deslizamientos
+  - derrumbe
+  - derrumbes
+  - avalancha
+  - avalanchas
+  - volcán
+  - erupción
+  - incendio forestal
+  - incendios forestales
+  - tormenta
+  - vendaval
+  - granizada
+  - huracán
+  - tsunami
+  - maremoto
+  - evacuación
+  - evacuar
+  - evacuen
+  - albergue
+  - albergues
+  - damnificados
+  - desastre natural
+  - calamidad pública
+
+# Context only: raises the score of a text that is already in scope.
+places:
+  - Cali
+  - Santiago de Cali
+  - Valle del Cauca
+  - Colombia
+  - Jamundí
+  - Palmira
+  - Yumbo
+  - Buenaventura
+  - Cauca
+  - suroccidente colombiano
+
+# Crime and public order unrelated to disasters (out of scope unless a disaster term is present).
+exclude:
+  - robo
+  - hurto
+  - atraco
+  - asesinato
+  - homicidio
+  - sicariato
+  - sicario
+  - balacera
+  - extorsión
+  - secuestro
+  - narcotráfico
+  - orden público
+
+# Bodies whose name makes a statement look official ("según la UNGRD ..."). The secretariat names
+# above count as well. Naming the Servicio Geológico Colombiano in a text is fine; it is never a
+# data source of this application.
+official_bodies:
+  - UNGRD
+  - Unidad Nacional para la Gestión del Riesgo de Desastres
+  - Servicio Geológico Colombiano
+  - SGC
+  - IDEAM
+  - Defensa Civil
+  - Cuerpo de Bomberos
+  - Bomberos Cali
+  - Cruz Roja Colombiana
+  - Alcaldía de Cali
+  - Gobernación del Valle del Cauca
+
+# CONFIG ONLY - verify before relying. These are generic placeholders, NOT real addresses: nobody
+# has checked them. Replace them with the domains you have verified yourself. A link to one of
+# these domains (or an item served from one) lowers the suspicion of an unverified attribution.
+official_domains:
+  - official-domain.example
+
+# CONFIG ONLY - verify before relying. A placeholder, not a real account: informational, shown by
+# `topics show` and not used for any decision in this version.
+official_channel_hints:
+  - "@official_channel_placeholder"
+
+# Optional overrides of the weight (0 to 1) of a rule signal, for calibration. Absent signals keep
+# their default. Names: prediction_claim, prediction_specific_time, pseudo_authority,
+# virality_phrases, censorship_bait, all_caps, repeated_exclamation, unverifiable_sources,
+# official_attribution_unlinked, official_link, evacuation_claim, casualty_claim, recycled_marker,
+# old_year_reference, news_report.
+weights: {}

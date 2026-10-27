@@ -23,6 +23,7 @@ import yaml
 
 from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ValidationError
+from social_tracker.shared.strict_yaml import PlainDumper, Rejected, parse_document
 from social_tracker.sources.domain import Source, SourceBase, normalize_name, parse_source
 
 MAX_FILE_BYTES = 1_000_000
@@ -69,73 +70,11 @@ def _file_problem(message: str, *fields: str) -> SourceFileProblem:
     return SourceFileProblem(None, _CODE_INVALID, fields, message)
 
 
-class _Rejected(Exception):  # noqa: N818 - internal control flow, never leaves this module
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
-class _StrictLoader(yaml.SafeLoader):
-    """SafeLoader that refuses duplicate keys.
-
-    Merge keys (`<<`) are rejected too: there is no constructor for the merge tag, so building
-    the key node below fails before any merge could happen.
-    """
-
-    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
-        seen: set[Any] = set()
-        for key_node, _ in node.value:
-            key = self.construct_object(key_node, deep=True)
-            try:
-                if key in seen:
-                    raise _Rejected("duplicate mapping key")
-                seen.add(key)
-            except TypeError:
-                continue  # unhashable key: the base class reports it
-        return super().construct_mapping(node, deep)
-
-
-class _PlainDumper(yaml.SafeDumper):
-    """Never emits anchors or aliases, even when the same object appears twice."""
-
-    def ignore_aliases(self, data: Any) -> bool:
-        return True
-
-
-def _scan(text: str) -> None:
-    """Walk the parser events (nothing is constructed) and refuse anything unsafe or unbounded."""
-    depth = documents = 0
-    for count, event in enumerate(yaml.parse(text, Loader=yaml.SafeLoader), start=1):
-        if count > MAX_EVENTS:
-            raise _Rejected("document is too complex")
-        if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None) is not None:
-            raise _Rejected("anchors and aliases are not allowed")
-        if getattr(event, "tag", None) is not None:
-            raise _Rejected("explicit YAML tags are not allowed")
-        if isinstance(event, yaml.DocumentStartEvent):
-            documents += 1
-            if documents > 1:
-                raise _Rejected("multiple YAML documents are not allowed")
-        elif isinstance(event, yaml.MappingStartEvent | yaml.SequenceStartEvent):
-            depth += 1
-            if depth > MAX_DEPTH:
-                raise _Rejected("nesting is too deep")
-        elif isinstance(event, yaml.MappingEndEvent | yaml.SequenceEndEvent):
-            depth -= 1
-
-
 def _parse_document(text: str) -> Any:
-    if not text.strip():
-        return None  # blank (tabs included) is an empty document, not a syntax error
     try:
-        _scan(text)
-        return yaml.load(text, Loader=_StrictLoader)  # noqa: S506 - SafeLoader subclass
-    except _Rejected as exc:
+        return parse_document(text, max_events=MAX_EVENTS, max_depth=MAX_DEPTH)
+    except Rejected as exc:
         raise SourceFileError([_file_problem(exc.message)]) from None
-    except yaml.YAMLError:
-        raise SourceFileError([_file_problem("malformed or unsupported YAML document")]) from None
-    except (ValueError, TypeError, OverflowError, RecursionError):
-        raise SourceFileError([_file_problem("malformed or unsupported YAML document")]) from None
 
 
 def _with_default_timestamps(entry: dict[Any, Any], default: datetime | None) -> dict[Any, Any]:
@@ -238,7 +177,7 @@ def dump_sources(sources: Iterable[Source]) -> str:
     entries = [_entry_of(item) for item in sorted(items, key=lambda s: s.id)]
     return yaml.dump(
         {_ROOT_KEY: entries},
-        Dumper=_PlainDumper,
+        Dumper=PlainDumper,
         sort_keys=False,
         allow_unicode=True,
         default_flow_style=False,
