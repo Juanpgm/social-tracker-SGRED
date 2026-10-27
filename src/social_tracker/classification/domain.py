@@ -14,6 +14,8 @@ Everything here is deterministic (RC-10): no clock, no randomness, no I/O.
 from dataclasses import dataclass
 from enum import StrEnum
 
+from social_tracker.shared.errors import ValidationError
+
 
 class Label(StrEnum):
     UNINTENTIONAL_RUMOR = "unintentional_rumor"
@@ -91,3 +93,81 @@ SIGNALS: dict[str, SignalSpec] = {
     "old_year_reference": SignalSpec(Label.RECYCLED_CONTENT, 0.25),
     "news_report": SignalSpec(Label.NO_RISK, 0.50),
 }
+
+
+@dataclass(frozen=True)
+class Signal:
+    """One piece of evidence found by the rules: its name (a key of `SIGNALS`), the label it
+    argues for and its weight in (0, 1]. It carries no text of the item."""
+
+    name: str
+    label: Label
+    weight: float
+
+    def __post_init__(self) -> None:
+        if self.name not in SIGNALS:
+            raise ValidationError("unknown signal")
+        if not isinstance(self.label, Label):
+            raise ValidationError("a signal needs a label")
+        if not _is_number(self.weight) or not 0.0 <= self.weight <= 1.0:
+            raise ValidationError("a signal weight must be a number from 0 to 1")
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _in_range(value: object, low: float, high: float) -> bool:
+    return _is_number(value) and low <= value <= high  # type: ignore[operator]
+
+
+def _whole(value: object, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+@dataclass(frozen=True)
+class ClassifierSettings:
+    """Thresholds of the cascade; the defaults are the product's (RC-5, RC-7).
+
+    - `recycle_days`: a match to content first seen/published STRICTLY more than this many days
+      earlier is recycled; a match within it is a plain duplicate.
+    - `near_duplicate_threshold`: estimated Jaccard similarity from which two texts are near
+      duplicates (inclusive).
+    - `escalate_low`/`escalate_high`: the confidence band [low, high) that goes to the LLM.
+    - `inconclusive_below`: a top evidence score under this decides nothing.
+    - `conflict_min`/`conflict_margin`: two labels both at least `conflict_min` and closer than
+      `conflict_margin` conflict.
+    - `old_year_gap`: a year at least this many years before the item's own is an old reference.
+    - `max_text_chars`: longer text is cut (and flagged) before the stages see it.
+    - `signature_retention_days`: how long near-duplicate signatures are kept.
+    """
+
+    recycle_days: int = 7
+    near_duplicate_threshold: float = 0.8
+    escalate_low: float = 0.4
+    escalate_high: float = 0.8
+    inconclusive_below: float = 0.2
+    conflict_min: float = 0.3
+    conflict_margin: float = 0.15
+    old_year_gap: int = 2
+    max_text_chars: int = 20_000
+    signature_retention_days: int = 730
+
+    def __post_init__(self) -> None:
+        valid = (
+            _whole(self.recycle_days, 1, 3650)
+            and _in_range(self.near_duplicate_threshold, 0.0, 1.0)
+            and self.near_duplicate_threshold > 0
+            and _in_range(self.escalate_low, 0.0, 1.0)
+            and _in_range(self.escalate_high, 0.0, 1.0)
+            and self.escalate_low <= self.escalate_high
+            and _in_range(self.inconclusive_below, 0.0, 1.0)
+            and _in_range(self.conflict_min, 0.0, 1.0)
+            and _in_range(self.conflict_margin, 0.0, 1.0)
+            and self.conflict_margin > 0
+            and _whole(self.old_year_gap, 1, 100)
+            and _whole(self.max_text_chars, 1, 1_000_000)
+            and _whole(self.signature_retention_days, 1, 3650)
+        )
+        if not valid:
+            raise ValidationError("invalid classifier settings")
