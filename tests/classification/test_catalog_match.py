@@ -83,7 +83,7 @@ def test_floating_point_noise_does_not_move_the_boundary():
         check(claims(6.2), [point(magnitude=5.2)]).status == MISMATCH
     )  # 6.2 - 5.2 = 1.0000000000000009
     assert check(claims(5.9), [point(magnitude=6.9)]).status == MISMATCH
-    assert check(claims(0.3), [point(magnitude=1.2)]).status == CONSISTENT  # 0.8999999999999999
+    assert check(claims(3.3), [point(magnitude=4.2)]).status == CONSISTENT  # 0.8999999999999999
 
 
 def test_the_finding_reports_the_difference_and_the_event_magnitude():
@@ -108,9 +108,10 @@ def test_a_range_is_as_far_from_the_event_as_its_nearest_end(event, status, delt
     assert finding.delta_magnitude == pytest.approx(delta)
 
 
-def test_with_several_claimed_magnitudes_the_closest_one_decides():
+def test_with_several_claimed_magnitudes_all_of_them_must_be_matched():
     assert check(claims(6.2, 5.8), [point(magnitude=5.9)]).status == CONSISTENT
-    assert check(claims(6.2, 8.0), [point(magnitude=7.5)]).status == CONSISTENT
+    # S2: one claimed number matching while another does not is inconclusive, never consistent
+    assert check(claims(6.2, 8.0), [point(magnitude=7.5)]).status == UNAVAILABLE
     assert check(claims(6.2, 5.8), [point(magnitude=4.0)]).status == MISMATCH
     assert check(claims(6.2, 5.8), [point(magnitude=7.4)]).status == MISMATCH
 
@@ -118,13 +119,21 @@ def test_with_several_claimed_magnitudes_the_closest_one_decides():
 # ---- which event is compared ----
 
 
-def test_the_event_nearest_in_time_is_the_one_compared():
+def test_the_event_nearest_in_time_is_compared_when_the_claim_names_its_instant():
     near_small = point(minutes=-1, magnitude=5.0)
     far_big = point(minutes=-30, magnitude=6.2)
-    assert check(claims(6.2), [near_small, far_big]).status == MISMATCH  # the nearest is M5.0
-    assert check(claims(6.2), [point(minutes=-10, magnitude=6.2), point(minutes=-90)]).status == (
+    named = claims(6.2, kind=TimeKind.RELATIVE, at=PUB)
+    assert check(named, [near_small, far_big]).status == MISMATCH  # the nearest is M5.0
+    assert check(named, [point(minutes=-10, magnitude=6.2), point(minutes=-90)]).status == (
         CONSISTENT
     )
+
+
+def test_without_a_named_instant_any_event_of_the_window_may_match():
+    # R4: the nearest-in-time rule let an aftershock hide the mainshock
+    near_small = point(minutes=-1, magnitude=5.0)
+    far_big = point(minutes=-30, magnitude=6.2)
+    assert check(claims(6.2), [near_small, far_big]).status == CONSISTENT
 
 
 def test_an_equal_distance_in_time_is_broken_by_the_smaller_difference_and_is_stable():

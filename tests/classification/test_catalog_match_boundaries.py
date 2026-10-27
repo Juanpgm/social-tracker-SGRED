@@ -11,7 +11,7 @@ from social_tracker.classification.catalog_match import (
     distance_km,
     merge_duplicates,
 )
-from social_tracker.classification.claims import Claims, MagnitudeClaim, TimeClaim
+from social_tracker.classification.claims import Claims, MagnitudeClaim, TimeClaim, TimeKind
 
 NOW = datetime(2026, 10, 27, 18, 0, tzinfo=UTC)
 PUB = NOW - timedelta(minutes=2)
@@ -71,8 +71,11 @@ def test_two_events_of_the_same_catalog_are_never_one_earthquake():
     assert len(merge_duplicates([first, aftershock])) == 2
 
 
-def test_an_aftershock_closer_in_time_is_the_event_compared():
+def test_an_aftershock_closer_in_time_is_compared_only_when_the_claim_names_its_instant():
     main_shock = point(6.2, seconds=-600)
     aftershock = point(3.5, seconds=-5)
-    assert status(claim(6.2), [main_shock, aftershock]) == MISMATCH
+    # R4: with no time claim the best event of the window decides, so the aftershock hides nothing
+    assert status(claim(6.2), [main_shock, aftershock]) == CONSISTENT
     assert status(claim(6.2), [main_shock]) == CONSISTENT
+    at_aftershock = Claims((MagnitudeClaim(6.2, 6.2),), TimeClaim(TimeKind.RELATIVE, PUB))
+    assert status(at_aftershock, [main_shock, aftershock]) == MISMATCH

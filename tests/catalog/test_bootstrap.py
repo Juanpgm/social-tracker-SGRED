@@ -8,6 +8,7 @@ import pytest
 from social_tracker.bootstrap import (
     CATALOG_CENTER_ENV,
     CATALOG_GLOBAL_MIN_MAGNITUDE_ENV,
+    CATALOG_INGEST_GRACE_ENV,
     CATALOG_INTERVAL_ENV,
     CATALOG_MAX_AGE_ENV,
     CATALOG_MIN_MAGNITUDE_ENV,
@@ -39,12 +40,14 @@ def test_every_variable_is_read():
         CATALOG_GLOBAL_MIN_MAGNITUDE_ENV: "6.0",
         CATALOG_INTERVAL_ENV: "900",
         CATALOG_MAX_AGE_ENV: "3600",
+        CATALOG_INGEST_GRACE_ENV: "900",
     }
     settings = parse_catalog_settings(env)
     assert (settings.center_latitude, settings.center_longitude) == (4.711, -74.0721)
     assert settings.radius_km == 150.5
     assert (settings.min_magnitude, settings.global_min_magnitude) == (3.0, 6.0)
     assert (settings.interval_s, settings.max_age_s) == (900, 3600)
+    assert settings.ingest_grace_s == 900
 
 
 @pytest.mark.parametrize(
@@ -70,6 +73,10 @@ def test_every_variable_is_read():
         (CATALOG_INTERVAL_ENV, "-600"),
         (CATALOG_INTERVAL_ENV, "999999999999"),
         (CATALOG_MAX_AGE_ENV, "30"),
+        (CATALOG_INGEST_GRACE_ENV, "-1"),
+        (CATALOG_INGEST_GRACE_ENV, "86401"),
+        (CATALOG_INGEST_GRACE_ENV, "1.5"),
+        (CATALOG_INGEST_GRACE_ENV, "abc"),
     ],
 )
 def test_an_invalid_value_names_the_variable_and_does_not_echo_the_value(name, value):
@@ -85,6 +92,11 @@ def test_the_limits_of_the_valid_ranges_are_accepted():
     settings = parse_catalog_settings(env)
     assert (settings.center_latitude, settings.center_longitude) == (-90.0, -180.0)
     assert settings.interval_s == 60
+
+
+def test_the_ingest_grace_accepts_zero_and_a_day_and_nothing_beyond():
+    assert parse_catalog_settings({CATALOG_INGEST_GRACE_ENV: "0"}).ingest_grace_s == 0
+    assert parse_catalog_settings({CATALOG_INGEST_GRACE_ENV: "86400"}).ingest_grace_s == 86_400
 
 
 def test_a_max_age_under_the_interval_is_refused():

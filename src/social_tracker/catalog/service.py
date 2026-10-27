@@ -336,9 +336,12 @@ class CachedCatalogCheck:
         claims = extract_claims(text, published_at, utc_offset_hours=settings.utc_offset_hours)
         if not claims.magnitudes:
             return CatalogResult("no_claim")
-        reference = claims.when.at if claims.when.at is not None else ensure_utc(published_at)
-        reach = self._match.time_window + timedelta(seconds=self._match.duplicate_seconds)
-        events = self._repo.events_between(reference - reach, reference + reach)
+        try:
+            reference = claims.when.at if claims.when.at is not None else ensure_utc(published_at)
+            reach = self._match.time_window + timedelta(seconds=self._match.duplicate_seconds)
+            events = self._repo.events_between(reference - reach, reference + reach)
+        except OverflowError:  # a publication time at the edge of the calendar: nothing to compare
+            return CatalogResult("no_claim")
         finding = cross_check(
             claims,
             published_at,
@@ -347,5 +350,6 @@ class CachedCatalogCheck:
             settings=self._match,
             complete=len(fresh) == len(CatalogSource),
             covered_from=max(fresh) - timedelta(hours=settings.lookback_hours),
+            covered_until=min(fresh),
         )
         return CatalogResult(finding.status)

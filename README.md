@@ -47,6 +47,7 @@ Configuration comes from the process environment (no file is read). All variable
 | `SOCIAL_TRACKER_CATALOG_GLOBAL_MIN_MAGNITUDE` | Smallest event kept anywhere in the world, for earthquakes felt elsewhere (-2..10). | `5.5` |
 | `SOCIAL_TRACKER_CATALOG_INTERVAL_S` | How often the worker refreshes the catalogs, in seconds (60..86400). | `600` |
 | `SOCIAL_TRACKER_CATALOG_MAX_AGE_S` | A cache whose last good refresh is older than this is stale and the check says `unavailable` (from the interval up to 604800). | `7200` |
+| `SOCIAL_TRACKER_CATALOG_INGEST_GRACE_S` | How long the catalogs may take to publish an earthquake, in seconds (0..86400). A claim newer than the last refresh minus this is confirmed if the cache has it and otherwise `unavailable`, never a mismatch. | `1800` |
 | `SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE` | Most items one source may hold at a time. Over it, new entries are dropped and counted as `source_quota`. | `100000` |
 | `SOCIAL_TRACKER_MAX_BYTES_PER_SOURCE` | Most bytes (title, text and raw entry) one source may hold. Over it, new entries are dropped and counted as `source_quota`. | `536870912` (512 MiB) |
 | `SOCIAL_TRACKER_MAX_BYTES_PER_FETCH` | Most bytes of items one fetch may add. Over it, the rest of the feed is dropped and counted as `fetch_quota`. | `16777216` (16 MiB) |
@@ -512,7 +513,8 @@ second opinion for that.
 | `recycled_marker` | recycled_content | 0.50 | "video de 2016", "video viejo", "hace años", "de hace 10 años", "fotos del archivo", "imágenes de archivo" |
 | `old_year_reference` | recycled_content | 0.25 | a year at least two years before the year the item was first seen |
 | `news_report` | no_risk | 0.60 | a report verb with a quake and a magnitude ("el SGC reportó un sismo de magnitud 4.2", "un temblor de 4.5 grados") or an agency wording ("el Servicio Geológico Colombiano informó un temblor", "la Red Sismológica Nacional registró un sismo") |
-| `obfuscated_text` | unclassified | 0.30 | mixed scripts in one word, invisible filler characters, a word spelled letter by letter or a digit inside a word: suspicion only, no label |
+| `obfuscated_text` | unclassified | 0.30 | mixed scripts in one word, invisible filler characters, a word spelled letter by letter or a digit inside a word: suspicion only, no label |
+
 | `catalog_mismatch` | unintentional_rumor | 0.30 | the official-catalog cross-check contradicts the claimed magnitude (difference of 1.0 or more against the event nearest in time) or finds no event in the time window; set by the check, not read from the text. Too weak to decide a label alone: it adds to other rumor evidence and sends a clean-looking report to review |
 
 **The official-catalog cross-check** (stage 4). For an in-scope earthquake item the cascade

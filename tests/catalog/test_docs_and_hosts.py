@@ -26,6 +26,7 @@ def test_every_catalog_variable_is_documented_with_its_real_default():
         bootstrap.CATALOG_GLOBAL_MIN_MAGNITUDE_ENV: f"`{defaults.global_min_magnitude:g}`",
         bootstrap.CATALOG_INTERVAL_ENV: f"`{defaults.interval_s}`",
         bootstrap.CATALOG_MAX_AGE_ENV: f"`{defaults.max_age_s}`",
+        bootstrap.CATALOG_INGEST_GRACE_ENV: f"`{defaults.ingest_grace_s}`",
     }
     for variable, default in expected.items():
         assert default in row(variable).split("|")[-2], variable

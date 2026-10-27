@@ -13,7 +13,8 @@ from social_tracker.shared.clock import FixedClock
 from tests.catalog.support import NOW
 
 USGS, EMSC = CatalogSource.USGS, CatalogSource.EMSC
-PUB = NOW - timedelta(minutes=1)
+# published well before the last refresh: a newer claim could be ahead of the cache (R1)
+PUB = NOW - timedelta(hours=1)
 CLAIM = "Sismo de magnitud 6.2 en Cali hace un momento"
 
 
@@ -106,7 +107,7 @@ def test_when_one_catalog_is_stale_a_found_event_still_decides(world):
     world.fresh(EMSC, at=NOW - timedelta(days=1))
     world.add(magnitude=6.0)
     assert world.status() == "consistent"
-    world.add(id="e2", magnitude=3.0, minutes=-2)
+    world.add(magnitude=3.0)  # the catalog revised the same event
     assert world.status() == "mismatch"
 
 
@@ -260,7 +261,9 @@ def test_the_status_of_an_empty_cache(world):
 def test_purge_forgets_only_events_older_than_the_retention(world):
     cache = CatalogCache(world.repo, world.clock, world.settings)
     world.add(id="old", minutes=-60 * 24 * 15)
-    world.add(id="edge", minutes=-60 * 24 * 14 + 5)
+    world.add(
+        id="edge", minutes=-60 * 24 * 14 + 65
+    )  # five minutes inside the retention (PUB is an hour old)
     world.add(id="new")
     assert cache.purge_expired() == 1
     kept = world.repo.events_between(NOW - timedelta(days=60), NOW)

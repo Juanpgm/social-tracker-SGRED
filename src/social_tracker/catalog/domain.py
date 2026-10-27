@@ -85,7 +85,10 @@ class CatalogSettings:
       `unavailable`); `retention_days`: events older than this are purged;
     - `time_window`, `max_magnitude_delta`, `utc_offset_hours`: how the check compares (see
       `classification.catalog_match` and `classification.claims`);
-    - `max_events`: the cap sent with each request.
+    - `max_events`: the cap sent with each request; an answer that reaches it may be cut short and
+      then the cache is not `complete`;
+    - `ingest_grace_s`: how long the catalogs may take to publish an earthquake. A claim newer than
+      the last refresh minus this grace can never be refuted by the cache (breaking news).
     """
 
     center_latitude: float = 3.4516
@@ -101,6 +104,7 @@ class CatalogSettings:
     max_magnitude_delta: float = 1.0
     utc_offset_hours: int = -5
     max_events: int = 500
+    ingest_grace_s: int = 1800
 
     def __post_init__(self) -> None:
         window_hours = (
@@ -120,6 +124,7 @@ class CatalogSettings:
             and _whole(self.retention_days, 1, 365)
             and _whole(self.max_events, 1, 20_000)
             and _whole(self.utc_offset_hours, -12, 14)
+            and _whole(self.ingest_grace_s, 0, 86_400)
             and 0 < window_hours <= 24 * 7
             and _whole(self.lookback_hours, math.ceil(2 * window_hours), _MAX_LOOKBACK_HOURS)
         )
@@ -135,6 +140,8 @@ class CatalogSettings:
             center_longitude=self.center_longitude,
             radius_km=self.radius_km,
             global_min_magnitude=self.global_min_magnitude,
+            min_magnitude=self.min_magnitude,
+            ingest_grace=timedelta(seconds=self.ingest_grace_s),
         )
 
 
