@@ -28,11 +28,13 @@ from dataclasses import dataclass
 from typing import Final
 
 from social_tracker.classification.domain import (
+    MAX_RATIONALE_CHARS,
     RISK_LABELS,
     SIGNALS,
     ClassifierSettings,
     Label,
     Signal,
+    TopicVerdict,
 )
 from social_tracker.classification.text import PreparedText
 from social_tracker.classification.topics import TopicConfig, TopicMatcher
@@ -57,7 +59,7 @@ def _words(text: str) -> frozenset[str]:
 _QUAKE = r"(?:temblor|sismo|terremoto|replica|sacudon|movimiento telurico)"
 _FUTURE = r"(?:habra|va a haber|vendra|ocurrira|se viene|se aproxima|se acerca|llegara|tendremos)"
 _FORECAST = r"(?:pronostican|pronostico|pronosticaron|predicen|predijo|prediccion|profecia)"
-_TOMORROW = r"(?<!esta )(?<!la )manana"
+_TOMORROW = r"(?<!\besta )(?<!\bla )manana"
 _PREDICTIONS = tuple(
     re.compile(p)
     for p in (
@@ -412,3 +414,29 @@ def priority(risk_strength: float, topic_score: float, *, secretariat: bool) -> 
     on topic, with a bump for items that are about the secretariat."""
     value = 0.6 * risk_strength + 0.3 * topic_score + (0.1 if secretariat else 0.0)
     return round(min(1.0, max(0.0, value)), 4)
+
+
+_MATCHED_SHOWN = 5
+_TERM_SHOWN_CHARS = 40
+_SIGNALS_SHOWN = 4
+
+
+def rationale_for_rules(outcome: RuleOutcome, topic: TopicVerdict) -> str:
+    """A short explanation of a rules verdict (RC-4): the label, the strongest signals that argue
+    for it, the topics and a few matched configuration terms, in quotes. Item text is never
+    quoted, and the result is at most `MAX_RATIONALE_CHARS` long."""
+    if outcome.inconclusive:
+        names = ", ".join(s.name for s in outcome.signals) or "no signal"
+        head = f"inconclusive: nothing decisive ({names})"
+    else:
+        ranked = sorted(
+            (s for s in outcome.signals if s.label is outcome.label),
+            key=lambda s: (-s.weight, s.name),
+        )
+        names = ", ".join(s.name for s in ranked[:_SIGNALS_SHOWN])
+        head = f"{outcome.label.value} candidate from rules: {names}"
+        if outcome.conflicting:
+            head += "; conflicting signals"
+    topics = ", ".join(t.value for t in topic.topics)
+    matched = ", ".join(f'"{t[:_TERM_SHOWN_CHARS]}"' for t in topic.matched_terms[:_MATCHED_SHOWN])
+    return f"{head}; topics: {topics}; matched: {matched}"[:MAX_RATIONALE_CHARS]

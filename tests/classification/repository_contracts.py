@@ -299,7 +299,7 @@ class TopicConfigRepositoryContract:
         assert repo.append(stored(config(places=["Cali", "Palmira"]), minutes=2)) == 3
         latest = repo.latest()
         assert latest.version == 3
-        assert latest.config.places == ("Cali", "Palmira")
+        assert latest.config.places == ("cali", "palmira")
 
     def test_every_field_of_a_version_survives_a_round_trip(self, repo):
         cfg = config(
@@ -348,6 +348,7 @@ class TopicConfigRepositoryContract:
                 "other_disaster": [f"dis{n:04d} " + "ñ" * 70 for n in range(500)],
                 "official_bodies": [f"bod{n:04d} " + "ñ" * 70 for n in range(500)],
                 "exclude": [f"exc{n:04d} " + "ñ" * 70 for n in range(500)],
+                "official_channel_hints": [f"@h{n:04d}" + "漢" * 70 for n in range(500)],
             }
         )
         with pytest.raises(ValidationError):

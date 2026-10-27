@@ -226,7 +226,7 @@ def test_a_configuration_with_no_topic_term_at_all_is_refused():
     with pytest.raises(ValidationError):
         TopicConfig.from_mapping({"version": 1, "places": ["Cali"]})
     assert TopicConfig.from_mapping({"version": 1, "secretariat": ["DAGRD"]}).secretariat == (
-        "DAGRD",
+        "dagrd",
     )
 
 

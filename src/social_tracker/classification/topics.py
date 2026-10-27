@@ -3,8 +3,9 @@
 `TopicConfig` is the editable vocabulary: keyword sets per topic (earthquake, secretariat, other
 natural disasters), place terms, crime terms that mark an item as out of scope, the official
 bodies and domains used by the attribution rule, and optional signal weight overrides. It is
-validated strictly (`from_mapping`) and canonical: terms are kept sorted by their folded form, so
-two configurations that differ only in order are equal.
+validated strictly (`from_mapping`) and canonical: terms are kept in their folded form (lowercase,
+no accents or punctuation) and sorted, so two configurations that differ only in order, case or
+accents are equal.
 
 Matching works on folded tokens (see `text.fold`): whole words and whole phrases only, ignoring
 case, accents, punctuation and invisible characters. A place term alone never puts an item in
@@ -71,14 +72,15 @@ def _check_term(term: str, group: str) -> str:
     return folded
 
 
-def _terms(data: Mapping[str, Any], group: str) -> tuple[tuple[str, ...], dict[str, str]]:
-    keyed: dict[str, str] = {}
+def _terms(data: Mapping[str, Any], group: str) -> tuple[tuple[str, ...], set[str]]:
+    """The terms of a group in their folded form (that is how they match), sorted."""
+    seen: set[str] = set()
     for term in _text_items(data, group):
         folded = _check_term(term, group)
-        if folded in keyed:
+        if folded in seen:
             raise _bad(f"'{group}' lists the same term twice (ignoring case and accents)", group)
-        keyed[folded] = term
-    return tuple(keyed[k] for k in sorted(keyed)), keyed
+        seen.add(folded)
+    return tuple(sorted(seen)), seen
 
 
 def _domains(data: Mapping[str, Any]) -> tuple[str, ...]:

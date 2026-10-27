@@ -8,10 +8,13 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from social_tracker.classification.domain import (
+    MAX_RATIONALE_CHARS,
     SIGNALS,
     ClassifierSettings,
     Label,
     Signal,
+    Topic,
+    TopicVerdict,
 )
 from social_tracker.classification.rules import (
     apply_prior,
@@ -21,6 +24,7 @@ from social_tracker.classification.rules import (
     is_low_confidence,
     needs_escalation,
     priority,
+    rationale_for_rules,
 )
 from social_tracker.classification.text import prepare
 from social_tracker.classification.topics import TopicConfig, TopicMatcher
@@ -96,6 +100,7 @@ def test_reporting_or_debunking_a_quake_is_not_a_prediction(text):
         "El sábado habrá un temblor fuerte",
         "Esta noche se viene un terremoto",
         "Hoy habrá un sismo en Cali",
+        "En la regla mañana habrá un temblor",  # a word ending in "la" before "mañana"
     ],
 )
 def test_a_prediction_with_a_specific_time_is_a_second_signal(text):
@@ -834,3 +839,56 @@ def test_a_maximum_size_text_is_analysed_quickly():
     started = time.perf_counter()
     detect_signals(prepared, matcher, config, reference_year=2026, item_url=None, settings=SETTINGS)
     assert time.perf_counter() - started < 2.0
+
+
+# ---- rationale (RC-4) ----
+
+TOPIC = TopicVerdict(True, (Topic.EARTHQUAKE, Topic.SECRETARIAT), ("cali", "sismo"), 0.65)
+
+
+def test_the_rationale_names_the_label_the_strongest_signals_the_topics_and_matched_terms():
+    outcome = combine(
+        [sig("prediction_claim"), sig("virality_phrases"), sig("recycled_marker", 0.1)],
+        credibility=3,
+        settings=SETTINGS,
+    )
+    assert rationale_for_rules(outcome, TOPIC) == (
+        "unintentional_rumor candidate from rules: prediction_claim, virality_phrases; "
+        'topics: earthquake, secretariat; matched: "cali", "sismo"'
+    )
+
+
+def test_a_conflict_and_an_inconclusive_result_are_said_so():
+    conflict = combine(
+        [sig("prediction_claim", 0.45), sig("censorship_bait", 0.4)],
+        credibility=3,
+        settings=SETTINGS,
+    )
+    assert "; conflicting signals; topics:" in rationale_for_rules(conflict, TOPIC)
+    nothing = combine([], credibility=3, settings=SETTINGS)
+    assert rationale_for_rules(nothing, TOPIC).startswith(
+        "inconclusive: nothing decisive (no signal);"
+    )
+    weak = combine([sig("all_caps")], credibility=3, settings=SETTINGS)
+    assert rationale_for_rules(weak, TOPIC).startswith("inconclusive: nothing decisive (all_caps);")
+
+
+def test_at_most_four_signals_and_five_terms_are_listed_and_long_terms_are_cut():
+    outcome = combine(
+        [sig(n) for n in SIGNALS if SIGNALS[n].label is Label.UNINTENTIONAL_RUMOR],
+        credibility=3,
+        settings=SETTINGS,
+    )
+    terms = tuple(f"term{n}" for n in range(8)) + ("x" * 60,)
+    text = rationale_for_rules(outcome, TopicVerdict(True, (Topic.EARTHQUAKE,), terms, 0.5))
+    assert text.count(", ") == 3 + 4 + 0  # four signals, five terms: three and four separators
+    assert '"term4"' in text
+    assert '"term5"' not in text
+    long = rationale_for_rules(outcome, TopicVerdict(True, (Topic.EARTHQUAKE,), ("x" * 60,), 0.5))
+    assert '"' + "x" * 40 + '"' in long
+
+
+def test_the_rationale_never_exceeds_the_stored_limit():
+    outcome = combine([sig("prediction_claim")], credibility=3, settings=SETTINGS)
+    huge = TopicVerdict(True, (Topic.EARTHQUAKE,), tuple("y" * 40 for _ in range(50)), 0.5)
+    assert len(rationale_for_rules(outcome, huge)) <= MAX_RATIONALE_CHARS
