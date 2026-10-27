@@ -17,7 +17,7 @@ word is bound inside a double-quoted FTS5 string, so `AND`, `NEAR`, `*`, `:` and
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -69,6 +69,7 @@ _FORGET_OLDEST = (
     "DELETE FROM item_tombstones WHERE source_id = ? AND seq <= "
     "(SELECT seq FROM item_tombstones WHERE source_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?)"
 )
+_PROCESSED = (ItemStatus.CLASSIFIED, ItemStatus.OUT_OF_SCOPE)
 _NEWEST_FIRST = " ORDER BY published_at DESC, id DESC LIMIT ?"
 
 
@@ -77,6 +78,13 @@ def _stored_flags(text: str) -> tuple[str, ...]:
     if not isinstance(flags, list):
         raise TypeError("flags must be a JSON array")
     return tuple(flags)
+
+
+def _stage(status: ItemStatus) -> ItemStatus:
+    try:
+        return ItemStatus(status)
+    except ValueError:
+        raise ValidationError("unknown item status") from None
 
 
 def _item_from_row(row: sqlite3.Row) -> Item:
@@ -224,11 +232,23 @@ class SqliteItemRepository:
         )
         return [_item_from_row(row) for row in rows]
 
+    def list_by_status(
+        self, status: ItemStatus, *, limit: int, source_ids: Collection[str] | None = None
+    ) -> list[Item]:
+        stage = _stage(status)
+        validate_limit(limit)
+        if source_ids is not None and not source_ids:
+            return []
+        sql = f"{_SELECT} WHERE status = ?"
+        params: list[Any] = [stage.value]
+        if source_ids is not None:
+            sql += f" AND source_id IN ({', '.join('?' * len(source_ids))})"
+            params.extend(sorted(source_ids))
+        rows = self._db.query(f"{sql} ORDER BY published_at, id LIMIT ?", (*params, limit))
+        return [_item_from_row(row) for row in rows]
+
     def set_status(self, item_id: str, status: ItemStatus) -> bool:
-        try:
-            stage = ItemStatus(status)
-        except ValueError:
-            raise ValidationError("unknown item status") from None
+        stage = _stage(status)
         with self._db.transaction() as conn:
             return (
                 conn.execute(
@@ -244,10 +264,11 @@ class SqliteItemRepository:
             return conn.execute("DELETE FROM items WHERE fetched_at < ?", (text,)).rowcount
 
     def purge_classified(self) -> int:
-        classified = (ItemStatus.CLASSIFIED.value,)
+        processed = tuple(s.value for s in _PROCESSED)
+        condition = f"status IN ({', '.join('?' * len(processed))})"
         with self._db.transaction() as conn:
-            self._remember(conn, "status = ?", classified)
-            return conn.execute("DELETE FROM items WHERE status = ?", classified).rowcount
+            self._remember(conn, condition, processed)
+            return conn.execute(f"DELETE FROM items WHERE {condition}", processed).rowcount
 
     # Defined last: the name shadows the builtin inside the class body.
     def list(self, *, source_id: str | None = None, limit: int = DEFAULT_LIST_LIMIT) -> list[Item]:

@@ -1,7 +1,7 @@
 """In-memory `ItemRepository`: the reference for the contract and for service tests."""
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import replace
 from datetime import datetime
 
@@ -22,11 +22,19 @@ from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ValidationError
 
 
+def _stage(status: ItemStatus) -> ItemStatus:
+    try:
+        return ItemStatus(status)
+    except ValueError:
+        raise ValidationError("unknown item status") from None
+
+
 def _newest_first(items: list[Item]) -> list[Item]:
     return sorted(items, key=lambda i: (i.published_at, i.id), reverse=True)
 
 
 _UNDATED = "published_at_missing"
+_PROCESSED = (ItemStatus.CLASSIFIED, ItemStatus.OUT_OF_SCOPE)
 
 
 class InMemoryItemRepository:
@@ -107,16 +115,26 @@ class InMemoryItemRepository:
         return _newest_first(found)[:limit]
 
     def set_status(self, item_id: str, status: ItemStatus) -> bool:
-        try:
-            stage = ItemStatus(status)
-        except ValueError:
-            raise ValidationError("unknown item status") from None
+        stage = _stage(status)
         with self._lock:
             item = self._items.get(item_id)
             if item is None:
                 return False
             self._items[item_id] = replace(item, status=stage)
             return True
+
+    def list_by_status(
+        self, status: ItemStatus, *, limit: int, source_ids: Collection[str] | None = None
+    ) -> list[Item]:
+        stage = _stage(status)
+        validate_limit(limit)
+        with self._lock:
+            found = [
+                i
+                for i in self._items.values()
+                if i.status is stage and (source_ids is None or i.source_id in source_ids)
+            ]
+        return sorted(found, key=lambda i: (i.published_at, i.id))[:limit]
 
     def purge_fetched_before(self, cutoff: datetime) -> int:
         limit = ensure_utc(cutoff)
@@ -129,7 +147,7 @@ class InMemoryItemRepository:
 
     def purge_classified(self) -> int:
         with self._lock:
-            doomed = [i for i in self._items.values() if i.status is ItemStatus.CLASSIFIED]
+            doomed = [i for i in self._items.values() if i.status in _PROCESSED]
             self._remember(doomed)
             for item in doomed:
                 del self._items[item.id]

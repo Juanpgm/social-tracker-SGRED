@@ -315,6 +315,60 @@ class ItemRepositoryContract:
         repo.set_status(item.id, ItemStatus.CLASSIFIED)
         assert [i.id for i in repo.search("quake")] == [item.id]
 
+    # ---- pending items (the classification queue) ----
+
+    def test_list_by_status_returns_the_oldest_published_first_and_only_that_status(self, repo):
+        old = make_item("old", title="o", text="1", published_at=NOW - timedelta(days=3))
+        mid = make_item("mid", title="m", text="2", published_at=NOW - timedelta(days=2))
+        new = make_item("new", title="n", text="3", published_at=NOW - timedelta(days=1))
+        done = make_item("done", title="d", text="4", published_at=NOW - timedelta(days=9))
+        repo.add_new([new, done, old, mid])
+        repo.set_status(done.id, ItemStatus.CLASSIFIED)
+        found = repo.list_by_status(ItemStatus.NEW, limit=10)
+        assert [i.external_id for i in found] == ["old", "mid", "new"]
+        assert [i.external_id for i in repo.list_by_status(ItemStatus.CLASSIFIED, limit=10)] == [
+            "done"
+        ]
+
+    def test_list_by_status_breaks_a_publication_tie_by_id_and_honours_the_limit(self, repo):
+        items = [make_item(f"tie-{n}", title=f"t{n}", text=f"x{n}") for n in range(4)]
+        repo.add_new(items)
+        everything = repo.list_by_status(ItemStatus.NEW, limit=10)
+        assert [i.id for i in everything] == sorted(i.id for i in items)
+        assert [i.id for i in repo.list_by_status(ItemStatus.NEW, limit=2)] == [
+            i.id for i in everything[:2]
+        ]
+
+    def test_list_by_status_can_be_restricted_to_some_sources(self, repo):
+        a = make_item("a", source_id="src_a", title="a", text="1")
+        b = make_item("b", source_id="src_b", title="b", text="2")
+        c = make_item("c", source_id="src_c", title="c", text="3")
+        repo.add_new([a, b, c])
+        found = repo.list_by_status(ItemStatus.NEW, limit=10, source_ids=["src_a", "src_c"])
+        assert {i.source_id for i in found} == {"src_a", "src_c"}
+        assert repo.list_by_status(ItemStatus.NEW, limit=10, source_ids=[]) == []
+        assert len(repo.list_by_status(ItemStatus.NEW, limit=10, source_ids=None)) == 3
+
+    @pytest.mark.parametrize("limit", [0, -1, 1001, True, 1.5, None])
+    def test_list_by_status_rejects_a_bad_limit(self, repo, limit):
+        with pytest.raises(ValidationError):
+            repo.list_by_status(ItemStatus.NEW, limit=limit)  # type: ignore[arg-type]
+
+    def test_list_by_status_rejects_an_unknown_status(self, repo):
+        with pytest.raises(ValidationError):
+            repo.list_by_status("bogus", limit=5)  # type: ignore[arg-type]
+
+    def test_purge_classified_also_removes_the_items_judged_out_of_scope(self, repo):
+        done = make_item("done", title="d", text="1")
+        skipped = make_item("skipped", title="s", text="2")
+        pending = make_item("pending", title="p", text="3")
+        repo.add_new([done, skipped, pending])
+        repo.set_status(done.id, ItemStatus.CLASSIFIED)
+        repo.set_status(skipped.id, ItemStatus.OUT_OF_SCOPE)
+        assert repo.purge_classified() == 2
+        assert [i.external_id for i in repo.list()] == ["pending"]
+        assert repo.add_new([skipped]).duplicate == 1  # tombstoned: it does not come back
+
     # ---- retention ----
 
     def test_purge_fetched_before_removes_only_strictly_older_items(self, repo):

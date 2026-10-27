@@ -1,6 +1,6 @@
 """Ports of the items module."""
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -62,9 +62,20 @@ class ItemRepository(Protocol):
         """Move an item to another pipeline stage; False if there is no such item."""
         ...
 
+    def list_by_status(
+        self, status: ItemStatus, *, limit: int, source_ids: Collection[str] | None = None
+    ) -> "list[Item]":
+        """Items at one pipeline stage, OLDEST published first (then by id): the processing
+        order of a queue. `source_ids` restricts them to those sources (an empty collection
+        matches nothing, None means every source). `limit` is 1..1000 and the status must be
+        a known one (`ValidationError` otherwise)."""
+        ...
+
     def purge_fetched_before(self, cutoff: datetime) -> int: ...
 
-    def purge_classified(self) -> int: ...
+    def purge_classified(self) -> int:
+        """Remove every item that has been processed, that is classified or out of scope."""
+        ...
 
     # Defined last: the name shadows the builtin inside the class body.
     def list(

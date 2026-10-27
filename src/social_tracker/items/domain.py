@@ -69,6 +69,7 @@ class ItemStatus(StrEnum):
 
     NEW = "new"
     CLASSIFIED = "classified"
+    OUT_OF_SCOPE = "out_of_scope"  # judged by the topic filter: not about earthquakes or the like
 
 
 # ---- text helpers ---------------------------------------------------------------------

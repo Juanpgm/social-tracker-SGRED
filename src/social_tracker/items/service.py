@@ -3,8 +3,8 @@
 Retention (CI-10): raw items are kept for `retention_days` days from the moment they were
 fetched. One more instant and they go (see `items.domain`): an item exactly 30 days old is still
 kept. A retention of 0 means "purge once classified": no time is involved, every item that has
-reached the `classified` stage is removed (nothing sets that stage yet, so today it removes
-nothing). Alerts are a different store and are never touched here.
+been processed by the classifier (`classified` or `out_of_scope`) is removed.
+Alerts are a different store and are never touched here.
 
 Nothing here publishes or sends anything (G-1).
 """
