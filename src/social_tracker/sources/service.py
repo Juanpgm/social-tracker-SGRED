@@ -25,7 +25,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from social_tracker.control.domain import (
+    CollectionState,
     ControlEvent,
+    Event,
+    SourceState,
+    apply_event,
     source_analysis_key,
     validate_actor,
     validate_reason,
@@ -143,6 +147,23 @@ class SourceRegistry:
         text = json.dumps({**detail, **who}, sort_keys=True, separators=(",", ":"))
         self._control.append_control_event(ControlEvent(at, kind, source_id, text))
 
+    def _sync_state(self, source: Source, now: datetime) -> dict[str, str]:
+        """Make the collection state agree with `source.enabled` (the operator's intent).
+
+        Runs inside the caller's transaction, through the domain transition, so a flag change and
+        its state change commit or fail together. Enabling moves disabled -> idle; disabling moves
+        any state -> disabled with the failures reset; anything already in step is left alone (a
+        running source keeps its backoff). Returns the event detail fragment for a real move.
+        """
+        stored = self._control.get_source_state(source.id)
+        current = stored or SourceState(source.id, CollectionState.DISABLED)
+        event = Event.ENABLE if source.enabled else Event.DISABLE
+        result = apply_event(current, event, now)
+        if not result.changed:
+            return {}
+        self._control.save_source_state(result.state)
+        return {"state_from": current.state.value, "state_to": result.state.state.value}
+
     def _require(self, source_id: str) -> Source:
         return self._sources.get(_check_id(source_id))
 
@@ -184,7 +205,8 @@ class SourceRegistry:
                 self._sources.add(source)
             except ConflictError:  # lost a race the pre-check could not see
                 raise ConflictError(_NAME_CONFLICT) from None
-            self._audit(now, SOURCE_ADDED, source.id, who, {"type": source.type})
+            moved = self._sync_state(source, now)
+            self._audit(now, SOURCE_ADDED, source.id, who, {"type": source.type, **moved})
         return source
 
     def edit(
@@ -229,8 +251,9 @@ class SourceRegistry:
                 return SourceChange(current, changed=False)
             updated = current.with_changes({"enabled": enabled, "updated_at": now})
             self._sources.update(updated)
+            moved = self._sync_state(updated, now)
             kind = SOURCE_ENABLED if enabled else SOURCE_DISABLED
-            self._audit(now, kind, updated.id, who, {})
+            self._audit(now, kind, updated.id, who, moved)
         return SourceChange(updated, changed=True)
 
     def delete(self, source_id: str, *, actor: str, reason: str) -> None:
@@ -239,12 +262,17 @@ class SourceRegistry:
             now = self._clock.now()
             current = self._require(source_id)
             state = self._control.get_source_state(current.id)
+            flag = source_analysis_key(current.id)
+            analysis = self._control.get_setting(flag)
             self._sources.delete(current.id)
             self._control.delete_source_state(current.id)
-            flag = source_analysis_key(current.id)
-            if self._control.get_setting(flag) is not None:
+            if analysis is not None:
                 self._control.set_setting(flag, "false")  # a re-added id must not inherit it
-            detail = {"type": current.type, "state": state.state.value if state else None}
+            detail = {
+                "type": current.type,
+                "state": state.state.value if state else None,
+                "analysis": analysis,
+            }
             self._audit(now, SOURCE_DELETED, current.id, who, detail)
 
     # ---- import ----
@@ -287,11 +315,13 @@ class SourceRegistry:
             for op in plan.operations:
                 if op.changed is None:
                     self._sources.add(op.source)
-                    detail = {"type": op.source.type, **_VIA_IMPORT}
+                    moved = self._sync_state(op.source, now)
+                    detail = {"type": op.source.type, **_VIA_IMPORT, **moved}
                     self._audit(now, SOURCE_ADDED, op.source.id, who, detail)
                 else:
                     self._sources.update(op.source)
-                    detail = {"changed": op.changed, **_VIA_IMPORT}
+                    moved = self._sync_state(op.source, now)
+                    detail = {"changed": op.changed, **_VIA_IMPORT, **moved}
                     self._audit(now, SOURCE_EDITED, op.source.id, who, detail)
             summary = {
                 "added": len(plan.added),

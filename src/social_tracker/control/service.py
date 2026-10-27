@@ -8,8 +8,16 @@ of every source and the alert threshold. Rules enforced here (the repositories o
   state cannot diverge. A request that changes nothing (redundant switch, repeated threshold,
   disabling a disabled source) writes neither. An illegal transition raises `InvalidTransition`
   and writes nothing.
-- Replaying the event log in order reproduces the persisted state: each event carries its
-  `from` and `to` (and, for collection events, `failures` and `next_run_at`).
+- Replaying the event log in order reproduces the persisted state of every source that exists:
+  each event carries its `from` and `to` (and, for collection events, `failures` and
+  `next_run_at`). The registry's events that move a state carry `state_from`/`state_to`, and
+  `source_deleted` (which removes the state row and the flag row without a collection event)
+  carries the previous `state` and `analysis` value.
+- A source's `enabled` flag (SourceRegistry) is the operator's intent and the only way to turn a
+  source on or off. This service never enables or disables a source: it only runs the worker
+  transitions (start, succeed, fail, retry, reset) and refuses them on a disabled source with
+  `InvalidTransition`, writing nothing. The registry keeps the state row in step with the flag
+  in its own transaction, so `source.enabled <=> collection state is not disabled`.
 - Defaults are the safe ones: the system starts paused, analysis flags start off, a source with
   no state row is `disabled`.
 - Nothing here ever publishes or sends anything outside the system (G-1).
@@ -57,9 +65,8 @@ from social_tracker.sources.ports import SourceRepository
 EVENT_GLOBAL_ANALYSIS = "global_analysis_changed"
 EVENT_SOURCE_ANALYSIS = "source_analysis_changed"
 EVENT_ALERT_THRESHOLD = "alert_threshold_changed"
+# Worker transitions only: enabling and disabling are registry events (`source_enabled`...).
 COLLECTION_EVENT_KINDS: dict[Event, str] = {
-    Event.ENABLE: "collection_enabled",
-    Event.DISABLE: "collection_disabled",
     Event.START: "collection_started",
     Event.SUCCEED: "collection_succeeded",
     Event.FAIL: "collection_failed",
@@ -67,6 +74,7 @@ COLLECTION_EVENT_KINDS: dict[Event, str] = {
     Event.RESET: "collection_reset",
 }
 
+_REGISTRY_ONLY_EVENTS = frozenset({Event.ENABLE, Event.DISABLE})
 _ACTION_SET = "set"
 _ON, _OFF = "on", "off"
 
@@ -224,9 +232,11 @@ class ControlService:
         return FlagChange(on, changed=True)
 
     def effective_analysis(self, source_id: str) -> bool:
-        """Analysis runs only when the system is active AND the source has analysis enabled."""
-        flag = self.source_analysis_enabled(source_id)
-        return analysis_effective(self._global_state(), flag)
+        """Analysis runs only when the system is active, the source is enabled AND the source has
+        analysis enabled."""
+        source = self._sources.get(_check_source_id(source_id))
+        flag = _stored_flag(self._control.get_setting(source_analysis_key(source_id)))
+        return analysis_effective(self._global_state(), flag, source_enabled=source.enabled)
 
     # ---- collection state machine ----
 
@@ -239,12 +249,22 @@ class ControlService:
     def apply_collection_event(
         self, source_id: str, event: Event, *, actor: str, reason: str, jitter_s: float = 0.0
     ) -> CollectionChange:
-        """Apply one state machine event to a source, auditing it when it changes something."""
+        """Apply one WORKER event to a source, auditing it when it changes something.
+
+        `ENABLE` and `DISABLE` are refused: use `SourceRegistry.enable/disable`, which keep the
+        source flag and the state row in step. A worker event on a disabled source is refused
+        too, whatever the stored row says.
+        """
         actor, reason = validate_actor(actor), validate_reason(reason)
         domain_event = _coerce_event(event)
+        if domain_event in _REGISTRY_ONLY_EVENTS:
+            raise InvalidTransition(
+                "enabling and disabling a source is done in the source registry"
+            )
         with self._uow.transaction():
             now = self._clock.now()
-            self._known_source(source_id)
+            if not self._sources.get(_check_source_id(source_id)).enabled:
+                raise InvalidTransition("the source is disabled")
             stored = self._control.get_source_state(source_id)
             current = stored or SourceState(source_id, CollectionState.DISABLED)
             result = apply_event(current, domain_event, now, jitter_s=jitter_s)
@@ -265,12 +285,6 @@ class ControlService:
                 next_run_at=new.next_run_at.isoformat() if new.next_run_at else None,
             )
         return CollectionChange(new, changed=True)
-
-    def enable_collection(self, source_id: str, *, actor: str, reason: str) -> CollectionChange:
-        return self.apply_collection_event(source_id, Event.ENABLE, actor=actor, reason=reason)
-
-    def disable_collection(self, source_id: str, *, actor: str, reason: str) -> CollectionChange:
-        return self.apply_collection_event(source_id, Event.DISABLE, actor=actor, reason=reason)
 
     def start_collection(self, source_id: str, *, actor: str, reason: str) -> CollectionChange:
         return self.apply_collection_event(source_id, Event.START, actor=actor, reason=reason)

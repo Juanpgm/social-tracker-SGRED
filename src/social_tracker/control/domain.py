@@ -192,13 +192,17 @@ def apply_global(current: GlobalState | str, target: GlobalState | str) -> Globa
     return GlobalResult(target_state, changed=target_state is not current_state)
 
 
-def analysis_effective(global_state: GlobalState | str, source_analysis_enabled: bool) -> bool:
-    """Analysis runs only when the system is active AND the source has analysis enabled."""
+def analysis_effective(
+    global_state: GlobalState | str, source_analysis_enabled: bool, *, source_enabled: bool
+) -> bool:
+    """Analysis runs only when the system is active, the source is enabled (the operator's
+    intent) AND the source has analysis enabled."""
     if not isinstance(source_analysis_enabled, bool):
         raise ValidationError("source_analysis_enabled must be a bool")
-    return _coerce(GlobalState, global_state, "global state") is GlobalState.ACTIVE and (
-        source_analysis_enabled
-    )
+    if not isinstance(source_enabled, bool):
+        raise ValidationError("source_enabled must be a bool")
+    active = _coerce(GlobalState, global_state, "global state") is GlobalState.ACTIVE
+    return active and source_enabled and source_analysis_enabled
 
 
 # ---- control events and settings -------------------------------------------------------

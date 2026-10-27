@@ -111,6 +111,20 @@ def race(calls: list[Callable[[], Any]]) -> list[tuple[str, Any]]:
     return results
 
 
+class LosesTheRace:
+    """A source store whose `add` always reports a conflict, as if another writer had inserted the
+    same source between the registry's checks and its write. Everything else is forwarded."""
+
+    def __init__(self, inner: SourceRepository) -> None:
+        self._inner = inner
+
+    def add(self, source: Source) -> None:
+        raise ConflictError(f"source name already exists: {source.name}")  # store text with a name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class RegistryContract:
     def make_env(self, registry_cls: type[SourceRegistry] = SourceRegistry) -> Env:
         raise NotImplementedError
@@ -188,6 +202,17 @@ class RegistryContract:
         assert caught.value.message == "a source with this name already exists"
         assert [s.id for s in env.registry.list()] == ["src_one"]
         assert kinds(env) == [SOURCE_ADDED]
+
+    def test_a_conflict_the_store_reports_after_the_checks_became_the_generic_name_conflict(
+        self, env: Env
+    ):
+        registry = env.registry_with(sources=LosesTheRace(env.sources))
+        with pytest.raises(ConflictError) as caught:
+            registry.add(data("src_one", f"Raced {CANARY}"), **WHO)
+        assert caught.value.message == "a source with this name already exists"
+        assert CANARY not in caught.value.message  # the store's own text is not passed on
+        assert env.registry.list() == []
+        assert env.control.list_control_events() == []
 
     def test_conflict_messages_do_not_echo_names(self, env: Env):
         env.registry.add(data("src_one", f"Name {CANARY}"), **WHO)
@@ -427,6 +452,168 @@ class RegistryContract:
         stored = env.sources.get("src_one")
         assert (stored.enabled, stored.name) == (True, "Renamed")
 
+    # ---- the enabled flag and the collection state move together ----
+    # Invariant: source.enabled == (collection state != disabled); a missing state row is disabled.
+
+    def state_row(self, env: Env, source_id: str = "src_one") -> SourceState | None:
+        return env.control.get_source_state(source_id)
+
+    def test_a_new_disabled_source_has_no_state_row_and_its_event_has_no_state_change(
+        self, env: Env
+    ):
+        env.registry.add(data(), **WHO)
+        assert self.state_row(env) is None
+        detail = events(env)[-1][2]
+        assert "state_from" not in detail
+        assert "state_to" not in detail
+
+    def test_adding_an_enabled_source_creates_its_idle_state_in_the_same_change(self, env: Env):
+        source = env.registry.add(data(enabled=True), **WHO)
+        assert source.enabled is True
+        assert self.state_row(env) == SourceState("src_one", CollectionState.IDLE)
+        detail = events(env)[-1][2]
+        assert (detail["state_from"], detail["state_to"]) == ("disabled", "idle")
+
+    def test_enable_moves_disabled_to_idle_and_records_both_states(self, env: Env):
+        env.registry.add(data(), **WHO)
+        env.registry.enable("src_one", **WHO)
+        assert self.state_row(env) == SourceState("src_one", CollectionState.IDLE)
+        detail = events(env)[-1][2]
+        assert (detail["state_from"], detail["state_to"]) == ("disabled", "idle")
+
+    @pytest.mark.parametrize(
+        "seeded",
+        [
+            SourceState("src_one", CollectionState.IDLE),
+            SourceState("src_one", CollectionState.COLLECTING, 2),
+            SourceState("src_one", CollectionState.BACKOFF, 3, START + HOUR),
+            SourceState("src_one", CollectionState.FAILED, 5),
+        ],
+        ids=lambda s: s.state.value,
+    )
+    def test_disable_forces_the_state_to_disabled_and_resets_the_failures(
+        self, env: Env, seeded: SourceState
+    ):
+        env.registry.add(data(enabled=True), **WHO)
+        env.control.save_source_state(seeded)
+        env.registry.disable("src_one", **WHO)
+        assert self.state_row(env) == SourceState("src_one", CollectionState.DISABLED)
+        assert env.sources.get("src_one").enabled is False
+        detail = events(env)[-1][2]
+        assert (detail["state_from"], detail["state_to"]) == (seeded.state.value, "disabled")
+
+    def test_a_disabled_then_enabled_source_restarts_idle_with_no_failures(self, env: Env):
+        env.registry.add(data(enabled=True), **WHO)
+        env.control.save_source_state(SourceState("src_one", CollectionState.FAILED, 5))
+        env.registry.disable("src_one", **WHO)
+        env.registry.enable("src_one", **WHO)
+        assert self.state_row(env) == SourceState("src_one", CollectionState.IDLE)
+
+    def test_redundant_enable_and_disable_leave_the_state_alone(self, env: Env):
+        env.registry.add(data(enabled=True), **WHO)
+        env.control.save_source_state(SourceState("src_one", CollectionState.COLLECTING, 1))
+        before = env.control.list_control_events()
+        assert env.registry.enable("src_one", **WHO).changed is False
+        assert self.state_row(env) == SourceState("src_one", CollectionState.COLLECTING, 1)
+        env.registry.disable("src_one", **WHO)
+        again = env.registry.disable("src_one", **WHO)
+        assert again.changed is False
+        assert len(env.control.list_control_events()) == len(before) + 1
+
+    def test_editing_a_running_source_keeps_its_collection_state(self, env: Env):
+        env.registry.add(data(enabled=True), **WHO)
+        running = SourceState("src_one", CollectionState.BACKOFF, 2, START + HOUR)
+        env.control.save_source_state(running)
+        env.registry.edit("src_one", {"name": "Renamed"}, **WHO)
+        assert self.state_row(env) == running
+
+    def test_a_failing_state_write_rolls_back_enable_add_and_disable(self, env: Env):
+        flaky = FlakyControl(env.control, "save_source_state")
+        with pytest.raises(StorageError):
+            env.registry_with(control=flaky).add(data(enabled=True), **WHO)
+        assert env.registry.list() == []
+        env.registry.add(data("src_two", "Two"), **WHO)
+        with pytest.raises(StorageError):
+            env.registry_with(control=FlakyControl(env.control, "save_source_state")).enable(
+                "src_two", **WHO
+            )
+        assert env.sources.get("src_two").enabled is False
+        assert env.control.get_source_state("src_two") is None
+        env.registry.enable("src_two", **WHO)
+        with pytest.raises(StorageError):
+            env.registry_with(control=FlakyControl(env.control, "save_source_state")).disable(
+                "src_two", **WHO
+            )
+        assert env.sources.get("src_two").enabled is True
+        assert env.control.get_source_state("src_two") == SourceState(
+            "src_two", CollectionState.IDLE
+        )
+
+    def test_import_creates_idle_state_for_new_enabled_entries_and_none_for_disabled(
+        self, env: Env
+    ):
+        on = parse_source(payload(id="src_on", name="On", enabled=True))
+        off = parse_source(payload(id="src_off", name="Off", enabled=False))
+        env.registry.import_sources(export_of(on, off), **WHO)
+        assert env.sources.get("src_on").enabled is True
+        assert env.control.get_source_state("src_on") == SourceState("src_on", CollectionState.IDLE)
+        assert env.control.get_source_state("src_off") is None
+        added = {
+            e.source_id: json.loads(e.detail)
+            for e in env.control.list_control_events()
+            if e.kind == SOURCE_ADDED
+        }
+        assert added["src_on"]["state_to"] == "idle"
+        assert "state_to" not in added["src_off"]
+
+    def test_import_that_changes_enabled_syncs_the_state_both_ways(self, env: Env):
+        env.registry.add(data("src_a", "A"), **WHO)
+        env.registry.add(data("src_b", "B", enabled=True), **WHO)
+        env.control.save_source_state(SourceState("src_b", CollectionState.FAILED, 5))
+        flip_a = env.registry.get("src_a").with_changes({"enabled": True})
+        flip_b = env.registry.get("src_b").with_changes({"enabled": False})
+        env.registry.import_sources(export_of(flip_a, flip_b), **WHO)
+        assert env.control.get_source_state("src_a") == SourceState("src_a", CollectionState.IDLE)
+        assert env.control.get_source_state("src_b") == SourceState(
+            "src_b", CollectionState.DISABLED
+        )
+
+    def test_import_that_keeps_enabled_true_keeps_a_running_state(self, env: Env):
+        env.registry.add(data("src_a", "A", enabled=True), **WHO)
+        running = SourceState("src_a", CollectionState.BACKOFF, 4, START + HOUR)
+        env.control.save_source_state(running)
+        renamed = env.registry.get("src_a").with_changes({"name": "Renamed"})
+        env.registry.import_sources(export_of(renamed), **WHO)
+        assert env.control.get_source_state("src_a") == running
+
+    def test_a_dry_run_import_does_not_touch_any_state(self, env: Env):
+        on = parse_source(payload(id="src_on", name="On", enabled=True))
+        env.registry.import_sources(export_of(on), dry_run=True)
+        assert env.control.get_source_state("src_on") is None
+
+    def test_a_failing_state_write_rolls_back_the_whole_import(self, env: Env):
+        on = parse_source(payload(id="src_on", name="On", enabled=True))
+        flaky = FlakyControl(env.control, "save_source_state")
+        with pytest.raises(StorageError):
+            env.registry_with(control=flaky).import_sources(export_of(on), **WHO)
+        assert env.registry.list() == []
+        assert env.control.list_control_events() == []
+
+    def test_the_invariant_holds_after_a_mixed_session(self, env: Env):
+        env.registry.add(data("src_a", "A"), **WHO)
+        env.registry.add(data("src_b", "B", enabled=True), **WHO)
+        env.registry.enable("src_a", **WHO)
+        env.registry.disable("src_b", **WHO)
+        env.registry.import_sources(
+            export_of(parse_source(payload(id="src_c", name="C", enabled=True))), **WHO
+        )
+        env.registry.delete("src_a", **WHO)
+        for source in env.registry.list():
+            row = env.control.get_source_state(source.id)
+            state = row.state if row else CollectionState.DISABLED
+            assert source.enabled == (state is not CollectionState.DISABLED)
+        assert env.control.get_source_state("src_a") is None
+
     # ---- delete ----
 
     def test_delete_removes_the_source_and_its_state_but_keeps_the_audit_trail(self, env: Env):
@@ -436,7 +623,12 @@ class RegistryContract:
         assert env.registry.list() == []
         assert env.control.get_source_state("src_one") is None
         assert [k for k, _, _ in events(env, "src_one")] == [SOURCE_ADDED, SOURCE_DELETED]
-        assert events(env)[-1][2] == {"type": "news_rss", "state": "idle", **WHO}
+        assert events(env)[-1][2] == {
+            "type": "news_rss",
+            "state": "idle",
+            "analysis": None,
+            **WHO,
+        }
 
     def test_deleting_a_collecting_source_is_allowed_and_recorded(self, env: Env):
         env.registry.add(data(), **WHO)
@@ -446,13 +638,18 @@ class RegistryContract:
         assert events(env)[-1] == (
             SOURCE_DELETED,
             "src_one",
-            {"type": "news_rss", "state": "collecting", **WHO},
+            {"type": "news_rss", "state": "collecting", "analysis": None, **WHO},
         )
 
     def test_delete_without_a_state_row_records_a_null_state(self, env: Env):
         env.registry.add(data(), **WHO)
         env.registry.delete("src_one", **WHO)
-        assert events(env)[-1][2] == {"type": "news_rss", "state": None, **WHO}
+        assert events(env)[-1][2] == {
+            "type": "news_rss",
+            "state": None,
+            "analysis": None,
+            **WHO,
+        }
 
     def test_delete_unknown_source_is_not_found_and_audits_nothing(self, env: Env):
         with pytest.raises(NotFoundError):
@@ -484,6 +681,7 @@ class RegistryContract:
         env.registry.add(data(), **WHO)
         env.control.set_setting(source_analysis_key("src_one"), "true")
         env.registry.delete("src_one", **WHO)
+        assert events(env)[-1][2]["analysis"] == "true"  # the previous value is on record
         assert env.control.get_setting(source_analysis_key("src_one")) == "false"
         env.registry.add(data(), **WHO)
         assert env.control.get_setting(source_analysis_key("src_one")) == "false"

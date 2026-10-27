@@ -465,28 +465,38 @@ def test_global_unknown_target_or_current_is_invalid(bad):
 
 
 @pytest.mark.parametrize(
-    ("global_state", "source_flag", "expected"),
+    ("global_state", "source_flag", "source_enabled", "expected"),
     [
-        (GlobalState.ACTIVE, True, True),
-        (GlobalState.ACTIVE, False, False),
-        (GlobalState.PAUSED, True, False),
-        (GlobalState.PAUSED, False, False),
+        (GlobalState.ACTIVE, True, True, True),
+        (GlobalState.ACTIVE, True, False, False),
+        (GlobalState.ACTIVE, False, True, False),
+        (GlobalState.ACTIVE, False, False, False),
+        (GlobalState.PAUSED, True, True, False),
+        (GlobalState.PAUSED, True, False, False),
+        (GlobalState.PAUSED, False, True, False),
+        (GlobalState.PAUSED, False, False, False),
     ],
 )
-def test_analysis_gate_truth_table(global_state, source_flag, expected):
-    assert analysis_effective(global_state, source_flag) is expected
+def test_analysis_gate_truth_table(global_state, source_flag, source_enabled, expected):
+    assert analysis_effective(global_state, source_flag, source_enabled=source_enabled) is expected
 
 
 def test_analysis_gate_accepts_state_strings():
-    assert analysis_effective("active", True) is True
+    assert analysis_effective("active", True, source_enabled=True) is True
 
 
 @pytest.mark.parametrize("bad", [1, 0, None, "true"])
 def test_analysis_gate_requires_a_real_bool_flag(bad):
     with pytest.raises(ValidationError, match="source_analysis_enabled"):
-        analysis_effective(GlobalState.ACTIVE, bad)
+        analysis_effective(GlobalState.ACTIVE, bad, source_enabled=True)
+
+
+@pytest.mark.parametrize("bad", [1, 0, None, "true"])
+def test_analysis_gate_requires_a_real_bool_for_the_source_enabled_flag(bad):
+    with pytest.raises(ValidationError, match="source_enabled"):
+        analysis_effective(GlobalState.ACTIVE, True, source_enabled=bad)
 
 
 def test_analysis_gate_rejects_unknown_global_state():
     with pytest.raises(InvalidTransition):
-        analysis_effective("bogus", True)
+        analysis_effective("bogus", True, source_enabled=True)

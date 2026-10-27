@@ -6,7 +6,7 @@ services (see the meta-test). Tests never look inside the service: they read the
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
@@ -42,6 +42,13 @@ from social_tracker.shared.errors import NotFoundError, StorageError, Validation
 from social_tracker.shared.uow import UnitOfWork
 from social_tracker.sources.domain import parse_source
 from social_tracker.sources.ports import SourceRepository
+from social_tracker.sources.service import (
+    SOURCE_ADDED,
+    SOURCE_DELETED,
+    SOURCE_DISABLED,
+    SOURCE_EDITED,
+    SOURCE_ENABLED,
+)
 from tests.fakes.flaky_control import FlakyControl
 from tests.sources.factories import CANARY, payload
 
@@ -51,11 +58,11 @@ ACTOR = "operator"
 WHY = "scheduled maintenance"
 WHO = {"actor": ACTOR, "reason": WHY}
 COLLECTION_KINDS = frozenset(COLLECTION_EVENT_KINDS.values())
+REGISTRY_STATE_KINDS = frozenset({SOURCE_ADDED, SOURCE_EDITED, SOURCE_ENABLED, SOURCE_DISABLED})
 
-# (method name, domain event) for every collection operation the service exposes.
+# (method name, domain event) for every collection operation the service exposes. Enabling and
+# disabling a source belongs to the registry, so only the worker transitions are listed.
 OPERATIONS = [
-    ("enable_collection", Event.ENABLE),
-    ("disable_collection", Event.DISABLE),
     ("start_collection", Event.START),
     ("finish_collection", Event.SUCCEED),
     ("fail_collection", Event.FAIL),
@@ -82,6 +89,7 @@ class Env:
     uow: UnitOfWork
     clock: FixedClock
     service_cls: type[ControlService]
+    seeded: dict[str, tuple[str, int, str | None]] = field(default_factory=dict)
 
     def service_with(self, *, control: Any = None, clock: Any = None) -> ControlService:
         return self.service_cls(
@@ -89,7 +97,19 @@ class Env:
         )
 
     def add_source(self, source_id: str = "src_one") -> None:
+        """A registered, DISABLED source (the registry's default): no state row."""
         self.sources.add(parse_source(payload(id=source_id, name=f"Name {source_id}")))
+
+    def enable_source(self, source_id: str = "src_one") -> None:
+        """What `SourceRegistry.enable` leaves behind: the flag on and an idle state row.
+
+        Written straight into the stores (no event) so control-service tests can start from a
+        running source without going through the registry; `seeded` tells the log replay about it.
+        """
+        source = self.sources.get(source_id)
+        self.sources.update(source.with_changes({"enabled": True}))
+        self.control.save_source_state(SourceState(source_id, CollectionState.IDLE))
+        self.seeded[source_id] = ("idle", 0, None)
 
     def events(self, source_id: str | None = None) -> list[tuple[str, str | None, dict[str, Any]]]:
         return [
@@ -102,6 +122,14 @@ class Env:
 
 
 # ---- replaying the event log ---------------------------------------------------------
+#
+# The rule (also stated in the ControlService module docstring): replaying the log in order
+# reproduces the persisted settings, per-source flags and collection states of every source that
+# EXISTS. Registry events that move the state (`state_to` in their detail) are part of the log;
+# `source_deleted` removes the state row and the flag row without a collection event, and carries
+# the previous `state` and `analysis` value so the replay can follow it.
+
+DISABLED_ROW = ("disabled", 0, None)
 
 
 @dataclass
@@ -117,6 +145,7 @@ class Replayed:
 
 def replay(env: Env) -> Replayed:
     result = Replayed()
+    result.states.update(env.seeded)
     for kind, source_id, detail in env.events():
         if kind == EVENT_GLOBAL_ANALYSIS:
             result.global_active = detail["to"] == "active"
@@ -126,38 +155,79 @@ def replay(env: Env) -> Replayed:
             result.threshold = float(detail["to"])
         elif kind in COLLECTION_KINDS:
             result.states[source_id] = (detail["to"], detail["failures"], detail["next_run_at"])
+        elif kind == SOURCE_DELETED:
+            result.states.pop(source_id, None)
+            result.source_flags.pop(source_id, None)
+        elif kind in REGISTRY_STATE_KINDS and "state_to" in detail:
+            # enable/disable/add/import moves are to idle or disabled: no failures, no backoff
+            result.states[source_id] = (detail["state_to"], 0, None)
     return result
 
 
+def mentioned_source_ids(env: Env) -> set[str]:
+    ids = {e.source_id for e in env.control.list_control_events() if e.source_id}
+    return ids | set(env.seeded) | {s.id for s in env.sources.list()}
+
+
 def assert_log_reproduces_state(env: Env) -> None:
-    """The invariant of the whole service: replaying the audit log gives the persisted state."""
+    """Replaying the audit log gives the persisted state of every source, deleted ones included
+    (a deleted source has no state row and no flag row left)."""
     replayed = replay(env)
     assert (env.control.get_setting(SETTING_GLOBAL_ANALYSIS_ENABLED) == "true") == (
         replayed.global_active
     )
     assert float(env.control.get_setting(SETTING_ALERT_MIN_CONFIDENCE)) == replayed.threshold
-    for source in env.sources.list():
-        flag = env.control.get_setting(source_analysis_key(source.id))
-        assert (flag == "true") == replayed.source_flags.get(source.id, False)
-        stored = env.control.get_source_state(source.id)
-        if source.id not in replayed.states:
-            assert stored is None
+    for source_id in sorted(mentioned_source_ids(env)):
+        flag = env.control.get_setting(source_analysis_key(source_id))
+        assert (flag == "true") == replayed.source_flags.get(source_id, False), source_id
+        stored = env.control.get_source_state(source_id)
+        state, failures, next_run_at = replayed.states.get(source_id, DISABLED_ROW)
+        if stored is None:
+            assert (state, failures, next_run_at) == DISABLED_ROW, source_id
             continue
-        state, failures, next_run_at = replayed.states[source.id]
-        assert stored is not None
-        assert (stored.state.value, stored.consecutive_failures) == (state, failures)
+        assert (stored.state.value, stored.consecutive_failures) == (state, failures), source_id
         assert (stored.next_run_at.isoformat() if stored.next_run_at else None) == next_run_at
+
+
+def assert_enabled_matches_state(env: Env) -> None:
+    """The single-source-of-truth invariant: `source.enabled` <=> collection state != disabled
+    (a missing state row counts as disabled), and effective analysis never holds for a
+    disabled source."""
+    for source in env.sources.list():
+        row = env.control.get_source_state(source.id)
+        state = row.state if row else CollectionState.DISABLED
+        assert source.enabled == (state is not CollectionState.DISABLED), (source.id, state)
+        if not source.enabled:
+            assert env.service.effective_analysis(source.id) is False, source.id
 
 
 def assert_chains_are_consistent(env: Env) -> None:
     """Each event's `from` is the previous event's `to` for the same target."""
-    last: dict[tuple[str, str | None], str] = {}
+    last: dict[tuple[str, str | None], str] = {
+        ("collection", sid): row[0] for sid, row in env.seeded.items()
+    }
     first = {
         EVENT_GLOBAL_ANALYSIS: "paused",
         EVENT_SOURCE_ANALYSIS: "off",
         EVENT_ALERT_THRESHOLD: str(DEFAULT_ALERT_MIN_CONFIDENCE),
     }
     for kind, source_id, detail in env.events():
+        if kind == SOURCE_DELETED:
+            collection = ("collection", source_id)
+            assert (detail["state"] or "disabled") == last.get(collection, "disabled"), detail
+            flag_key = (EVENT_SOURCE_ANALYSIS, source_id)
+            was = {"true": "on", "false": "off", None: "off"}[detail["analysis"]]
+            assert was == last.get(flag_key, "off"), detail
+            last[collection] = "disabled"
+            last[flag_key] = "off"
+            continue
+        if kind in REGISTRY_STATE_KINDS:
+            if "state_to" in detail:
+                key = ("collection", source_id)
+                assert detail["state_from"] == last.get(key, "disabled"), (kind, detail)
+                assert detail["state_from"] != detail["state_to"]
+                last[key] = detail["state_to"]
+            continue
         if kind in COLLECTION_KINDS:
             key, initial = ("collection", source_id), "disabled"
         elif kind in first:
@@ -186,9 +256,17 @@ class ControlServiceContract:
         return env
 
     def put(self, env: Env, name: str) -> None:
+        """Seed the named state. A state other than disabled belongs to an ENABLED source (the
+        invariant the registry keeps), so the source is enabled too."""
         state = STATES[name]
-        if state is not None:
-            env.control.save_source_state(state)
+        if state is None:
+            return
+        if state.state is not CollectionState.DISABLED:
+            source = env.sources.get(state.source_id)
+            env.sources.update(source.with_changes({"enabled": True}))
+        env.control.save_source_state(state)
+        next_run = state.next_run_at.isoformat() if state.next_run_at else None
+        env.seeded[state.source_id] = (state.state.value, state.consecutive_failures, next_run)
 
     # ---- fresh start ----
 
@@ -326,7 +404,7 @@ class ControlServiceContract:
         calls = [
             partial(env.service.set_global_analysis, True, **who),
             partial(env.service.set_source_analysis, "src_one", True, **who),
-            partial(env.service.enable_collection, "src_one", **who),
+            partial(env.service.start_collection, "src_one", **who),
             partial(env.service.set_alert_min_confidence, 0.9, **who),
         ]
         for call in calls:
@@ -396,7 +474,7 @@ class ControlServiceContract:
             "enabled": lambda: env.service.source_analysis_enabled("src_nope"),
             "effective": lambda: env.service.effective_analysis("src_nope"),
             "state": lambda: env.service.get_state("src_nope"),
-            "collect": lambda: env.service.enable_collection("src_nope", **WHO),
+            "collect": lambda: env.service.start_collection("src_nope", **WHO),
         }
         with pytest.raises(NotFoundError):
             calls[operation]()
@@ -411,7 +489,7 @@ class ControlServiceContract:
         for call in (
             partial(env.service.set_source_analysis, bad, True, **WHO),
             partial(env.service.effective_analysis, bad),
-            partial(env.service.enable_collection, bad, **WHO),
+            partial(env.service.start_collection, bad, **WHO),
             partial(env.service.get_state, bad),
         ):
             with pytest.raises(ValidationError) as caught:
@@ -441,6 +519,7 @@ class ControlServiceContract:
         self, env: Env, global_on: bool, source_on: bool, expected: bool
     ):
         env.add_source("src_two")
+        env.enable_source("src_one")
         env.service.set_global_analysis(global_on, **WHO)
         env.service.set_source_analysis("src_one", source_on, **WHO)
         before = env.control.list_control_events()
@@ -449,6 +528,7 @@ class ControlServiceContract:
         assert env.control.list_control_events() == before
 
     def test_pausing_globally_keeps_the_source_flags_for_when_it_resumes(self, env: Env):
+        env.enable_source("src_one")
         env.service.set_source_analysis("src_one", True, **WHO)
         env.service.set_global_analysis(True, **WHO)
         env.service.set_global_analysis(False, **WHO)
@@ -463,6 +543,56 @@ class ControlServiceContract:
         assert env.service.source_analysis_enabled("src_one") is False
 
     # ---- collection state machine ----
+
+    def test_the_public_api_has_no_collection_enable_or_disable(self, env: Env):
+        # Enabling and disabling a source is the registry's job (single source of truth).
+        assert not hasattr(env.service, "enable_collection")
+        assert not hasattr(env.service, "disable_collection")
+
+    @pytest.mark.parametrize("event", [Event.ENABLE, Event.DISABLE, "enable", "disable"], ids=str)
+    @pytest.mark.parametrize("state_name", ["none", "disabled", "idle", "failed"])
+    def test_enable_and_disable_events_cannot_be_applied_through_the_control_service(
+        self, env: Env, event: Any, state_name: str
+    ):
+        self.put(env, state_name)
+        stored_before = env.control.get_source_state("src_one")
+        with pytest.raises(InvalidTransition):
+            env.service.apply_collection_event("src_one", event, **WHO)
+        assert env.control.get_source_state("src_one") == stored_before
+        assert env.control.list_control_events() == []
+
+    @pytest.mark.parametrize(("method", "domain_event"), OPERATIONS)
+    @pytest.mark.parametrize("state_name", ["idle", "collecting", "backoff_due", "failed"])
+    def test_worker_transitions_are_refused_on_a_disabled_source_even_with_a_stale_row(
+        self, env: Env, method: str, domain_event: Event, state_name: str
+    ):
+        # The source is disabled (the registry's flag is the truth) but a state row says
+        # otherwise, as a crash between two non-atomic writers could once have left it.
+        env.control.save_source_state(STATES[state_name])
+        stored_before = env.control.get_source_state("src_one")
+        with pytest.raises(InvalidTransition):
+            getattr(env.service, method)("src_one", **WHO)
+        assert env.control.get_source_state("src_one") == stored_before
+        assert env.control.list_control_events() == []
+
+    @pytest.mark.parametrize(
+        ("global_on", "flag_on", "source_enabled", "expected"),
+        [
+            (True, True, True, True),
+            (True, True, False, False),
+            (True, False, True, False),
+            (False, True, True, False),
+            (False, False, False, False),
+        ],
+    )
+    def test_effective_analysis_also_needs_the_source_to_be_enabled(
+        self, env: Env, global_on: bool, flag_on: bool, source_enabled: bool, expected: bool
+    ):
+        if source_enabled:
+            env.enable_source("src_one")
+        env.service.set_global_analysis(global_on, **WHO)
+        env.service.set_source_analysis("src_one", flag_on, **WHO)
+        assert env.service.effective_analysis("src_one") is expected
 
     @pytest.mark.parametrize("state_name", list(STATES))
     @pytest.mark.parametrize(("method", "domain_event"), OPERATIONS)
@@ -512,23 +642,17 @@ class ControlServiceContract:
         assert env.control.list_control_events()[0].at == START
 
     def test_a_normal_collection_cycle_and_its_audit_trail(self, env: Env):
-        env.service.enable_collection("src_one", **WHO)
+        env.enable_source("src_one")
         env.service.start_collection("src_one", **WHO)
         assert env.service.get_state("src_one").state is CollectionState.COLLECTING
         env.service.finish_collection("src_one", **WHO)
         assert env.service.get_state("src_one") == SourceState("src_one", CollectionState.IDLE)
-        env.service.disable_collection("src_one", **WHO)
-        assert [k for k in env.kinds()] == [
-            "collection_enabled",
-            "collection_started",
-            "collection_succeeded",
-            "collection_disabled",
-        ]
+        assert env.kinds() == ["collection_started", "collection_succeeded"]
         assert_log_reproduces_state(env)
         assert_chains_are_consistent(env)
 
     def test_failures_back_off_then_retry_then_fail_for_good_and_can_be_reset(self, env: Env):
-        env.service.enable_collection("src_one", **WHO)
+        env.enable_source("src_one")
         for attempt in range(1, 5):
             env.service.start_collection("src_one", **WHO)
             env.service.fail_collection("src_one", **WHO)
@@ -547,7 +671,7 @@ class ControlServiceContract:
         assert_chains_are_consistent(env)
 
     def test_backoff_time_comes_from_the_clock_and_the_jitter(self, env: Env):
-        env.service.enable_collection("src_one", **WHO)
+        env.enable_source("src_one")
         env.service.start_collection("src_one", **WHO)
         result = env.service.fail_collection("src_one", jitter_s=5.0, **WHO)
         assert result.state.next_run_at == START + timedelta(seconds=65)
@@ -585,29 +709,37 @@ class ControlServiceContract:
         assert env.control.list_control_events() == []
 
     def test_a_failing_state_write_leaves_no_event(self, env: Env):
+        env.enable_source("src_one")
         flaky = FlakyControl(env.control, "save_source_state")
         with pytest.raises(StorageError):
-            env.service_with(control=flaky).enable_collection("src_one", **WHO)
-        assert env.control.get_source_state("src_one") is None
+            env.service_with(control=flaky).start_collection("src_one", **WHO)
+        assert env.control.get_source_state("src_one") == SourceState(
+            "src_one", CollectionState.IDLE
+        )
         assert env.control.list_control_events() == []
 
     def test_sources_are_independent(self, env: Env):
         env.add_source("src_two")
-        env.service.enable_collection("src_one", **WHO)
-        assert env.service.get_state("src_two").state is CollectionState.DISABLED
-        assert env.control.get_source_state("src_two") is None
+        env.enable_source("src_two")
+        env.service.start_collection("src_one", **WHO) if False else None
+        env.service.start_collection("src_two", **WHO)
+        assert env.service.get_state("src_one").state is CollectionState.DISABLED
+        assert env.control.get_source_state("src_one") is None
+        assert env.service.get_state("src_two").state is CollectionState.COLLECTING
 
-    def test_two_threads_toggling_one_source_leave_a_consistent_state_and_log(self, env: Env):
+    def test_two_threads_racing_worker_transitions_leave_a_consistent_state_and_log(self, env: Env):
         for _ in range(10):
             fresh = self.make_env()
             fresh.add_source("src_one")
+            fresh.enable_source("src_one")
             results = run_all(
                 [
-                    partial(fresh.service.enable_collection, "src_one", **WHO),
-                    partial(fresh.service.disable_collection, "src_one", **WHO),
+                    partial(fresh.service.start_collection, "src_one", **WHO),
+                    partial(fresh.service.finish_collection, "src_one", **WHO),
                 ]
             )
-            assert [kind for kind, _ in results] == ["ok", "ok"], results
+            for kind, value in results:
+                assert kind == "ok" or isinstance(value, InvalidTransition), results
             assert_log_reproduces_state(fresh)
             assert_chains_are_consistent(fresh)
 
@@ -711,12 +843,11 @@ class ControlServiceContract:
         env.add_source("src_two")
         env.service.set_global_analysis(True, **WHO)
         env.service.set_source_analysis("src_two", True, **WHO)
-        env.service.enable_collection("src_one", **WHO)
+        env.enable_source("src_one")
         env.service.start_collection("src_one", **WHO)
         env.service.fail_collection("src_one", **WHO)
-        env.service.enable_collection("src_two", **WHO)
+        env.enable_source("src_two")
         env.service.set_alert_min_confidence(0.65, **WHO)
-        env.service.disable_collection("src_one", **WHO)
         assert_log_reproduces_state(env)
         assert_chains_are_consistent(env)
 
@@ -743,3 +874,43 @@ class ControlServiceContract:
         env.service.set_global_analysis(True, actor=emoji * MAX_ACTOR, reason=emoji * MAX_REASON)
         _, _, detail = env.events()[0]
         assert (detail["actor"], detail["reason"]) == (emoji * MAX_ACTOR, emoji * MAX_REASON)
+
+    # ---- event kinds are a stable, literal vocabulary ----
+
+    @pytest.mark.parametrize(
+        ("method", "state_name", "kind"),
+        [
+            ("start_collection", "idle", "collection_started"),
+            ("finish_collection", "collecting", "collection_succeeded"),
+            ("fail_collection", "collecting", "collection_failed"),
+            ("retry_collection", "backoff_due", "collection_retried"),
+            ("reset_failed", "failed", "collection_reset"),
+        ],
+    )
+    def test_each_collection_event_is_written_with_its_exact_kind_string(
+        self, env: Env, method: str, state_name: str, kind: str
+    ):
+        self.put(env, state_name)
+        getattr(env.service, method)("src_one", **WHO)
+        assert env.kinds() == [kind]
+
+    def test_the_collection_event_vocabulary_is_exactly_the_five_worker_transitions(self):
+        assert COLLECTION_EVENT_KINDS == {
+            Event.START: "collection_started",
+            Event.SUCCEED: "collection_succeeded",
+            Event.FAIL: "collection_failed",
+            Event.RETRY: "collection_retried",
+            Event.RESET: "collection_reset",
+        }
+        assert {m for m, _ in OPERATIONS} == {
+            "start_collection",
+            "finish_collection",
+            "fail_collection",
+            "retry_collection",
+            "reset_failed",
+        }
+
+    def test_the_other_control_event_kinds_are_pinned_too(self):
+        assert EVENT_GLOBAL_ANALYSIS == "global_analysis_changed"
+        assert EVENT_SOURCE_ANALYSIS == "source_analysis_changed"
+        assert EVENT_ALERT_THRESHOLD == "alert_threshold_changed"
