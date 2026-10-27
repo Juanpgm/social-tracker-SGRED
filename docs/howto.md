@@ -26,19 +26,20 @@ that names where the login is kept: `env:NAME` (an environment variable), `keyri
 **Example.** Handle `some.handle`, reference `env:IG_MAIN`.
 
 **Limits.** Collection from Instagram is best-effort: it can stop working without notice and is
-checked at most every 900 seconds. Use a dedicated account, not a personal one. Posts and stories
+checked at most every 900 seconds (default 1800). Use a dedicated account, not a personal one. Posts and stories
 only: no Lives. The credentials stay on this machine, in the place the reference points to, and are
 never tracked by git or shown in the interface.
 
 ## `live_stream`: live audio stream
 
-**What to enter.** The address of a direct audio stream (http, https, rtmp or icecast). A web page
-that plays the stream is not enough: the address must serve the audio itself.
+**What to enter.** The address of a direct audio stream (http, https, rtmp or icecast), such as the
+Icecast mount point of a radio station. A web page that plays the stream is not enough: the address
+must serve the audio itself. Playlists such as HLS (`.m3u8`) are not a direct stream.
 
-**Example.** `https://example.org/live.m3u8`
+**Example.** `https://stream.example.org/radio.mp3`
 
 **Limits.** Audio is cut into chunks of 10 to 60 seconds (default 30). The language is a tag such as
-`es`. Video-only or login-protected streams do not work.
+`es` (default `es`). Video-only or login-protected streams do not work.
 
 ## `recorded_audio`: recorded audio
 
@@ -47,5 +48,5 @@ holds audio files. Give one of them, not both.
 
 **Example.** `https://example.org/podcast.xml` or `/srv/audio/incoming`
 
-**Limits.** Files are processed in batches, not in real time. Common audio formats such as MP3, M4A,
+**Limits.** A feed is checked at most every 1 second (default 1800). Files are processed in batches, not in real time. Common audio formats such as MP3, M4A,
 WAV, OGG and FLAC are expected; a file that cannot be decoded is skipped.

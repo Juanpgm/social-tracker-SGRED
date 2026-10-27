@@ -118,7 +118,7 @@ sources:
   - id: radio_live
     type: live_stream
     name: Radio Live
-    stream_url: https://example.org/live.m3u8
+    stream_url: https://stream.example.org/radio.mp3
     chunk_seconds: 30
     language: es
   - id: radio_recordings
@@ -187,7 +187,7 @@ uv run social-tracker sources add city_instagram --type instagram --name "City I
 
 ```bash
 uv run social-tracker sources add radio_live --type live_stream --name "Radio Live" \
-    --set stream_url=https://example.org/live.m3u8 --set chunk_seconds=30 --set language=es \
+    --set stream_url=https://stream.example.org/radio.mp3 --set chunk_seconds=30 --set language=es \
     -r "register stream"
 ```
 

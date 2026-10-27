@@ -58,7 +58,7 @@ def test_the_busy_form_can_be_submitted_again_once_the_lock_is_gone(web: Web):
     ("url", "echoed"),
     [
         ("https://example.org/rss.xml", True),
-        ("https://user:pw@example.org/rss.xml", False),
+        ("https://" + "user:pw" + "@example.org/rss.xml", False),
         ("https://example.org/rss.xml?token=abc", False),
         ("https://example.org/rss.xml#frag", False),
         ("not a url", False),

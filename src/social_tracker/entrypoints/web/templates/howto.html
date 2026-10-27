@@ -14,7 +14,7 @@
 <h3>Example</h3>
 <p><code>https://example.org/rss.xml</code></p>
 <h3>Limits</h3>
-<p>The feed is checked at most every {{ news_poll_min }} seconds (default 600). Addresses that embed a login or a secret in the query string are refused, and so are file: addresses.</p>
+<p>The feed is checked at most every {{ news_poll_min }} seconds (default {{ news_poll_default }}). Addresses that embed a login or a secret in the query string are refused, and so are file: addresses.</p>
 <p><a href="/sources/new/news_rss">Add a news feed</a></p>
 </section>
 
@@ -25,18 +25,18 @@
 <h3>Example</h3>
 <p>Handle <code>some.handle</code>, reference <code>env:IG_MAIN</code>.</p>
 <h3>Limits</h3>
-<p>Collection from Instagram is best-effort: it can stop working without notice and is checked at most every {{ instagram_poll_min }} seconds. Use a dedicated account, not a personal one. Posts and stories only: no Lives. The credentials stay on this machine, in the place the reference points to, and are never tracked by git or shown in this interface.</p>
+<p>Collection from Instagram is best-effort: it can stop working without notice and is checked at most every {{ instagram_poll_min }} seconds (default {{ instagram_poll_default }}). Use a dedicated account, not a personal one. Posts and stories only: no Lives. The credentials stay on this machine, in the place the reference points to, and are never tracked by git or shown in this interface.</p>
 <p><a href="/sources/new/instagram">Add an Instagram account</a></p>
 </section>
 
 <section id="live_stream" aria-labelledby="h-live_stream">
 <h2 id="h-live_stream">Live audio stream</h2>
 <h3>What to enter</h3>
-<p>The address of a direct audio stream (http, https, rtmp or icecast), such as a radio station's stream. A web page that plays the stream is not enough: the address must serve the audio itself.</p>
+<p>The address of a direct audio stream (http, https, rtmp or icecast), such as the Icecast mount point of a radio station. A web page that plays the stream is not enough: the address must serve the audio itself. Playlists such as HLS (.m3u8) are not a direct stream.</p>
 <h3>Example</h3>
-<p><code>https://example.org/live.m3u8</code></p>
+<p><code>https://stream.example.org/radio.mp3</code></p>
 <h3>Limits</h3>
-<p>Audio is cut into chunks of {{ chunk_min }} to {{ chunk_max }} seconds (default 30). The language is a tag such as <code>es</code>. Video-only or login-protected streams do not work.</p>
+<p>Audio is cut into chunks of {{ chunk_min }} to {{ chunk_max }} seconds (default {{ chunk_default }}). The language is a tag such as <code>es</code> (default {{ language_default }}). Video-only or login-protected streams do not work.</p>
 <p><a href="/sources/new/live_stream">Add a live stream</a></p>
 </section>
 
@@ -47,7 +47,7 @@
 <h3>Example</h3>
 <p><code>https://example.org/podcast.xml</code> or <code>/srv/audio/incoming</code></p>
 <h3>Limits</h3>
-<p>Files are processed in batches, not in real time. Common audio formats such as MP3, M4A, WAV, OGG and FLAC are expected; a file that cannot be decoded is skipped.</p>
+<p>A feed is checked at most every {{ recorded_poll_min }} second (default {{ recorded_poll_default }}). Files are processed in batches, not in real time. Common audio formats such as MP3, M4A, WAV, OGG and FLAC are expected; a file that cannot be decoded is skipped.</p>
 <p><a href="/sources/new/recorded_audio">Add recorded audio</a></p>
 </section>
 {% endblock %}

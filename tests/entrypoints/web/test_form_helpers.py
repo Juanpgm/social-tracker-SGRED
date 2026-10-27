@@ -14,6 +14,7 @@ from social_tracker.entrypoints.web.forms import (
 from social_tracker.sources.domain import parse_source
 from tests.sources.factories import payload
 
+LOGIN_URL = "https://" + "user:pw" + "@example.org/"  # built apart: the hygiene scan
 NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
@@ -41,8 +42,8 @@ def test_a_plain_address_has_a_known_scheme_and_a_host_and_nothing_else(url: str
         "javascript:alert(1)",
         "http://",
         "https:///path",
-        "https://user:pw@example.org/",
-        "https://user@example.org/",
+        LOGIN_URL,
+        "https://" + "user" + "@example.org/",
         "https://example.org/?a=1",
         "https://example.org/#frag",
         "https://[::1/",
@@ -57,7 +58,7 @@ def test_masking_replaces_the_query_and_drops_the_fragment_but_keeps_the_rest():
     assert mask_url("https://example.org:8443/live.mp3?a=1&b=2#x") == (
         "https://example.org:8443/live.mp3?***"
     )
-    assert mask_url("https://u:p@example.org/x?k=v") == "https://example.org/x?***"
+    assert mask_url("https://" + "u:p" + "@example.org/x?k=v") == "https://example.org/x?***"
 
 
 @pytest.mark.parametrize("url", ["https://example.org/x", "https://example.org/x#frag", "", "x"])

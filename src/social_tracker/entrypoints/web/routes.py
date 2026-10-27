@@ -57,7 +57,12 @@ from social_tracker.sources.domain import (
     CHUNK_SECONDS_MIN,
     INSTAGRAM_MIN_POLL_S,
     NEWS_RSS_MIN_POLL_S,
+    RECORDED_AUDIO_MIN_POLL_S,
     SOURCE_TYPES,
+    InstagramSource,
+    LiveStreamSource,
+    NewsRssSource,
+    RecordedAudioSource,
     Source,
     parse_source,
 )
@@ -466,6 +471,11 @@ def delete_source(request: Request, source_id: str, form: Form) -> Response:
     return _redirect("deleted")
 
 
+def _default(model: type[Source], field: str) -> Any:
+    """A default as the domain declares it, so the how-to cannot drift from the code."""
+    return model.model_fields[field].default
+
+
 @router.get("/howto", response_class=HTMLResponse)
 def howto(request: Request) -> HTMLResponse:
     return render(
@@ -473,7 +483,13 @@ def howto(request: Request) -> HTMLResponse:
         "howto.html",
         types=TYPE_LABELS,
         news_poll_min=NEWS_RSS_MIN_POLL_S,
+        news_poll_default=_default(NewsRssSource, "poll_interval_s"),
         instagram_poll_min=INSTAGRAM_MIN_POLL_S,
+        instagram_poll_default=_default(InstagramSource, "poll_interval_s"),
+        recorded_poll_min=RECORDED_AUDIO_MIN_POLL_S,
+        recorded_poll_default=_default(RecordedAudioSource, "poll_interval_s"),
         chunk_min=CHUNK_SECONDS_MIN,
         chunk_max=CHUNK_SECONDS_MAX,
+        chunk_default=_default(LiveStreamSource, "chunk_seconds"),
+        language_default=_default(LiveStreamSource, "language"),
     )
