@@ -17,6 +17,15 @@ of keywords to focus on.
 **Limits.** The feed is checked at most every 120 seconds (default 600). Addresses that embed a
 login or a secret in the query string are refused, and so are `file:` addresses.
 
+**Collecting it.** Enabling the source only makes it eligible. Content is collected while a
+worker runs (`social-tracker run`) and global analysis is on: a starting worker always switches
+global analysis off, so turn it on afterwards with `social-tracker analysis on`. The list in the
+web UI then shows the time of the last successful fetch and the reason of the last failure. A
+feed on a private network (an address that resolves to a private IP) is refused unless its host
+name is listed in `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS`. Collected items are read with
+`social-tracker items list` and `social-tracker items search`, and are deleted after
+`SOCIAL_TRACKER_RETENTION_DAYS` days (the README gives the default).
+
 ## `instagram`: Instagram account
 
 **What to enter.** The account handle (letters, digits, dots, underscores) and a secret reference

@@ -29,6 +29,8 @@ Configuration comes from the process environment (no file is read). All variable
 | `SOCIAL_TRACKER_DB_PATH` | SQLite database file. A leading `~` is expanded and missing parent directories are created. | `data/social_tracker.db` (relative to the working directory) |
 | `SOCIAL_TRACKER_ACTOR` | Who the audit log attributes your changes to. `--actor` overrides it. | `cli:<OS user name>` |
 | `SOCIAL_TRACKER_BUSY_TIMEOUT_MS` | How long a write waits for another process using the database (1..600000). | `5000` |
+| `SOCIAL_TRACKER_RETENTION_DAYS` | How many days collected items are kept, counted from when they were fetched (0..3650). `0` means "purge once classified". | `30` |
+| `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS` | Comma-separated host names (or IP addresses) the collector may contact although they resolve to a private address. See [Collecting content](#collecting-content). | empty (all private addresses are blocked) |
 
 A blank value counts as unset. The `data/` directory is git-ignored.
 
@@ -65,6 +67,7 @@ uv run social-tracker status
 
 Analysis really runs for a source only when **all three** hold: the system switch is on, the
 source is enabled, and the source's own analysis switch is on. `status` counts those sources.
+Collecting content needs only the first two (see [Collecting content](#collecting-content)).
 
 ### Commands
 
@@ -79,6 +82,9 @@ source is enabled, and the source's own analysis switch is on. `status` counts t
 | `sources export [-o, --output FILE] [--force]` | Write every source as YAML to stdout or a file. |
 | `analysis on` / `analysis off` `[--source ID]` | Switch analysis for the system or for one source. |
 | `status` | Switches, alert threshold, source counts, collection states. |
+| `run [--once] [--interval-tick SECONDS]` | Run the collection worker (see [Collecting content](#collecting-content)). |
+| `items list [--source ID] [--limit N]` | The collected items, newest first. |
+| `items search QUERY [--limit N]` | Search titles and texts by words. |
 | `serve [--host H] [--port N] [--allow-non-loopback] [--allowed-host NAME]` | Run the local web UI (see [Web UI](#web-ui)). |
 
 `--set KEY=VALUE` takes a source field. The value is read as JSON when it parses (`600`, `true`,
@@ -211,15 +217,16 @@ ID` opts it into analysis.
 adapt to the source type, enable and disable, the system and per-source analysis switches, and a
 delete page that asks for confirmation and says that alerts and derived data are kept. A short
 guide per source type is at `/howto` and in [docs/howto.md](docs/howto.md). The worker status
-panel (GPU and model, stream lag) reads `n/a - no worker running` until the workers exist, and
-there is no alerts view yet.
+panel (GPU and model, stream lag) reads `n/a - no worker running` until the GPU workers exist
+(the collection worker has no GPU part), and there is no alerts view yet.
 
 The list has a **Health** column read from the collection state: `ok` while a source is idle or
 collecting, `degraded` in backoff (with the failure count and the next retry time), `failed` once
-collection stopped (with the failure count), and `n/a` for a disabled source. The **Last fetch**
-and **Last error** columns are explicit `n/a` placeholders: nothing records a fetch or an error
-until the collection worker exists, so the UI shows no invented value (a known deviation from the
-full list of UI-2; the cells are filled when that worker lands).
+collection stopped (with the failure count), and `n/a` for a disabled source. **Last fetch** is
+the time (UTC) of the last successful fetch and **Last error** the short reason of the last
+failure (for example `http 503`, `timeout`, `invalid feed: ...`), cleared by the next success;
+both read `n/a` while there is nothing to show. The error is a fixed phrase, never a URL, a
+response body or a secret.
 
 It is meant for one operator on this machine:
 
@@ -260,6 +267,72 @@ It is meant for one operator on this machine:
 
 Pages work without JavaScript; with it, the row buttons update in place.
 
+## Collecting content
+
+This is an internal observation system: it only READS the feeds you register. Nothing is ever
+published, posted or sent, and the only outbound traffic is a `GET` to the URL of an enabled
+source. It runs on the CPU only.
+
+```bash
+uv run social-tracker run --once
+uv run social-tracker items list --limit 10
+uv run social-tracker items search "sismo cali"
+```
+
+`run` starts the collection worker. Run ONE worker per database (a second one would treat the
+first one's collection in flight as interrupted).
+
+- **It starts with analysis off.** Starting a worker switches global analysis OFF, with an audit
+  event attributed to `system:worker` and the reason `worker startup`. No other command ever does
+  this. Turn it on afterwards with `analysis on`; the running worker notices on its next pass.
+  Because of this, `run --once` right after starting collects nothing and says so: it is meant
+  for diagnostics, and a real collection needs `run` left running.
+- **What is collected.** Each pass (every `--interval-tick` seconds, default 5) collects the
+  enabled RSS and Atom sources that are due: never fetched, or `poll_interval_s` seconds (600 by
+  default) after the last successful fetch. Sources are collected one at a time, in id order.
+  Nothing is fetched while a source is disabled or global analysis is off; the per-source
+  analysis switch is about analysis, not collection.
+- **What is stored.** One item per entry: title and visible text (markup is parsed and dropped,
+  scripts never reach the text), author, link, time, a content hash and the entry as received
+  (`raw_payload`). Entries with no visible content are discarded and counted. Text over 100 KiB
+  is cut at that size and flagged. An entry is stored once per source: the same guid, or the same
+  title and text under another address, is a duplicate. All the items of a fetch are stored in
+  one transaction or none are.
+- **Failures.** A timeout, a name lookup error, an HTTP error status, an oversize or malformed
+  document are recorded on the source (see Last error in the web list) and retried with
+  exponential backoff (60 s, 120 s, 240 s, 480 s; never more than one hour). `Retry-After`
+  (seconds or an HTTP date) is honoured as a minimum wait. 401, 403 and 429 are failures with a
+  clear reason (`http 403 (access denied)`). After 5 consecutive failures the source is `failed`
+  and is left alone until the operator disables and enables it again (`sources disable ID`, then
+  `sources enable ID`, which clears the failure count). A source disabled or deleted while it is
+  being fetched is discarded without storing anything.
+- **Stopping.** SIGINT (Ctrl+C) and SIGTERM stop the worker gracefully: the collection in flight
+  is finished and committed, no new one starts. A fetch is bounded (a response is read for at
+  most 15 s), so the stop completes well inside 30 s. A crash leaves at most a source marked as
+  collecting; the next worker start counts it as one failed attempt.
+- **Retention.** Items are deleted once they are older than `SOCIAL_TRACKER_RETENTION_DAYS` (30 by
+  default), counted from `fetched_at` and checked about once an hour while the worker runs. The
+  boundary is strict: an item exactly 30 days old is kept, one microsecond older is removed.
+  With `0` only items that reached the `classified` stage are removed (nothing sets that stage
+  yet). Alerts are a separate store and are not touched.
+- **Safety of the fetch.** Only `http` and `https` addresses without a login are fetched. Every
+  host is resolved and ALL its addresses must be public: loopback, private, link-local (cloud
+  metadata included), carrier-grade NAT, multicast and reserved addresses are refused, for
+  redirects too (at most 5, each one checked again), and the connection goes to the address that
+  was checked (so a changing DNS answer cannot redirect it). To reach a feed on a private network,
+  list its host name in `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS`; every use is logged with the host
+  name. A response is limited to 2 MiB (after decompression too), 10 s per network operation and
+  15 s overall. Proxy settings of the environment and cookies are ignored. Feeds are parsed with
+  `defusedxml` and any document type declaration is refused, which rules out entity bombs and
+  external entities.
+- **Searching.** `items search` splits your text into plain words (lowercase, accents ignored)
+  that must all appear as whole words. Operators such as `AND`, `OR`, `NEAR`, `*`, `-`, quotes
+  and `column:` are ordinary text, so no search text can raise an error or change the query.
+  Put `--` before a query that starts with `-`. Item text is untrusted: the CLI escapes control
+  characters when it prints it.
+- **Logs** (on stderr) name source ids, counts and fixed reasons; never URLs, item text or
+  secrets.
+
 ## Audit log
 
 Each real change writes one event, in the same transaction as the change, with the actor and the
@@ -297,3 +370,6 @@ Without a browser installed they are skipped.
 The architecture is hexagonal. Domain modules are pure, services depend on ports only, and
 `social_tracker.bootstrap` is the composition root that wires the SQLite adapters into the
 services. Entrypoints such as the CLI never import persistence; `lint-imports` enforces it.
+The collector follows the same rules, and its fetcher adapter (`collector/http_fetcher.py`) is the
+only module allowed to import an HTTP client or sockets: the web UI has no outbound path at all
+and reaches the worker side only through the composition root.

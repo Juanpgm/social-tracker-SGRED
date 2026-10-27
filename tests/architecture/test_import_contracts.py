@@ -39,7 +39,7 @@ FORBIDDEN_EXTERNALS = [
     "tempfile",
     "glob",
 ]
-COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy", "service")
+COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy", "service", "worker")
 FORBIDDEN_LAYERS = ["adapters", "persistence", "entrypoints", "infrastructure", "storage"]
 
 
@@ -144,7 +144,13 @@ def test_nested_domain_package_is_also_covered(repo_root: Path, tmp_path: Path):
     assert result.returncode != 0, result.stdout
 
 
-SERVICE_MODULES = ["sources/service.py", "control/service.py", "sources/yaml_io.py"]
+SERVICE_MODULES = [
+    "sources/service.py",
+    "control/service.py",
+    "sources/yaml_io.py",
+    "items/service.py",
+    "collector/service.py",
+]
 
 
 @pytest.mark.parametrize("module_path", SERVICE_MODULES)

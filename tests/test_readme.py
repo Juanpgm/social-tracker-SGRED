@@ -12,7 +12,13 @@ import pytest
 from typer.main import get_command
 from typer.testing import CliRunner
 
-from social_tracker.bootstrap import BUSY_TIMEOUT_ENV, DB_PATH_ENV, DEFAULT_DB_PATH
+from social_tracker.bootstrap import (
+    ALLOW_PRIVATE_HOSTS_ENV,
+    BUSY_TIMEOUT_ENV,
+    DB_PATH_ENV,
+    DEFAULT_DB_PATH,
+    RETENTION_DAYS_ENV,
+)
 from social_tracker.entrypoints.cli import app
 from social_tracker.entrypoints.inputs import ACTOR_ENV
 from social_tracker.sources.yaml_io import MAX_FILE_BYTES, load_sources
@@ -20,7 +26,7 @@ from social_tracker.sources.yaml_io import MAX_FILE_BYTES, load_sources
 README = Path(__file__).resolve().parent.parent / "README.md"
 FENCE = re.compile(r"```(\w+)\n(.*?)```", re.DOTALL)
 FLAG = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
-SUBCOMMAND = re.compile(r"\b(?:(sources|analysis) ([a-z]+)|(status|serve))\b")
+SUBCOMMAND = re.compile(r"(?<![\w-])(?:(sources|analysis|items) ([a-z]+)|(status|serve|run))\b")
 FILE_SUFFIXES = {"-wal", "-shm"}  # SQLite sidecar files, written like flags in the prose
 CONTINUATION = "\\\n"
 EXECUTABLE = "uv run social-tracker"
@@ -47,7 +53,13 @@ def test_the_source_file_example_is_a_valid_import_file_with_every_source_type(r
 
 
 def test_every_environment_variable_and_default_is_documented(readme: str):
-    for name in (DB_PATH_ENV, BUSY_TIMEOUT_ENV, ACTOR_ENV):
+    for name in (
+        DB_PATH_ENV,
+        BUSY_TIMEOUT_ENV,
+        ACTOR_ENV,
+        RETENTION_DAYS_ENV,
+        ALLOW_PRIVATE_HOSTS_ENV,
+    ):
         assert f"`{name}`" in readme
     assert DEFAULT_DB_PATH in readme
     assert f"{MAX_FILE_BYTES:,}" in readme

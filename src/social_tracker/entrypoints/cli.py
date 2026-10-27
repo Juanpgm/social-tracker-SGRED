@@ -18,6 +18,8 @@ and hidden characters escaped, and never in an error message.
 Only `social_tracker.bootstrap` knows about storage: this module never imports it.
 """
 
+import logging
+import math
 import os
 import sys
 import traceback
@@ -29,7 +31,9 @@ from typing import Annotated
 
 import typer
 
-from social_tracker.bootstrap import build_container
+from social_tracker.bootstrap import build_container, build_worker
+from social_tracker.collector.service import CollectOutcome
+from social_tracker.collector.worker import DEFAULT_TICK_S, PassSummary
 from social_tracker.control.domain import CollectionState, format_confidence
 from social_tracker.control.service import SourceOverview, SystemOverview
 from social_tracker.entrypoints.inputs import (
@@ -38,6 +42,8 @@ from social_tracker.entrypoints.inputs import (
     resolve_actor,
     write_export,
 )
+from social_tracker.entrypoints.signals import stop_on_signals
+from social_tracker.items.domain import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, Item
 from social_tracker.shared.errors import DomainError, ValidationError
 from social_tracker.shared.text import escape_unprintable
 from social_tracker.sources.service import ImportConflictError, ImportReport
@@ -60,6 +66,8 @@ analysis_app = typer.Typer(
     help="Turn analysis on or off, for the whole system or for one source.", no_args_is_help=True
 )
 app.add_typer(analysis_app, name="analysis")
+items_app = typer.Typer(help="Look at the items collected from the sources.", no_args_is_help=True)
+app.add_typer(items_app, name="items")
 
 SourceId = Annotated[
     str,
@@ -415,3 +423,145 @@ def serve(
             allow_non_loopback=allow_non_loopback,
             allowed_hosts=tuple(allowed_host or ()),
         )
+
+
+# ---- items ----
+
+ItemLimit = Annotated[
+    int,
+    typer.Option(
+        "--limit", min=1, max=MAX_LIST_LIMIT, help="How many items to show (newest first)."
+    ),
+]
+_LABEL_CHARS = 100
+_NO_ITEMS = "No items."
+
+
+def _item_label(item: Item) -> str:
+    """One line to recognise an item by: its title, else the start of its text. Item text is
+    untrusted, so it is flattened to one line, shortened, and any control or hidden character
+    (a terminal escape sequence, a right-to-left override...) is shown as an escape."""
+    first_line = item.text.split("\n", 1)[0]
+    flat = " ".join((item.title or first_line).split())
+    if len(flat) > _LABEL_CHARS:
+        flat = flat[: _LABEL_CHARS - 3].rstrip() + "..."
+    return escape_unprintable(flat)
+
+
+def _render_items(items: Sequence[Item]) -> str:
+    stamps = [f"{item.published_at:%Y-%m-%d %H:%M}" for item in items]
+    width = max([len("SOURCE"), *(len(item.source_id) for item in items)])
+    lines = [f"{'PUBLISHED':<16}  {'SOURCE':<{width}}  TITLE"]
+    lines += [
+        f"{stamp:<16}  {item.source_id:<{width}}  {_item_label(item)}"
+        for stamp, item in zip(stamps, items, strict=True)
+    ]
+    return "\n".join(lines)
+
+
+@items_app.command("list")
+def items_list(
+    source: Annotated[
+        str | None, typer.Option("--source", help="Only items of this source id.")
+    ] = None,
+    limit: ItemLimit = DEFAULT_LIST_LIMIT,
+) -> None:
+    """List collected items, newest first."""
+    with _guard(), closing(build_container()) as services:
+        found = services.items.list_items(source_id=source, limit=limit)
+    typer.echo(_render_items(found) if found else _NO_ITEMS)
+
+
+@items_app.command("search")
+def items_search(
+    query: Annotated[
+        str,
+        typer.Argument(
+            metavar="QUERY",
+            help="Words to find in titles and texts. Every word must match as a whole word, "
+            "ignoring case and accents. Operators such as AND, OR, NEAR, quotes and * are "
+            "ordinary text here, not search syntax (put -- before a query starting with -).",
+        ),
+    ],
+    limit: ItemLimit = DEFAULT_LIST_LIMIT,
+) -> None:
+    """Search collected items by words, newest first."""
+    with _guard(), closing(build_container()) as services:
+        found = services.items.search(query, limit=limit)
+    typer.echo(_render_items(found) if found else "No items found.")
+
+
+# ---- worker ----
+
+
+@contextmanager
+def _logs_to_stderr() -> Iterator[None]:
+    """Send the application's log records to the CURRENT stderr for the duration of a run.
+    Records name sources, counts and fixed reasons, never URLs, item text or secrets."""
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger = logging.getLogger("social_tracker")
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+
+def _render_pass(summary: PassSummary) -> str:
+    if summary.global_off:
+        return (
+            "global analysis is off: nothing was collected. A starting worker always switches it "
+            "off; turn it on with `social-tracker analysis on` and the running worker picks it up."
+        )
+    counts = Counter(result.outcome for result in summary.results)
+    skipped = sum(n for outcome, n in counts.items() if outcome.value.startswith("skipped"))
+    new = sum(result.new for result in summary.results)
+    return (
+        f"pass complete: {counts[CollectOutcome.COLLECTED]} collected "
+        f"({new} new item(s)), {counts[CollectOutcome.NOT_MODIFIED]} not modified, "
+        f"{counts[CollectOutcome.FAILED]} failed, {counts[CollectOutcome.DISCARDED]} discarded, "
+        f"{skipped} skipped, {summary.errors} error(s)"
+    )
+
+
+@app.command("run")
+def run(
+    once: Annotated[
+        bool, typer.Option("--once", help="Do one scheduling pass and exit (for diagnostics).")
+    ] = False,
+    interval_tick: Annotated[
+        float,
+        typer.Option(
+            "--interval-tick",
+            min=0.01,
+            max=3600,
+            metavar="SECONDS",
+            help="How long to wait between scheduling passes.",
+        ),
+    ] = DEFAULT_TICK_S,
+) -> None:
+    """Run the collection worker until SIGINT/SIGTERM.
+
+    Starting it switches global analysis OFF (audited as system:worker); turn it on afterwards
+    with `social-tracker analysis on`. Each pass collects the enabled RSS sources that are due
+    (their poll interval, 600 s by default), one at a time, and removes items past the retention
+    period. Stopping lets the collection in flight finish. Run one worker per database.
+    """
+    if not math.isfinite(interval_tick):
+        raise typer.BadParameter("must be a finite number", param_hint="--interval-tick")
+    with _guard(), _logs_to_stderr(), closing(build_worker(tick_s=interval_tick)) as built:
+        if not once:
+            typer.echo(
+                "worker running; global analysis is switched off at start, turn it on with "
+                "`social-tracker analysis on`; press Ctrl+C to stop"
+            )
+        with stop_on_signals(built.worker.request_stop):
+            summary = built.worker.run(once=once)
+    if once and summary is not None:
+        typer.echo(_render_pass(summary))
+    elif not once:
+        typer.echo("worker stopped")
