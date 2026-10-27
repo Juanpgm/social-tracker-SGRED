@@ -24,7 +24,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from social_tracker.control.domain import ControlEvent, source_analysis_key
+from social_tracker.control.domain import (
+    ControlEvent,
+    source_analysis_key,
+    validate_actor,
+    validate_reason,
+)
 from social_tracker.control.ports import ControlRepository
 from social_tracker.shared.clock import Clock
 from social_tracker.shared.errors import ConflictError, NotFoundError, ValidationError
@@ -97,6 +102,11 @@ class _Plan:
         return tuple(op.source for op in self.operations if op.changed is not None)
 
 
+def _who(actor: Any, reason: Any) -> dict[str, str]:
+    """Validated actor and reason (the control-domain rules), ready to merge into event details."""
+    return {"actor": validate_actor(actor), "reason": validate_reason(reason)}
+
+
 def _check_id(source_id: Any) -> str:
     if not is_valid_slug(source_id):
         raise ValidationError("source id is not a valid slug", ("id",))
@@ -122,9 +132,14 @@ class SourceRegistry:
     # ---- helpers ----
 
     def _audit(
-        self, at: datetime, kind: str, source_id: str | None, detail: Mapping[str, Any]
+        self,
+        at: datetime,
+        kind: str,
+        source_id: str | None,
+        who: Mapping[str, str],
+        detail: Mapping[str, Any],
     ) -> None:
-        text = json.dumps(detail, sort_keys=True, separators=(",", ":"))
+        text = json.dumps({**detail, **who}, sort_keys=True, separators=(",", ":"))
         self._control.append_control_event(ControlEvent(at, kind, source_id, text))
 
     def _require(self, source_id: str) -> Source:
@@ -155,8 +170,9 @@ class SourceRegistry:
 
     # ---- writes ----
 
-    def add(self, data: Mapping[str, Any]) -> Source:
+    def add(self, data: Mapping[str, Any], *, actor: str, reason: str) -> Source:
         """Create a source. Timestamps come from the clock; any supplied ones are ignored."""
+        who = _who(actor, reason)
         if not isinstance(data, Mapping):
             raise ValidationError("source data must be a mapping")
         now = self._clock.now()
@@ -167,11 +183,14 @@ class SourceRegistry:
                 self._sources.add(source)
             except ConflictError:  # lost a race the pre-check could not see
                 raise ConflictError(_NAME_CONFLICT) from None
-            self._audit(now, SOURCE_ADDED, source.id, {"type": source.type})
+            self._audit(now, SOURCE_ADDED, source.id, who, {"type": source.type})
         return source
 
-    def edit(self, source_id: str, changes: Mapping[str, Any]) -> SourceChange:
+    def edit(
+        self, source_id: str, changes: Mapping[str, Any], *, actor: str, reason: str
+    ) -> SourceChange:
         """Apply field changes. `id`, `type`, `enabled` and the timestamps cannot be edited."""
+        who = _who(actor, reason)
         if not isinstance(changes, Mapping) or not all(isinstance(k, str) for k in changes):
             raise ValidationError("changes must be a mapping of field names to values")
         for field in _IMMUTABLE_FIELDS:
@@ -189,17 +208,19 @@ class SourceRegistry:
             updated = current.with_changes({**changes, "updated_at": now})
             self._sources.update(updated)
             self._audit(
-                now, SOURCE_EDITED, updated.id, {"changed": _changed_fields(current, updated)}
+                now, SOURCE_EDITED, updated.id, who, {"changed": _changed_fields(current, updated)}
             )
         return SourceChange(updated, changed=True)
 
-    def enable(self, source_id: str) -> SourceChange:
-        return self._set_enabled(source_id, enabled=True)
+    def enable(self, source_id: str, *, actor: str, reason: str) -> SourceChange:
+        return self._set_enabled(source_id, enabled=True, who=_who(actor, reason))
 
-    def disable(self, source_id: str) -> SourceChange:
-        return self._set_enabled(source_id, enabled=False)
+    def disable(self, source_id: str, *, actor: str, reason: str) -> SourceChange:
+        return self._set_enabled(source_id, enabled=False, who=_who(actor, reason))
 
-    def _set_enabled(self, source_id: str, *, enabled: bool) -> SourceChange:
+    def _set_enabled(
+        self, source_id: str, *, enabled: bool, who: Mapping[str, str]
+    ) -> SourceChange:
         now = self._clock.now()
         with self._uow.transaction():
             current = self._require(source_id)
@@ -208,10 +229,11 @@ class SourceRegistry:
             updated = current.with_changes({"enabled": enabled, "updated_at": now})
             self._sources.update(updated)
             kind = SOURCE_ENABLED if enabled else SOURCE_DISABLED
-            self._audit(now, kind, updated.id, {})
+            self._audit(now, kind, updated.id, who, {})
         return SourceChange(updated, changed=True)
 
-    def delete(self, source_id: str) -> None:
+    def delete(self, source_id: str, *, actor: str, reason: str) -> None:
+        who = _who(actor, reason)
         now = self._clock.now()
         with self._uow.transaction():
             current = self._require(source_id)
@@ -222,11 +244,18 @@ class SourceRegistry:
             if self._control.get_setting(flag) is not None:
                 self._control.set_setting(flag, "false")  # a re-added id must not inherit it
             detail = {"type": current.type, "state": state.state.value if state else None}
-            self._audit(now, SOURCE_DELETED, current.id, detail)
+            self._audit(now, SOURCE_DELETED, current.id, who, detail)
 
     # ---- import ----
 
-    def import_sources(self, text: str, *, dry_run: bool = False) -> ImportReport:
+    def import_sources(
+        self,
+        text: str,
+        *,
+        actor: str | None = None,
+        reason: str | None = None,
+        dry_run: bool = False,
+    ) -> ImportReport:
         """Upsert every source in `text` (keyed by id) all-or-nothing, or change nothing.
 
         An entry REPLACES the stored source with the same id: fields it omits fall back to their
@@ -234,6 +263,7 @@ class SourceRegistry:
         sources keep the timestamps in the file (the clock fills in missing ones); updated ones
         keep their `created_at` and get `updated_at` from the clock.
         """
+        who = _who(actor, reason) if not dry_run else {}
         now = self._clock.now()
         incoming = load_sources(text, default_timestamp=now)
         with self._uow.transaction():
@@ -250,17 +280,17 @@ class SourceRegistry:
                 if op.changed is None:
                     self._sources.add(op.source)
                     detail = {"type": op.source.type, **_VIA_IMPORT}
-                    self._audit(now, SOURCE_ADDED, op.source.id, detail)
+                    self._audit(now, SOURCE_ADDED, op.source.id, who, detail)
                 else:
                     self._sources.update(op.source)
                     detail = {"changed": op.changed, **_VIA_IMPORT}
-                    self._audit(now, SOURCE_EDITED, op.source.id, detail)
+                    self._audit(now, SOURCE_EDITED, op.source.id, who, detail)
             summary = {
                 "added": len(plan.added),
                 "updated": len(plan.updated),
                 "unchanged": len(plan.unchanged),
             }
-            self._audit(now, SOURCES_IMPORTED, None, summary)
+            self._audit(now, SOURCES_IMPORTED, None, who, summary)
         return report
 
     def _plan_import(self, incoming: list[Source], now: datetime) -> _Plan:

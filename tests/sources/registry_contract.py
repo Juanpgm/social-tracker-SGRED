@@ -15,6 +15,8 @@ from typing import Any
 import pytest
 
 from social_tracker.control.domain import (
+    MAX_ACTOR,
+    MAX_REASON,
     CollectionState,
     SourceState,
     source_analysis_key,
@@ -43,6 +45,7 @@ from social_tracker.sources.service import (
     SourceRegistry,
 )
 from social_tracker.sources.yaml_io import SourceFileError, dump_sources
+from tests.actors import ACTOR, WHO, WHY
 from tests.fakes.flaky_control import FlakyControl
 from tests.sources.factories import CANARY, T0, payload
 
@@ -129,7 +132,7 @@ class RegistryContract:
     def test_add_stores_each_source_type_with_clock_timestamps_and_disabled(
         self, env: Env, type_: str
     ):
-        source = env.registry.add(data(type_=type_))
+        source = env.registry.add(data(type_=type_), **WHO)
         assert source.type == type_
         assert (source.created_at, source.updated_at) == (START, START)
         assert source.enabled is False
@@ -137,75 +140,75 @@ class RegistryContract:
         assert env.sources.get("src_one") == source
 
     def test_add_writes_exactly_one_audit_event(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         stored = env.control.list_control_events()
         assert [(e.kind, e.source_id, e.at) for e in stored] == [(SOURCE_ADDED, "src_one", START)]
-        assert json.loads(stored[0].detail) == {"type": "news_rss"}
+        assert json.loads(stored[0].detail) == {"type": "news_rss", **WHO}
 
     def test_add_ignores_timestamps_supplied_by_the_caller(self, env: Env):
-        source = env.registry.add({**data(), "created_at": "2001-01-01T00:00:00+00:00"})
+        source = env.registry.add({**data(), "created_at": "2001-01-01T00:00:00+00:00"}, **WHO)
         assert source.created_at == START
         assert source.updated_at == START
 
     @pytest.mark.parametrize("bad", [None, [], "text", 5, [("id", "src_one")]])
     def test_add_rejects_data_that_is_not_a_mapping(self, env: Env, bad: Any):
         with pytest.raises(ValidationError):
-            env.registry.add(bad)
+            env.registry.add(bad, **WHO)
         assert env.registry.list() == []
         assert env.control.list_control_events() == []
 
     def test_add_validation_failure_stores_nothing_and_names_the_field(self, env: Env):
         with pytest.raises(ValidationError) as caught:
-            env.registry.add(data(poll_interval_s=1))
+            env.registry.add(data(poll_interval_s=1), **WHO)
         assert caught.value.fields == ("poll_interval_s",)
         assert env.registry.list() == []
         assert env.control.list_control_events() == []
 
     def test_add_rejects_inline_secrets_without_echoing_them(self, env: Env):
         with pytest.raises(ValidationError) as caught:
-            env.registry.add({**data(), "token": CANARY})
+            env.registry.add({**data(), "token": CANARY}, **WHO)
         assert CANARY not in caught.value.message
         assert "token" not in caught.value.message
         assert env.registry.list() == []
 
     def test_add_with_a_duplicate_id_conflicts_without_echoing_the_name(self, env: Env):
-        env.registry.add(data("src_one", "Unique Name"))
+        env.registry.add(data("src_one", "Unique Name"), **WHO)
         before = env.control.list_control_events()
         with pytest.raises(ConflictError) as caught:
-            env.registry.add(data("src_one", "Other Name"))
+            env.registry.add(data("src_one", "Other Name"), **WHO)
         assert caught.value.message == "a source with this id already exists"
         assert [s.name for s in env.registry.list()] == ["Unique Name"]
         assert env.control.list_control_events() == before
 
     @pytest.mark.parametrize("clash", ["same name", "SAME NAME", "  Same Name  "])
     def test_add_name_uniqueness_is_case_and_edge_space_insensitive(self, env: Env, clash: str):
-        env.registry.add(data("src_one", "Same Name"))
+        env.registry.add(data("src_one", "Same Name"), **WHO)
         with pytest.raises(ConflictError) as caught:
-            env.registry.add(data("src_two", clash))
+            env.registry.add(data("src_two", clash), **WHO)
         assert caught.value.message == "a source with this name already exists"
         assert [s.id for s in env.registry.list()] == ["src_one"]
         assert kinds(env) == [SOURCE_ADDED]
 
     def test_conflict_messages_do_not_echo_names(self, env: Env):
-        env.registry.add(data("src_one", f"Name {CANARY}"))
+        env.registry.add(data("src_one", f"Name {CANARY}"), **WHO)
         with pytest.raises(ConflictError) as caught:
-            env.registry.add(data("src_two", f"NAME {CANARY}"))
+            env.registry.add(data("src_two", f"NAME {CANARY}"), **WHO)
         assert CANARY not in caught.value.message
 
     def test_a_no_break_space_inside_a_name_makes_it_a_different_name(self, env: Env):
-        env.registry.add(data("src_one", "Same Name"))
-        env.registry.add(data("src_two", "Same Name"))
+        env.registry.add(data("src_one", "Same Name"), **WHO)
+        env.registry.add(data("src_two", "Same Name"), **WHO)
         assert len(env.registry.list()) == 2
 
     def test_add_name_uniqueness_applies_unicode_normalisation(self, env: Env):
-        env.registry.add(data("src_one", "Café"))  # precomposed e-acute
+        env.registry.add(data("src_one", "Café"), **WHO)  # precomposed e-acute
         with pytest.raises(ConflictError):
-            env.registry.add(data("src_two", "Café"))  # e + combining acute
+            env.registry.add(data("src_two", "Café"), **WHO)  # e + combining acute
 
     def test_a_failing_audit_event_rolls_back_the_new_source(self, env: Env):
         flaky = FlakyControl(env.control, "append_control_event")
         with pytest.raises(StorageError):
-            env.registry_with(control=flaky).add(data())
+            env.registry_with(control=flaky).add(data(), **WHO)
         assert env.registry.list() == []
         assert env.control.list_control_events() == []
 
@@ -223,62 +226,66 @@ class RegistryContract:
 
     def test_list_is_sorted_by_id(self, env: Env):
         for sid in ("src_c", "src_a", "src_b"):
-            env.registry.add(data(sid, sid.upper()))
+            env.registry.add(data(sid, sid.upper()), **WHO)
         assert [s.id for s in env.registry.list()] == ["src_a", "src_b", "src_c"]
 
     # ---- edit ----
 
     def test_edit_changes_fields_stamps_updated_at_and_audits_the_changed_names(self, env: Env):
-        added = env.registry.add(data())
+        added = env.registry.add(data(), **WHO)
         env.clock.advance(HOUR)
-        result = env.registry.edit("src_one", {"name": "Renamed", "credibility": 5})
+        result = env.registry.edit("src_one", {"name": "Renamed", "credibility": 5}, **WHO)
         assert isinstance(result, SourceChange)
         assert result.changed is True
         assert (result.source.name, result.source.credibility) == ("Renamed", 5)
         assert result.source.created_at == added.created_at == START
         assert result.source.updated_at == START + HOUR
         assert env.sources.get("src_one") == result.source
-        assert events(env)[-1] == (SOURCE_EDITED, "src_one", {"changed": ["credibility", "name"]})
+        assert events(env)[-1] == (
+            SOURCE_EDITED,
+            "src_one",
+            {"changed": ["credibility", "name"], **WHO},
+        )
         assert len(events(env)) == 2
 
     def test_edit_with_identical_values_is_a_noop_that_leaves_updated_at_and_events_alone(
         self, env: Env
     ):
-        added = env.registry.add(data())
+        added = env.registry.add(data(), **WHO)
         env.clock.advance(HOUR)
-        result = env.registry.edit("src_one", {"name": "One", "credibility": 3})
+        result = env.registry.edit("src_one", {"name": "One", "credibility": 3}, **WHO)
         assert result.changed is False
         assert result.source == added
         assert env.sources.get("src_one").updated_at == START
         assert kinds(env) == [SOURCE_ADDED]
 
     def test_edit_with_no_changes_is_a_noop(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         env.clock.advance(HOUR)
-        assert env.registry.edit("src_one", {}).changed is False
+        assert env.registry.edit("src_one", {}, **WHO).changed is False
         assert kinds(env) == [SOURCE_ADDED]
 
     def test_edit_can_change_type_specific_fields_and_clear_optional_ones(self, env: Env):
-        env.registry.add(data(keywords=["a", "b"]))
+        env.registry.add(data(keywords=["a", "b"]), **WHO)
         env.clock.advance(HOUR)
-        env.registry.edit("src_one", {"keywords": None, "poll_interval_s": 900})
+        env.registry.edit("src_one", {"keywords": None, "poll_interval_s": 900}, **WHO)
         stored = env.sources.get("src_one")
         assert stored.keywords is None
         assert stored.poll_interval_s == 900
 
     def test_edit_rename_to_another_sources_name_conflicts_and_changes_nothing(self, env: Env):
-        env.registry.add(data("src_one", f"One {CANARY}"))
-        env.registry.add(data("src_two", "Two"))
+        env.registry.add(data("src_one", f"One {CANARY}"), **WHO)
+        env.registry.add(data("src_two", "Two"), **WHO)
         before = (env.registry.list(), env.control.list_control_events())
         with pytest.raises(ConflictError) as caught:
-            env.registry.edit("src_two", {"name": f"  one {CANARY} "})
+            env.registry.edit("src_two", {"name": f"  one {CANARY} "}, **WHO)
         assert CANARY not in caught.value.message
         assert (env.registry.list(), env.control.list_control_events()) == before
 
     def test_edit_case_only_rename_of_the_same_source_is_allowed(self, env: Env):
-        env.registry.add(data("src_one", "one"))
+        env.registry.add(data("src_one", "one"), **WHO)
         env.clock.advance(HOUR)
-        result = env.registry.edit("src_one", {"name": "ONE"})
+        result = env.registry.edit("src_one", {"name": "ONE"}, **WHO)
         assert result.changed is True
         assert env.sources.get("src_one").name == "ONE"
         assert env.sources.get("src_one").updated_at == START + HOUR
@@ -294,18 +301,18 @@ class RegistryContract:
         ],
     )
     def test_edit_refuses_immutable_and_managed_fields(self, env: Env, key: str, value: Any):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         before = env.registry.get("src_one")
         with pytest.raises(ValidationError) as caught:
-            env.registry.edit("src_one", {key: value})
+            env.registry.edit("src_one", {key: value}, **WHO)
         assert caught.value.fields == (key,)
         assert env.registry.get("src_one") == before
         assert kinds(env) == [SOURCE_ADDED]
 
     def test_edit_rejects_unknown_keys_without_echoing_them(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         with pytest.raises(ValidationError) as caught:
-            env.registry.edit("src_one", {f"x-{CANARY}": CANARY})
+            env.registry.edit("src_one", {f"x-{CANARY}": CANARY}, **WHO)
         assert CANARY not in caught.value.message
         assert caught.value.fields == ()
 
@@ -313,57 +320,59 @@ class RegistryContract:
         "key", ["self", "cls", "changes", "__class__", "model_config", "handle", "stream_url"]
     )
     def test_edit_rejects_keys_that_are_not_fields_of_this_source_type(self, env: Env, key: str):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         before = (env.registry.get("src_one"), env.control.list_control_events())
         with pytest.raises(ValidationError) as caught:
-            env.registry.edit("src_one", {key: "x"})
+            env.registry.edit("src_one", {key: "x"}, **WHO)
         assert key not in caught.value.message
         assert caught.value.fields == ()
         assert (env.registry.get("src_one"), env.control.list_control_events()) == before
 
     @pytest.mark.parametrize("bad", [None, [], "name", 5])
     def test_edit_rejects_changes_that_are_not_a_mapping(self, env: Env, bad: Any):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         with pytest.raises(ValidationError):
-            env.registry.edit("src_one", bad)
+            env.registry.edit("src_one", bad, **WHO)
 
     def test_edit_rejects_non_string_keys(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         with pytest.raises(ValidationError):
-            env.registry.edit("src_one", {1: "x"})
+            env.registry.edit("src_one", {1: "x"}, **WHO)
 
     def test_edit_invalid_value_names_the_field_and_changes_nothing(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         before = env.registry.get("src_one")
         with pytest.raises(ValidationError) as caught:
-            env.registry.edit("src_one", {"feed_url": "ftp://example.org/x"})
+            env.registry.edit("src_one", {"feed_url": "ftp://example.org/x"}, **WHO)
         assert caught.value.fields == ("feed_url",)
         assert env.registry.get("src_one") == before
 
     def test_edit_cannot_introduce_a_secret_in_a_url(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         with pytest.raises(ValidationError) as caught:
-            env.registry.edit("src_one", {"feed_url": f"https://example.org/?token={CANARY}"})
+            env.registry.edit(
+                "src_one", {"feed_url": f"https://example.org/?token={CANARY}"}, **WHO
+            )
         assert CANARY not in caught.value.message
 
     def test_edit_unknown_source_is_not_found(self, env: Env):
         with pytest.raises(NotFoundError):
-            env.registry.edit("src_missing", {"name": "X"})
+            env.registry.edit("src_missing", {"name": "X"}, **WHO)
 
     def test_edit_with_a_clock_before_created_at_fails_and_writes_nothing(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         earlier = FixedClock(START - HOUR)
         with pytest.raises(ValidationError):
-            env.registry_with(clock=earlier).edit("src_one", {"name": "Late"})
+            env.registry_with(clock=earlier).edit("src_one", {"name": "Late"}, **WHO)
         assert env.registry.get("src_one").name == "One"
         assert kinds(env) == [SOURCE_ADDED]
 
     def test_a_failing_audit_event_rolls_back_an_edit(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         env.clock.advance(HOUR)
         flaky = FlakyControl(env.control, "append_control_event")
         with pytest.raises(StorageError):
-            env.registry_with(control=flaky).edit("src_one", {"name": "Renamed"})
+            env.registry_with(control=flaky).edit("src_one", {"name": "Renamed"}, **WHO)
         stored = env.sources.get("src_one")
         assert (stored.name, stored.updated_at) == ("One", START)
         assert kinds(env) == [SOURCE_ADDED]
@@ -371,12 +380,12 @@ class RegistryContract:
     # ---- enable / disable ----
 
     def test_enable_then_disable_change_the_flag_stamp_updated_at_and_audit(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         env.clock.advance(HOUR)
-        on = env.registry.enable("src_one")
+        on = env.registry.enable("src_one", **WHO)
         assert (on.changed, on.source.enabled, on.source.updated_at) == (True, True, START + HOUR)
         env.clock.advance(HOUR)
-        off = env.registry.disable("src_one")
+        off = env.registry.disable("src_one", **WHO)
         assert (off.changed, off.source.enabled) == (True, False)
         assert off.source.updated_at == START + 2 * HOUR
         assert [(k, s) for k, s, _ in events(env)] == [
@@ -386,13 +395,13 @@ class RegistryContract:
         ]
 
     def test_redundant_enable_and_disable_are_noops_without_events(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         env.clock.advance(HOUR)
-        assert env.registry.disable("src_one").changed is False
-        env.registry.enable("src_one")
+        assert env.registry.disable("src_one", **WHO).changed is False
+        env.registry.enable("src_one", **WHO)
         count = len(events(env))
         env.clock.advance(HOUR)
-        again = env.registry.enable("src_one")
+        again = env.registry.enable("src_one", **WHO)
         assert again.changed is False
         assert again.source.updated_at == START + HOUR
         assert env.sources.get("src_one").updated_at == START + HOUR
@@ -401,107 +410,107 @@ class RegistryContract:
     @pytest.mark.parametrize("operation", ["enable", "disable"])
     def test_enable_and_disable_unknown_source_is_not_found(self, env: Env, operation: str):
         with pytest.raises(NotFoundError):
-            getattr(env.registry, operation)("src_missing")
+            getattr(env.registry, operation)("src_missing", **WHO)
         assert env.control.list_control_events() == []
 
     def test_a_failing_audit_event_rolls_back_enable(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         flaky = FlakyControl(env.control, "append_control_event")
         with pytest.raises(StorageError):
-            env.registry_with(control=flaky).enable("src_one")
+            env.registry_with(control=flaky).enable("src_one", **WHO)
         assert env.sources.get("src_one").enabled is False
 
     def test_enable_and_edit_do_not_touch_each_others_fields(self, env: Env):
-        env.registry.add(data())
-        env.registry.enable("src_one")
-        env.registry.edit("src_one", {"name": "Renamed"})
+        env.registry.add(data(), **WHO)
+        env.registry.enable("src_one", **WHO)
+        env.registry.edit("src_one", {"name": "Renamed"}, **WHO)
         stored = env.sources.get("src_one")
         assert (stored.enabled, stored.name) == (True, "Renamed")
 
     # ---- delete ----
 
     def test_delete_removes_the_source_and_its_state_but_keeps_the_audit_trail(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         env.control.save_source_state(SourceState("src_one", CollectionState.IDLE))
-        env.registry.delete("src_one")
+        env.registry.delete("src_one", **WHO)
         assert env.registry.list() == []
         assert env.control.get_source_state("src_one") is None
         assert [k for k, _, _ in events(env, "src_one")] == [SOURCE_ADDED, SOURCE_DELETED]
-        assert events(env)[-1][2] == {"type": "news_rss", "state": "idle"}
+        assert events(env)[-1][2] == {"type": "news_rss", "state": "idle", **WHO}
 
     def test_deleting_a_collecting_source_is_allowed_and_recorded(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         env.control.save_source_state(SourceState("src_one", CollectionState.COLLECTING))
-        env.registry.delete("src_one")
+        env.registry.delete("src_one", **WHO)
         assert env.control.get_source_state("src_one") is None
         assert events(env)[-1] == (
             SOURCE_DELETED,
             "src_one",
-            {"type": "news_rss", "state": "collecting"},
+            {"type": "news_rss", "state": "collecting", **WHO},
         )
 
     def test_delete_without_a_state_row_records_a_null_state(self, env: Env):
-        env.registry.add(data())
-        env.registry.delete("src_one")
-        assert events(env)[-1][2] == {"type": "news_rss", "state": None}
+        env.registry.add(data(), **WHO)
+        env.registry.delete("src_one", **WHO)
+        assert events(env)[-1][2] == {"type": "news_rss", "state": None, **WHO}
 
     def test_delete_unknown_source_is_not_found_and_audits_nothing(self, env: Env):
         with pytest.raises(NotFoundError):
-            env.registry.delete("src_missing")
+            env.registry.delete("src_missing", **WHO)
         assert env.control.list_control_events() == []
 
     def test_delete_twice_the_second_is_not_found(self, env: Env):
-        env.registry.add(data())
-        env.registry.delete("src_one")
+        env.registry.add(data(), **WHO)
+        env.registry.delete("src_one", **WHO)
         with pytest.raises(NotFoundError):
-            env.registry.delete("src_one")
+            env.registry.delete("src_one", **WHO)
         assert kinds(env) == [SOURCE_ADDED, SOURCE_DELETED]
 
     def test_delete_does_not_disturb_other_sources(self, env: Env):
-        env.registry.add(data("src_one", "One"))
-        env.registry.add(data("src_two", "Two"))
+        env.registry.add(data("src_one", "One"), **WHO)
+        env.registry.add(data("src_two", "Two"), **WHO)
         env.control.save_source_state(SourceState("src_two", CollectionState.IDLE))
-        env.registry.delete("src_one")
+        env.registry.delete("src_one", **WHO)
         assert [s.id for s in env.registry.list()] == ["src_two"]
         assert env.control.get_source_state("src_two") is not None
 
     def test_the_name_of_a_deleted_source_can_be_reused(self, env: Env):
-        env.registry.add(data("src_one", "Reused"))
-        env.registry.delete("src_one")
-        env.registry.add(data("src_two", "Reused"))
+        env.registry.add(data("src_one", "Reused"), **WHO)
+        env.registry.delete("src_one", **WHO)
+        env.registry.add(data("src_two", "Reused"), **WHO)
         assert [s.id for s in env.registry.list()] == ["src_two"]
 
     def test_delete_switches_off_the_per_source_analysis_flag(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         env.control.set_setting(source_analysis_key("src_one"), "true")
-        env.registry.delete("src_one")
+        env.registry.delete("src_one", **WHO)
         assert env.control.get_setting(source_analysis_key("src_one")) == "false"
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         assert env.control.get_setting(source_analysis_key("src_one")) == "false"
 
     def test_delete_does_not_create_an_analysis_flag_that_never_existed(self, env: Env):
-        env.registry.add(data())
-        env.registry.delete("src_one")
+        env.registry.add(data(), **WHO)
+        env.registry.delete("src_one", **WHO)
         assert env.control.get_setting(source_analysis_key("src_one")) is None
 
     def test_a_failing_state_cleanup_rolls_back_the_source_delete(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         env.control.save_source_state(SourceState("src_one", CollectionState.IDLE))
         flaky = FlakyControl(env.control, "delete_source_state")
         with pytest.raises(StorageError):
-            env.registry_with(control=flaky).delete("src_one")
+            env.registry_with(control=flaky).delete("src_one", **WHO)
         assert [s.id for s in env.registry.list()] == ["src_one"]
         assert env.control.get_source_state("src_one") is not None
         assert kinds(env) == [SOURCE_ADDED]
 
     def test_a_failing_audit_event_rolls_back_the_delete_and_the_state_cleanup(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         env.control.save_source_state(
             SourceState("src_one", CollectionState.BACKOFF, 1, START + HOUR)
         )
         flaky = FlakyControl(env.control, "append_control_event")
         with pytest.raises(StorageError):
-            env.registry_with(control=flaky).delete("src_one")
+            env.registry_with(control=flaky).delete("src_one", **WHO)
         assert [s.id for s in env.registry.list()] == ["src_one"]
         assert env.control.get_source_state("src_one") is not None
         assert kinds(env) == [SOURCE_ADDED]
@@ -513,13 +522,13 @@ class RegistryContract:
     ):
         a = parse_source(payload("news_rss", id="src_a", name="A"))
         b = parse_source(payload("instagram", id="src_b", name="B"))
-        report = env.registry.import_sources(export_of(b, a))
+        report = env.registry.import_sources(export_of(b, a), **WHO)
         assert report == ImportReport(("src_a", "src_b"), (), (), dry_run=False)
         assert env.registry.list() == [a, b]
         assert events(env) == [
-            (SOURCE_ADDED, "src_a", {"type": "news_rss", "via": "import"}),
-            (SOURCE_ADDED, "src_b", {"type": "instagram", "via": "import"}),
-            (SOURCES_IMPORTED, None, {"added": 2, "updated": 0, "unchanged": 0}),
+            (SOURCE_ADDED, "src_a", {"type": "news_rss", "via": "import", **WHO}),
+            (SOURCE_ADDED, "src_b", {"type": "instagram", "via": "import", **WHO}),
+            (SOURCES_IMPORTED, None, {"added": 2, "updated": 0, "unchanged": 0, **WHO}),
         ]
 
     def test_import_is_idempotent_a_second_run_changes_and_audits_nothing(self, env: Env):
@@ -527,10 +536,10 @@ class RegistryContract:
             parse_source(payload("news_rss", id="src_a", name="A")),
             parse_source(payload("live_stream", id="src_b", name="B")),
         )
-        env.registry.import_sources(text)
+        env.registry.import_sources(text, **WHO)
         count = len(events(env))
         env.clock.advance(HOUR)
-        report = env.registry.import_sources(text)
+        report = env.registry.import_sources(text, **WHO)
         assert report == ImportReport((), (), ("src_a", "src_b"), dry_run=False)
         assert len(events(env)) == count
         assert {s.updated_at for s in env.registry.list()} == {T0}
@@ -538,29 +547,33 @@ class RegistryContract:
     def test_import_updates_an_existing_source_keeping_created_at_and_stamping_updated_at(
         self, env: Env
     ):
-        existing = env.registry.add(data("src_a", "Old"))
+        existing = env.registry.add(data("src_a", "Old"), **WHO)
         env.clock.advance(HOUR)
         incoming = existing.with_changes({"name": "New", "credibility": 4})
-        report = env.registry.import_sources(export_of(incoming))
+        report = env.registry.import_sources(export_of(incoming), **WHO)
         assert report == ImportReport((), ("src_a",), (), dry_run=False)
         stored = env.sources.get("src_a")
         assert (stored.name, stored.credibility) == ("New", 4)
         assert (stored.created_at, stored.updated_at) == (START, START + HOUR)
         assert events(env)[-2:] == [
-            (SOURCE_EDITED, "src_a", {"changed": ["credibility", "name"], "via": "import"}),
-            (SOURCES_IMPORTED, None, {"added": 0, "updated": 1, "unchanged": 0}),
+            (
+                SOURCE_EDITED,
+                "src_a",
+                {"changed": ["credibility", "name"], "via": "import", **WHO},
+            ),
+            (SOURCES_IMPORTED, None, {"added": 0, "updated": 1, "unchanged": 0, **WHO}),
         ]
 
     def test_import_replaces_the_whole_entry_so_omitted_fields_fall_back_to_defaults(
         self, env: Env
     ):
-        env.registry.add(data("src_a", "A"))
-        env.registry.enable("src_a")
+        env.registry.add(data("src_a", "A"), **WHO)
+        env.registry.enable("src_a", **WHO)
         hand_written = (
             "sources:\n- id: src_a\n  type: news_rss\n  name: A\n"
             "  feed_url: https://example.org/rss.xml\n"
         )
-        report = env.registry.import_sources(hand_written)
+        report = env.registry.import_sources(hand_written, **WHO)
         assert report.updated == ("src_a",)
         assert env.sources.get("src_a").enabled is False
 
@@ -569,36 +582,38 @@ class RegistryContract:
             "sources:\n- id: src_new\n  type: news_rss\n  name: N\n"
             "  feed_url: https://example.org/rss.xml\n"
         )
-        env.registry.import_sources(hand_written)
+        env.registry.import_sources(hand_written, **WHO)
         assert env.sources.get("src_new").created_at == START
         given = parse_source(payload("news_rss", id="src_old", name="O"))
         env.clock.advance(HOUR)
-        env.registry.import_sources(export_of(given))
+        env.registry.import_sources(export_of(given), **WHO)
         assert env.sources.get("src_old").created_at == given.created_at
 
     def test_import_leaves_sources_that_are_not_in_the_file_alone(self, env: Env):
-        env.registry.add(data("src_keep", "Keep"))
-        env.registry.import_sources(export_of(parse_source(payload(id="src_new", name="New"))))
+        env.registry.add(data("src_keep", "Keep"), **WHO)
+        env.registry.import_sources(
+            export_of(parse_source(payload(id="src_new", name="New"))), **WHO
+        )
         assert [s.id for s in env.registry.list()] == ["src_keep", "src_new"]
 
     def test_import_of_an_empty_list_does_nothing(self, env: Env):
-        report = env.registry.import_sources("sources: []\n")
+        report = env.registry.import_sources("sources: []\n", **WHO)
         assert report == ImportReport((), (), (), dry_run=False)
         assert env.control.list_control_events() == []
 
     def test_import_allows_a_name_released_earlier_in_the_same_file(self, env: Env):
-        env.registry.add(data("src_a", "Alpha"))
+        env.registry.add(data("src_a", "Alpha"), **WHO)
         renamed = env.registry.get("src_a").with_changes({"name": "Gamma"})
         newcomer = parse_source(payload("news_rss", id="src_b", name="alpha"))
-        report = env.registry.import_sources(export_of(renamed, newcomer))
+        report = env.registry.import_sources(export_of(renamed, newcomer), **WHO)
         assert (report.added, report.updated) == (("src_b",), ("src_a",))
 
     def test_import_rejects_a_name_swap_as_a_conflict_and_applies_nothing(self, env: Env):
-        a = env.registry.add(data("src_a", "Alpha"))
-        b = env.registry.add(data("src_b", "Beta"))
+        a = env.registry.add(data("src_a", "Alpha"), **WHO)
+        b = env.registry.add(data("src_b", "Beta"), **WHO)
         text = export_of(a.with_changes({"name": "Beta"}), b.with_changes({"name": "Alpha"}))
         with pytest.raises(ImportConflictError):
-            env.registry.import_sources(text)
+            env.registry.import_sources(text, **WHO)
         assert [s.name for s in env.registry.list()] == ["Alpha", "Beta"]
 
     def test_import_is_atomic_when_a_later_entry_is_invalid(self, env: Env):
@@ -607,14 +622,14 @@ class RegistryContract:
             + "\n- id: src_b\n  type: news_rss\n  name: B\n  feed_url: ftp://nope\n"
         )
         with pytest.raises(SourceFileError) as caught:
-            env.registry.import_sources(text)
+            env.registry.import_sources(text, **WHO)
         assert [(p.index, p.fields) for p in caught.value.problems] == [(1, ("feed_url",))]
         assert env.registry.list() == []
         assert env.control.list_control_events() == []
 
     def test_import_is_atomic_and_reports_every_conflict_together(self, env: Env):
-        existing = env.registry.add(data("src_taken", "Taken"))
-        other = env.registry.add(data("src_other", "Other"))
+        existing = env.registry.add(data("src_taken", "Taken"), **WHO)
+        other = env.registry.add(data("src_other", "Other"), **WHO)
         text = export_of(
             parse_source(payload(id="src_fine", name="Fine")),
             parse_source(payload(id="src_x", name="TAKEN")),
@@ -623,7 +638,7 @@ class RegistryContract:
         )
         before = (env.registry.list(), env.control.list_control_events())
         with pytest.raises(ImportConflictError) as caught:
-            env.registry.import_sources(text)
+            env.registry.import_sources(text, **WHO)
         by_sorted_id = sorted((p.index, p.code, p.fields, p.message) for p in caught.value.problems)
         assert [(i, c, f) for i, c, f, _ in by_sorted_id] == [
             (1, "conflict", ("type",)),  # the export sorts entries by id: src_other is second
@@ -636,10 +651,10 @@ class RegistryContract:
         assert other in env.registry.list()
 
     def test_conflict_messages_never_echo_names(self, env: Env):
-        env.registry.add(data("src_taken", f"Name {CANARY}"))
+        env.registry.add(data("src_taken", f"Name {CANARY}"), **WHO)
         clash = parse_source(payload(id="src_x", name=f"name {CANARY}"))
         with pytest.raises(ImportConflictError) as caught:
-            env.registry.import_sources(export_of(clash))
+            env.registry.import_sources(export_of(clash), **WHO)
         assert CANARY not in repr(caught.value.problems) + caught.value.message
 
     def test_import_rolls_back_every_write_when_a_later_audit_event_fails(self, env: Env):
@@ -649,12 +664,12 @@ class RegistryContract:
         )
         flaky = FlakyControl(env.control, "append_control_event", on_call=2)
         with pytest.raises(StorageError):
-            env.registry_with(control=flaky).import_sources(text)
+            env.registry_with(control=flaky).import_sources(text, **WHO)
         assert env.registry.list() == []
         assert env.control.list_control_events() == []
 
     def test_import_dry_run_classifies_without_writing_or_auditing(self, env: Env):
-        existing = env.registry.add(data("src_a", "A"))
+        existing = env.registry.add(data("src_a", "A"), **WHO)
         before_events = env.control.list_control_events()
         text = export_of(
             existing.with_changes({"name": "Changed"}),
@@ -666,7 +681,7 @@ class RegistryContract:
         assert env.control.list_control_events() == before_events
 
     def test_import_dry_run_still_rejects_invalid_files_and_conflicts(self, env: Env):
-        env.registry.add(data("src_a", "A"))
+        env.registry.add(data("src_a", "A"), **WHO)
         with pytest.raises(SourceFileError):
             env.registry.import_sources("sources: [1]", dry_run=True)
         with pytest.raises(ImportConflictError):
@@ -677,7 +692,7 @@ class RegistryContract:
     @pytest.mark.parametrize("bad", ["", "- a", "sources: 1", "sources:\n- &x {}\n- *x"])
     def test_import_rejects_bad_documents_and_applies_nothing(self, env: Env, bad: str):
         with pytest.raises(SourceFileError):
-            env.registry.import_sources(bad)
+            env.registry.import_sources(bad, **WHO)
         assert env.registry.list() == []
         assert env.control.list_control_events() == []
 
@@ -687,22 +702,22 @@ class RegistryContract:
             f"  feed_url: https://example.org/rss?token={CANARY}\n  password: {CANARY}\n"
         )
         with pytest.raises(SourceFileError) as caught:
-            env.registry.import_sources(text)
+            env.registry.import_sources(text, **WHO)
         assert CANARY not in repr(caught.value.problems) + caught.value.message
 
     def test_export_then_import_into_a_fresh_registry_reproduces_every_source(self, env: Env):
         for type_, sid in zip(SOURCE_TYPES, ("src_a", "src_b", "src_c", "src_d"), strict=True):
-            env.registry.add(data(sid, sid.upper(), type_))
-        env.registry.enable("src_b")
+            env.registry.add(data(sid, sid.upper(), type_), **WHO)
+        env.registry.enable("src_b", **WHO)
         text = env.registry.export_sources()
         other = self.make_env()
-        other.registry.import_sources(text)
+        other.registry.import_sources(text, **WHO)
         assert other.registry.list() == env.registry.list()
         assert other.registry.export_sources() == text
 
     def test_export_is_sorted_and_never_contains_secret_values(self, env: Env):
-        env.registry.add(data("src_z", "Z"))
-        env.registry.add(data("src_b", "B", "instagram"))
+        env.registry.add(data("src_z", "Z"), **WHO)
+        env.registry.add(data("src_b", "B", "instagram"), **WHO)
         text = env.registry.export_sources()
         assert text.index("src_b") < text.index("src_z")
         assert "secret_ref: env:ig_main" in text
@@ -714,8 +729,8 @@ class RegistryContract:
             fresh = self.make_env()
             results = race(
                 [
-                    partial(fresh.registry.add, data("src_one", f"Contested {trial}")),
-                    partial(fresh.registry.add, data("src_two", f"CONTESTED {trial}")),
+                    partial(fresh.registry.add, data("src_one", f"Contested {trial}"), **WHO),
+                    partial(fresh.registry.add, data("src_two", f"CONTESTED {trial}"), **WHO),
                 ]
             )
             outcomes = sorted(kind for kind, _ in results)
@@ -730,8 +745,8 @@ class RegistryContract:
             fresh = self.make_env()
             results = race(
                 [
-                    partial(fresh.registry.add, data("src_one", "First")),
-                    partial(fresh.registry.add, data("src_one", "Second")),
+                    partial(fresh.registry.add, data("src_one", "First"), **WHO),
+                    partial(fresh.registry.add, data("src_one", "Second"), **WHO),
                 ]
             )
             assert sorted(kind for kind, _ in results) == ["err", "ok"], results
@@ -740,7 +755,8 @@ class RegistryContract:
 
     def test_many_threads_adding_distinct_sources_all_succeed_with_one_event_each(self, env: Env):
         calls = [
-            (lambda i=i: env.registry.add(data(f"src_{i:02d}", f"Name {i}"))) for i in range(10)
+            (lambda i=i: env.registry.add(data(f"src_{i:02d}", f"Name {i}"), **WHO))
+            for i in range(10)
         ]
         results = race(calls)
         assert [kind for kind, _ in results] == ["ok"] * 10, results
@@ -748,18 +764,18 @@ class RegistryContract:
         assert kinds(env) == [SOURCE_ADDED] * 10
 
     def test_concurrent_enable_calls_audit_exactly_one_change(self, env: Env):
-        env.registry.add(data())
-        results = race([lambda: env.registry.enable("src_one") for _ in range(6)])
+        env.registry.add(data(), **WHO)
+        results = race([lambda: env.registry.enable("src_one", **WHO) for _ in range(6)])
         assert [kind for kind, _ in results] == ["ok"] * 6
         assert sorted(value.changed for _, value in results) == [False] * 5 + [True]
         assert kinds(env).count(SOURCE_ENABLED) == 1
 
     def test_add_and_delete_race_never_leaves_an_event_without_matching_state(self, env: Env):
-        env.registry.add(data())
+        env.registry.add(data(), **WHO)
         results = race(
             [
-                lambda: env.registry.delete("src_one"),
-                lambda: env.registry.edit("src_one", {"name": "Renamed"}),
+                lambda: env.registry.delete("src_one", **WHO),
+                lambda: env.registry.edit("src_one", {"name": "Renamed"}, **WHO),
             ]
         )
         assert all(kind in ("ok", "err") for kind, _ in results)
@@ -769,3 +785,120 @@ class RegistryContract:
         for kind, value in results:
             if kind == "err":
                 assert isinstance(value, NotFoundError)
+
+    # ---- who and why on every write ----
+
+    BAD_WHO = [
+        ("actor", ""),
+        ("actor", "   "),
+        ("actor", None),
+        ("actor", 5),
+        ("actor", "x" * (MAX_ACTOR + 1)),
+        ("actor", "a\x00b"),
+        ("actor", "line\nbreak"),
+        ("actor", "\ud800x"),
+        ("actor", "​"),
+        ("actor", "a‮b"),
+        ("reason", ""),
+        ("reason", " \t "),
+        ("reason", None),
+        ("reason", "x" * (MAX_REASON + 1)),
+        ("reason", "bell\x07"),
+        ("reason", "tab\there"),
+        ("reason", " "),
+        ("reason", "ok "),
+    ]
+
+    def writes(self, env: Env, who: dict[str, Any]) -> dict[str, Callable[[], Any]]:
+        """One real, valid write per audited operation, each given `who` as actor/reason."""
+        env.registry.add(data("src_one", "One"), **WHO)
+        env.registry.add(data("src_two", "Two"), **WHO)
+        env.registry.enable("src_two", **WHO)  # so that disabling it is a real change
+        incoming = export_of(parse_source(payload(id="src_imp", name="Imported")))
+        return {
+            "add": lambda: env.registry.add(data("src_new", "New"), **who),
+            "edit": lambda: env.registry.edit("src_one", {"name": "Renamed"}, **who),
+            "enable": lambda: env.registry.enable("src_one", **who),
+            "disable": lambda: env.registry.disable("src_two", **who),
+            "delete": lambda: env.registry.delete("src_two", **who),
+            "import": lambda: env.registry.import_sources(incoming, **who),
+        }
+
+    @pytest.mark.parametrize(("field", "bad"), BAD_WHO, ids=lambda v: ascii(v)[:30])
+    @pytest.mark.parametrize("operation", ["add", "edit", "enable", "disable", "delete", "import"])
+    def test_every_write_validates_actor_and_reason_and_writes_nothing_when_invalid(
+        self, env: Env, operation: str, field: str, bad: Any
+    ):
+        call = self.writes(env, {**WHO, field: bad})[operation]
+        before = (env.registry.list(), env.control.list_control_events())
+        with pytest.raises(ValidationError) as caught:
+            call()
+        assert caught.value.fields == (field,)
+        assert (env.registry.list(), env.control.list_control_events()) == before
+
+    @pytest.mark.parametrize("operation", ["add", "edit", "enable", "disable", "delete"])
+    @pytest.mark.parametrize("missing", ["actor", "reason"])
+    def test_actor_and_reason_have_to_be_given(self, env: Env, operation: str, missing: str):
+        who = {k: v for k, v in WHO.items() if k != missing}
+        call = self.writes(env, who)[operation]
+        with pytest.raises(TypeError):
+            call()
+
+    @pytest.mark.parametrize("missing", ["actor", "reason"])
+    def test_a_real_import_needs_actor_and_reason(self, env: Env, missing: str):
+        who = {k: v for k, v in WHO.items() if k != missing}
+        call = self.writes(env, who)["import"]
+        before = (env.registry.list(), env.control.list_control_events())
+        with pytest.raises(ValidationError) as caught:
+            call()
+        assert caught.value.fields == (missing,)
+        assert (env.registry.list(), env.control.list_control_events()) == before
+
+    def test_a_dry_run_import_needs_no_actor_and_writes_nothing(self, env: Env):
+        text = export_of(parse_source(payload(id="src_dry", name="Dry")))
+        before = (env.registry.list(), env.control.list_control_events())
+        report = env.registry.import_sources(text, dry_run=True)
+        assert report == ImportReport(("src_dry",), (), (), dry_run=True)
+        assert (env.registry.list(), env.control.list_control_events()) == before
+
+    @pytest.mark.parametrize("operation", ["add", "edit", "enable", "disable", "delete", "import"])
+    def test_every_write_records_who_and_why_in_each_event_it_writes(
+        self, env: Env, operation: str
+    ):
+        call = self.writes(env, {"actor": "ana", "reason": "weekly review"})[operation]
+        seen = len(env.control.list_control_events())
+        call()
+        written = env.control.list_control_events()[seen:]
+        assert written  # a real change was made
+        for event in written:
+            detail = json.loads(event.detail)
+            assert (detail["actor"], detail["reason"]) == ("ana", "weekly review")
+
+    def test_a_noop_with_an_invalid_actor_is_still_rejected(self, env: Env):
+        env.registry.add(data(), **WHO)
+        with pytest.raises(ValidationError):
+            env.registry.disable("src_one", actor="", reason=WHY)  # already disabled
+        with pytest.raises(ValidationError):
+            env.registry.edit("src_one", {}, actor=ACTOR, reason="")  # nothing to change
+
+    @pytest.mark.parametrize("operation", ["add", "edit", "enable", "disable", "delete", "import"])
+    def test_the_longest_escaped_actor_and_reason_fit_in_the_event_of_every_write(
+        self, env: Env, operation: str
+    ):
+        who = {"actor": "\\" * MAX_ACTOR, "reason": '"' * MAX_REASON}
+        call = self.writes(env, who)[operation]
+        seen = len(env.control.list_control_events())
+        call()
+        for event in env.control.list_control_events()[seen:]:
+            detail = json.loads(event.detail)
+            assert (detail["actor"], detail["reason"]) == (who["actor"], who["reason"])
+
+    def test_unicode_actor_and_reason_are_stored_verbatim(self, env: Env):
+        env.registry.add(data(), actor="José ✓", reason="rápido 日本")
+        detail = json.loads(env.control.list_control_events()[-1].detail)
+        assert (detail["actor"], detail["reason"]) == ("José ✓", "rápido 日本")
+
+    def test_errors_never_echo_the_actor_or_reason(self, env: Env):
+        with pytest.raises(ValidationError) as caught:
+            env.registry.add(data(), actor=ACTOR, reason=CANARY + "\x00")
+        assert CANARY not in caught.value.message
