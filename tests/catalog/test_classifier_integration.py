@@ -83,13 +83,24 @@ def test_a_report_the_catalog_contradicts_is_flagged_and_sent_to_review(setup):
     assert verdict.needs_llm
 
 
-def test_a_prediction_with_a_claimed_magnitude_nobody_recorded_gains_evidence(setup):
+def test_a_report_with_a_claimed_magnitude_nobody_recorded_gains_evidence(setup):
+    world, repo, _ = setup
+    claim = "ALERTA: sismo de magnitud 7.5 en Cali hace un momento, compartan este mensaje"
+    plain = classify(world, claim.replace("magnitud 7.5", "fuerza"))
+    fresh_cache(repo, magnitude=3.0)
+    flagged = classify_second(world, claim)
+    assert flagged.catalog_status == "mismatch"
+    assert flagged.confidence > plain.confidence
+
+
+def test_a_prediction_is_not_checked_against_the_catalog(setup):
+    # R8: a prediction claims no recorded event, so the catalog has nothing to say about it
     world, repo, _ = setup
     plain = classify(world, PREDICTION.replace("magnitud 7.5", "fuerza"))
     fresh_cache(repo, magnitude=3.0)
-    flagged = classify_second(world, PREDICTION)
-    assert flagged.catalog_status == "mismatch"
-    assert flagged.confidence > plain.confidence
+    predicted = classify_second(world, PREDICTION)
+    assert predicted.catalog_status == "no_claim"
+    assert predicted.confidence == plain.confidence
 
 
 def classify_second(world, text):

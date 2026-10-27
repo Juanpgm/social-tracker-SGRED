@@ -23,9 +23,10 @@ def when(text: str):
     return extract_claims(text, PUB).when
 
 
-def test_a_range_of_exactly_three_degrees_is_a_range_and_a_hair_more_is_not():
-    assert spans("magnitud 3 a 6") == [(3.0, 6.0)]
-    assert spans("magnitud 3 a 6.1") == [(3.0, 3.0)]
+def test_a_range_of_exactly_one_degree_is_a_range_and_a_hair_more_is_dropped_whole():
+    # R13: a wide range proves nothing; the limit moved from three degrees to one
+    assert spans("magnitud 3 a 4") == [(3.0, 4.0)]
+    assert spans("magnitud 3 a 4.1") == []
 
 
 def test_zero_and_ten_are_the_limits_of_a_magnitude():

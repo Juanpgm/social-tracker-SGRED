@@ -85,8 +85,8 @@ def test_a_number_with_a_unit_after_the_magnitude_is_not_the_other_end_of_a_rang
     assert magnitudes(text) == [(6.2, 6.2)]
 
 
-def test_a_range_wider_than_three_degrees_or_backwards_is_not_a_range():
-    assert magnitudes("magnitud 3 a 8") == [(3.0, 3.0)]
+def test_a_range_wider_than_one_degree_is_dropped_and_a_backwards_one_is_not_a_range():
+    assert magnitudes("magnitud 3 a 8") == []  # R13: it proves nothing
     assert magnitudes("magnitud 6.0-5.0") == [(6.0, 6.0)]
 
 
@@ -237,8 +237,6 @@ def test_a_moment_ago_is_the_publication_time(text):
         ("hace dos horas", timedelta(hours=2)),
         ("hace un par de horas", timedelta(hours=2)),
         ("hace unos minutos", timedelta(minutes=5)),
-        ("hace 3 días", timedelta(days=3)),
-        ("hace un día", timedelta(days=1)),
     ],
 )
 def test_a_relative_time_counts_back_from_publication(text, ago):
@@ -249,7 +247,16 @@ def test_a_relative_time_counts_back_from_publication(text, ago):
 
 @pytest.mark.parametrize(
     "text",
-    ["hace 5 años", "hace 2 meses", "hace 3 semanas", "hace un año", "hace años", "en 1999 hubo"],
+    [
+        "hace 5 años",
+        "hace 2 meses",
+        "hace 3 semanas",
+        "hace un año",
+        "hace años",
+        "en 1999 hubo",
+        "hace 3 días",  # R7: days ago is not an exact instant
+        "hace un día",
+    ],
 )
 def test_a_long_ago_is_historic_and_has_no_instant(text):
     claim = when(text)
@@ -272,7 +279,8 @@ def test_a_long_ago_is_historic_and_has_no_instant(text):
         ("ayer a las 11:30 pm", datetime(2026, 10, 27, 4, 30, tzinfo=UTC)),
         ("anoche a las 9:00 pm", datetime(2026, 10, 27, 2, 0, tzinfo=UTC)),
         ("a las 3:15 pm", datetime(2026, 10, 26, 20, 15, tzinfo=UTC)),  # later than now: yesterday
-        ("temblor 11:59", datetime(2026, 10, 27, 16, 59, tzinfo=UTC)),
+        ("temblor 11:59 am", datetime(2026, 10, 27, 16, 59, tzinfo=UTC)),
+        ("temblor 23:59", datetime(2026, 10, 27, 4, 59, tzinfo=UTC)),
     ],
 )
 def test_a_time_of_day_is_local_unless_it_says_utc_and_never_in_the_future(text, expected):
