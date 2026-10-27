@@ -40,3 +40,18 @@ forbidden_modules =
     importlib
     tempfile
     glob
+
+# Services (application layer) depend on ports only. They receive repositories, the clock and a
+# UnitOfWork by constructor injection and must never import the storage adapters, SQLite or the
+# entrypoints. `yaml` stays allowed for the codec, which is I/O-format code and not a domain module.
+[importlinter:contract:services-use-ports-only]
+name = Services must not depend on persistence, SQLite or entrypoints
+type = forbidden
+source_modules =
+    social_tracker.*.service
+    social_tracker.*.yaml_io
+forbidden_modules =
+    social_tracker.persistence
+    social_tracker.entrypoints
+    sqlite3
+    typer

@@ -130,3 +130,49 @@ def test_nested_domain_package_is_also_covered(repo_root: Path, tmp_path: Path):
     config = _retarget_config(repo_root, tmp_path, "fixpkg")
     result = _run(["--config", str(config)], cwd=tmp_path)
     assert result.returncode != 0, result.stdout
+
+
+SERVICE_MODULES = ["sources/service.py", "control/service.py", "sources/yaml_io.py"]
+
+
+@pytest.mark.parametrize("module_path", SERVICE_MODULES)
+@pytest.mark.parametrize(
+    "forbidden_import",
+    [
+        "import sqlite3",
+        "from fixpkg.persistence import thing",
+        "from fixpkg.entrypoints import cli",
+    ],
+)
+def test_services_may_not_reach_storage_or_entrypoints(
+    repo_root: Path, tmp_path: Path, module_path: str, forbidden_import: str
+):
+    _make_package(
+        tmp_path,
+        "fixpkg",
+        {
+            "domain/model.py": "X = 1\n",
+            "persistence/thing.py": "Y = 2\n",
+            "entrypoints/cli.py": "Z = 3\n",
+            module_path: forbidden_import + "\n",
+        },
+    )
+    config = _retarget_config(repo_root, tmp_path, "fixpkg")
+    result = _run(["--config", str(config)], cwd=tmp_path)
+    assert result.returncode != 0, result.stdout
+    assert "BROKEN" in result.stdout
+
+
+def test_the_yaml_codec_may_use_yaml_but_domain_modules_may_not(repo_root: Path, tmp_path: Path):
+    _make_package(
+        tmp_path, "fixpkg", {"domain/model.py": "X = 1\n", "sources/yaml_io.py": "import yaml\n"}
+    )
+    config = _retarget_config(repo_root, tmp_path, "fixpkg")
+    ok = _run(["--config", str(config)], cwd=tmp_path)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    _make_package(
+        tmp_path, "fixpkg2", {"domain/model.py": "X = 1\n", "sources/domain.py": "import yaml\n"}
+    )
+    config2 = _retarget_config(repo_root, tmp_path, "fixpkg2")
+    bad = _run(["--config", str(config2)], cwd=tmp_path)
+    assert bad.returncode != 0, bad.stdout
