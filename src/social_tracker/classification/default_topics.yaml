@@ -170,5 +170,5 @@ official_channel_hints:
 # their default. Names: prediction_claim, prediction_specific_time, pseudo_authority,
 # virality_phrases, censorship_bait, all_caps, repeated_exclamation, unverifiable_sources,
 # official_attribution_unlinked, official_link, evacuation_claim, casualty_claim, recycled_marker,
-# old_year_reference, news_report, obfuscated_text.
+# old_year_reference, news_report, obfuscated_text, catalog_mismatch.
 weights: {}

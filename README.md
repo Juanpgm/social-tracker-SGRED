@@ -503,7 +503,8 @@ second opinion for that.
 | `recycled_marker` | recycled_content | 0.50 | "video de 2016", "video viejo", "hace años", "de hace 10 años", "fotos del archivo", "imágenes de archivo" |
 | `old_year_reference` | recycled_content | 0.25 | a year at least two years before the year the item was first seen |
 | `news_report` | no_risk | 0.60 | a report verb with a quake and a magnitude ("el SGC reportó un sismo de magnitud 4.2", "un temblor de 4.5 grados") or an agency wording ("el Servicio Geológico Colombiano informó un temblor", "la Red Sismológica Nacional registró un sismo") |
-| `obfuscated_text` | unclassified | 0.30 | mixed scripts in one word, invisible filler characters, a word spelled letter by letter or a digit inside a word: suspicion only, no label |
+| `obfuscated_text` | unclassified | 0.30 | mixed scripts in one word, invisible filler characters, a word spelled letter by letter or a digit inside a word: suspicion only, no label |
+| `catalog_mismatch` | unintentional_rumor | 0.30 | the official-catalog cross-check contradicts the claimed magnitude (difference of 1.0 or more against the event nearest in time) or finds no event in the time window; set by the check, not read from the text. Too weak to decide a label alone: it adds to other rumor evidence and sends a clean-looking report to review |
 
 A link counts only if it is a real one: it must start with `http://`, `https://` or `www.` and its
 host (up to the first `/`, `?`, `#` or `:`) must be the configured domain or a subdomain of it, on a

@@ -39,7 +39,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
+from social_tracker.classification.catalog_match import CONSISTENT, MISMATCH, UNAVAILABLE
 from social_tracker.classification.domain import (
+    CATALOG_CONSISTENT_FACTOR,
     COMPANION_SIGNALS,
     MAX_RATIONALE_CHARS,
     PLAIN_ATTRIBUTION_FACTOR,
@@ -350,12 +352,15 @@ def detect_signals(
     item_url: str | None,
     settings: ClassifierSettings,
     source_official: bool = False,
+    catalog_status: str = UNAVAILABLE,
 ) -> tuple[Signal, ...]:
     """Every signal the text shows, sorted by name, each once, with its weight. Signals whose
     configured weight is 0 are left out.
 
     `source_official` says that the source of the item is itself an official domain: its
-    attributions are genuine and it counts as served from one."""
+    attributions are genuine and it counts as served from one. `catalog_status` is the outcome of
+    the catalog cross-check (RC-6): a `mismatch` is a signal, a `consistent` claim lowers the weight
+    of an unlinked attribution; any other status changes nothing."""
     domains = config.official_domains
     linked = (
         official_hosts(links_in(prepared.raw), domains)
@@ -372,6 +377,10 @@ def detect_signals(
         weights["official_attribution_unlinked"] = round(
             weights["official_attribution_unlinked"] * PLAIN_ATTRIBUTION_FACTOR, 4
         )
+    if catalog_status == CONSISTENT:
+        weights["official_attribution_unlinked"] = round(
+            weights["official_attribution_unlinked"] * CATALOG_CONSISTENT_FACTOR, 4
+        )
     if flags["news_report"] or linked:
         weights["casualty_claim"] = round(
             weights["casualty_claim"] * CORROBORATED_CASUALTY_FACTOR, 4
@@ -383,6 +392,7 @@ def detect_signals(
         "official_attribution_unlinked": not linked and flags["attributed"],
         "official_link": linked,
         "obfuscated_text": bool(prepared.obfuscation),
+        "catalog_mismatch": catalog_status == MISMATCH,
     }
     return tuple(
         Signal(name, SIGNALS[name].label, weights[name])
@@ -526,6 +536,7 @@ def evaluate_rules(
     item_url: str | None,
     settings: ClassifierSettings,
     source_official: bool = False,
+    catalog_status: str = UNAVAILABLE,
 ) -> RuleOutcome:
     """The whole stage: detect the signals, then combine them."""
     signals = detect_signals(
@@ -536,6 +547,7 @@ def evaluate_rules(
         item_url=item_url,
         settings=settings,
         source_official=source_official,
+        catalog_status=catalog_status,
     )
     neutral = len(prepared.tokens) >= settings.neutral_min_tokens and reads_spanish(prepared.tokens)
     return combine(signals, credibility=credibility, settings=settings, neutral=neutral)

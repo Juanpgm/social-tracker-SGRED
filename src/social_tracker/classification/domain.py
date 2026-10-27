@@ -93,7 +93,10 @@ class SignalSpec:
 # configuration (`weights`); the names are fixed because the detectors are code. A weight is the
 # confidence one signal alone gives its label; signals of one label combine as 1 - prod(1 - w).
 # `obfuscated_text` argues for no label (UNCLASSIFIED): it is evidence of an evasion attempt that
-# raises suspicion and the queue priority and never decides a label alone.
+# raises suspicion and the queue priority and never decides a label alone. `catalog_mismatch` is
+# not read from the text: the catalog cross-check found the claimed magnitude or time contradicted
+# by the official catalogs (RC-6). By default it is too weak to decide a label alone: it raises the
+# evidence of whatever else argues for a rumor and sends a clean-looking report to review.
 SIGNALS: dict[str, SignalSpec] = {
     "prediction_claim": SignalSpec(Label.UNINTENTIONAL_RUMOR, 0.45),
     "prediction_specific_time": SignalSpec(Label.DELIBERATE_DISINFORMATION, 0.35),
@@ -111,6 +114,7 @@ SIGNALS: dict[str, SignalSpec] = {
     "old_year_reference": SignalSpec(Label.RECYCLED_CONTENT, 0.25),
     "news_report": SignalSpec(Label.NO_RISK, 0.60),
     "obfuscated_text": SignalSpec(Label.UNCLASSIFIED, 0.30),
+    "catalog_mismatch": SignalSpec(Label.UNINTENTIONAL_RUMOR, 0.30),
 }
 
 # Risk signals that are only style or a passing mention: they argue for their label but do not, on
@@ -123,6 +127,10 @@ COMPANION_SIGNALS = {"prediction_specific_time": "prediction_claim"}
 
 # An unlinked attribution without an alarm word counts this share of its weight.
 PLAIN_ATTRIBUTION_FACTOR = 0.55
+
+# An unlinked attribution whose magnitude and time agree with the official catalog counts this share
+# of its weight: the numbers it quotes are true. It never gives a label by itself (RC-6).
+CATALOG_CONSISTENT_FACTOR = 0.5
 
 
 @dataclass(frozen=True)
