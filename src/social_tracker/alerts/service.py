@@ -67,6 +67,7 @@ from social_tracker.llm.ports import EscalationRepository
 from social_tracker.shared.clock import Clock
 from social_tracker.shared.errors import (
     DomainError,
+    InvalidTransition,
     NotFoundError,
     StorageError,
     ValidationError,
@@ -92,10 +93,12 @@ class Outcome(StrEnum):
 
 @dataclass(frozen=True)
 class StatusResult:
-    """The alert as it is after a status request; `changed` is False for a redundant one."""
+    """The alert as it is after a status request, the status it had before, and whether anything
+    changed (False for a redundant request)."""
 
     alert: Alert
     changed: bool
+    previous: AlertStatus
 
 
 @dataclass(frozen=True)
@@ -437,7 +440,7 @@ class AlertService:
             alert = self._known(alert_id)
             change = apply_status(alert.status, wanted)
             if not change.changed:
-                return StatusResult(alert, changed=False)
+                return StatusResult(alert, changed=False, previous=alert.status)
             now = self._clock.now()
             updated = replace(alert, status=wanted, status_changed_at=now)
             self._alerts.save(updated)
@@ -452,7 +455,17 @@ class AlertService:
                     wanted.value,
                 )
             )
-        return StatusResult(updated, changed=True)
+        return StatusResult(updated, changed=True, previous=alert.status)
+
+    def reopen(self, alert_id: str, *, actor: str, reason: str) -> StatusResult:
+        """Bring a dismissed alert back as seen. A seen alert stays as it is (no entry); one nobody
+        has looked at is not "reopened": `InvalidTransition`."""
+        actor, reason = validate_actor(actor), validate_reason(reason)
+        with self._uow.transaction():
+            alert = self._known(alert_id)
+            if alert.status is AlertStatus.NEW:
+                raise InvalidTransition("only a dismissed alert can be reopened")
+            return self.set_status(alert.id, AlertStatus.SEEN, actor=actor, reason=reason)
 
     def _known(self, alert_id: object) -> Alert:
         if not is_valid_slug(alert_id):

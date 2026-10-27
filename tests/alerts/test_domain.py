@@ -15,6 +15,7 @@ from social_tracker.alerts.domain import (
     Severity,
     alert_id_for,
     apply_status,
+    parse_moment,
     project,
     tags_for,
     validate_page,
@@ -395,3 +396,53 @@ def test_naive_times_in_an_alert_are_refused():
         Alert(**{**alert.__dict__, "created_at": datetime(2026, 1, 1)})
     with pytest.raises(ValidationError):
         Alert(**{**alert.__dict__, "withdrawn_at": datetime(2026, 1, 1, tzinfo=UTC)})
+
+
+# ---- the bounds of a date range, as a person types them ----
+
+
+@pytest.mark.parametrize(
+    ("text", "end", "expected"),
+    [
+        ("2026-03-01", False, datetime(2026, 3, 1, 0, 0, 0, tzinfo=UTC)),
+        ("2026-03-01", True, datetime(2026, 3, 1, 23, 59, 59, 999999, tzinfo=UTC)),
+        ("2026-03-01T10:30:00", False, datetime(2026, 3, 1, 10, 30, tzinfo=UTC)),
+        ("2026-03-01T10:30:00", True, datetime(2026, 3, 1, 10, 30, tzinfo=UTC)),
+        ("2026-03-01T10:30:00+00:00", False, datetime(2026, 3, 1, 10, 30, tzinfo=UTC)),
+        ("2026-03-01T10:30:00-05:00", False, datetime(2026, 3, 1, 15, 30, tzinfo=UTC)),
+        ("2026-03-01T10:30:00Z", False, datetime(2026, 3, 1, 10, 30, tzinfo=UTC)),
+        ("  2026-03-01  ", False, datetime(2026, 3, 1, tzinfo=UTC)),
+        ("9999-12-31", True, datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)),
+        ("0001-01-01", False, datetime(1, 1, 1, tzinfo=UTC)),
+        ("2028-02-29", False, datetime(2028, 2, 29, tzinfo=UTC)),
+    ],
+)
+def test_a_bound_is_a_day_or_a_moment_in_utc_and_an_end_day_runs_to_its_last_instant(
+    text, end, expected
+):
+    assert parse_moment(text, end=end) == expected
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "   ",
+        "yesterday",
+        "2026-02-30",
+        "2027-02-29",
+        "2026-13-01",
+        "2026-3-1",
+        "01/03/2026",
+        "2026-03-01T25:00:00",
+        "2026-03-01 10:00:00 UTC",
+        "x" * 1000,
+        "2026-03-01" + "0" * 500,
+        "2026-03-01\x00",
+        None,
+        20260301,
+    ],
+)
+def test_anything_else_is_a_validation_error(bad):
+    with pytest.raises(ValidationError):
+        parse_moment(bad, end=False)

@@ -123,6 +123,14 @@ def test_a_pass_classifies_what_it_collected_and_says_so(cli: Cli, fetcher):
     assert "No classifications yet." not in cli.ok("classify", "stats").stdout
 
 
+def test_a_pass_also_says_what_the_alert_step_did(cli: Cli, fetcher):
+    add_news(cli)
+    cli.ok("analysis", "on", "--reason", WHY)
+    cli.ok("analysis", "on", "--source", "src_news", "--reason", WHY)
+    result = cli.ok("run", "--once", "--no-reset-analysis")
+    assert "alerts: 0 created, 0 merged, 0 updated, 0 withdrawn, 0 brought back" in result.stdout
+
+
 def test_once_without_the_reset_leaves_analysis_on_and_writes_no_startup_event(cli: Cli, fetcher):
     add_news(cli)
     cli.ok("analysis", "on", "--reason", WHY)

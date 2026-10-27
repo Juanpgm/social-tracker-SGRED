@@ -32,6 +32,8 @@ from typing import Annotated
 
 import typer
 
+from social_tracker.alerts.domain import Alert, AlertFilter, AlertPage, SyncReport, parse_moment
+from social_tracker.alerts.service import AlertDetail
 from social_tracker.bootstrap import build_catalog, build_container, build_llm, build_worker
 from social_tracker.catalog.service import CatalogStatus, Outcome, RefreshReport
 from social_tracker.classification.domain import Classification, ClassificationStats
@@ -39,7 +41,7 @@ from social_tracker.classification.service import DEFAULT_BATCH, RECLASSIFIABLE,
 from social_tracker.classification.yaml_io import MAX_CONFIG_BYTES
 from social_tracker.collector.service import CollectOutcome
 from social_tracker.collector.worker import DEFAULT_TICK_S, PassSummary
-from social_tracker.control.domain import CollectionState, format_confidence
+from social_tracker.control.domain import CollectionState, format_confidence, parse_confidence
 from social_tracker.control.service import SourceOverview, SystemOverview
 from social_tracker.entrypoints.inputs import (
     parse_fields,
@@ -99,6 +101,17 @@ llm_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(llm_app, name="llm")
+alerts_app = typer.Typer(
+    help="Look at the alerts the monitor raised, mark them and set the alert threshold. Alerts "
+    "are stored and shown on this machine only: there are no external notifications.",
+    no_args_is_help=True,
+)
+app.add_typer(alerts_app, name="alerts")
+threshold_app = typer.Typer(
+    help="Show or set the minimum confidence from which a risk verdict raises an alert.",
+    no_args_is_help=True,
+)
+alerts_app.add_typer(threshold_app, name="threshold")
 
 SourceId = Annotated[
     str,
@@ -860,6 +873,288 @@ def classify_stats() -> None:
     typer.echo(_render_stats(stats, llm) if stats.total else _NO_VERDICTS)
 
 
+# ---- alerts ----
+
+AlertId = Annotated[
+    str, typer.Argument(metavar="ALERT_ID", help="Id of an alert (the first column of the list).")
+]
+_NO_ALERTS = "No alerts."
+_PAGE_HELP = "How many alerts to show (newest first)."
+_SOURCE_REMOVED = " [source removed]"
+_EXCERPT_CHARS = 60
+
+
+def _alert_line_source(alert: Alert, removed: frozenset[str]) -> str:
+    gone = _SOURCE_REMOVED if alert.source_id in removed else ""
+    return f"{escape_unprintable(alert.source_name)}{gone}"
+
+
+def _render_alerts(page: AlertPage, removed: frozenset[str]) -> str:
+    alerts = page.alerts
+    id_width = max([len("ID"), *(len(a.id) for a in alerts)])
+    sev_width = max([len("SEVERITY"), *(len(a.severity.value) for a in alerts)])
+    label_width = max([len("LABEL"), *(len(a.label.value) for a in alerts)])
+    status_width = max([len("STATUS"), *(len(a.status.value) for a in alerts)])
+    lines = [
+        f"{'ID':<{id_width}}  {'SEVERITY':<{sev_width}}  {'LABEL':<{label_width}}  "
+        f"{'STATUS':<{status_width}}  CONF  OCC  LAST_SEEN        SOURCE  EXCERPT"
+    ]
+    for a in alerts:
+        flat = " ".join(a.excerpt.split())
+        if len(flat) > _EXCERPT_CHARS:
+            flat = flat[: _EXCERPT_CHARS - 3].rstrip() + "..."
+        lines.append(
+            f"{a.id:<{id_width}}  {a.severity.value:<{sev_width}}  {a.label.value:<{label_width}}  "
+            f"{a.status.value:<{status_width}}  {a.confidence:.2f}  {a.occurrences:>3}  "
+            f"{a.last_seen_at:%Y-%m-%dT%H:%M}  {_alert_line_source(a, removed)}  "
+            f"{escape_unprintable(flat)}"
+        )
+    shown_to = page.offset + len(alerts)
+    if page.has_next:
+        lines.append(
+            f"{page.total} alert(s); showing {page.offset + 1}-{shown_to}; "
+            f"--offset {shown_to} for the next page"
+        )
+    return "\n".join(lines)
+
+
+@alerts_app.command("list")
+def alerts_list(
+    severity: Annotated[
+        str | None, typer.Option("--severity", help="low, medium, high or critical.")
+    ] = None,
+    label: Annotated[
+        str | None,
+        typer.Option(
+            "--label",
+            help="unintentional_rumor, deliberate_disinformation or recycled_content.",
+        ),
+    ] = None,
+    source: Annotated[
+        str | None, typer.Option("--source", help="Only alerts linked to this source id.")
+    ] = None,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="new, seen, dismissed or withdrawn (hidden by default)."),
+    ] = None,
+    tag: Annotated[
+        str | None,
+        typer.Option(
+            "--tag", help="earthquake, secretariat, secretariat_attribution, prediction, ..."
+        ),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Latest occurrence from this day (2026-03-01) or moment."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        typer.Option("--until", help="Latest occurrence up to this day (inclusive) or moment."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=200, help=_PAGE_HELP)] = 25,
+    offset: Annotated[int, typer.Option("--offset", min=0, help="Skip this many alerts.")] = 0,
+) -> None:
+    """List alerts, newest first (withdrawn ones only with --status withdrawn).
+
+    Times are UTC. An alert whose source was deleted keeps its name and is marked."""
+    with _guard(), closing(build_container()) as services:
+        flt = AlertFilter(
+            severity=severity,
+            label=label,
+            source_id=source,
+            status=status,
+            tag=tag,
+            since=parse_moment(since, end=False) if since is not None else None,
+            until=parse_moment(until, end=True) if until is not None else None,
+        )
+        page = services.alerts.list(flt, limit=limit, offset=offset)
+        removed = services.alerts.removed_sources({a.source_id for a in page.alerts})
+    typer.echo(_render_alerts(page, removed) if page.alerts else _NO_ALERTS)
+
+
+def _render_alert(detail: AlertDetail) -> str:
+    a, evidence = detail.alert, detail.alert.evidence
+    removed = _SOURCE_REMOVED if a.source_id in detail.removed_sources else ""
+    signals = ", ".join(f"{name} ({weight:g})" for name, _, weight in evidence.signals)
+    lines = [
+        f"alert: {a.id}",
+        f"severity: {a.severity.value}",
+        f"label: {a.label.value}",
+        f"confidence: {a.confidence:.3f}",
+        f"status: {a.status.value}",
+    ]
+    if a.withdrawn and a.withdrawn_at is not None:
+        reason = escape_unprintable(a.withdrawn_reason or "")
+        lines.append(f"withdrawn: {a.withdrawn_at.isoformat()} ({reason})")
+    lines += [
+        f"occurrences: {a.occurrences}",
+        f"source: {escape_unprintable(a.source_name)} ({a.source_id}){removed}",
+        f"first seen: {a.first_seen_at.isoformat()}",
+        f"last seen: {a.last_seen_at.isoformat()}",
+        f"rationale: {escape_unprintable(a.rationale)}",
+        f"deciding stage: {evidence.stage}",
+        f"catalog: {evidence.catalog_status}",
+        f"signals: {signals or 'none'}",
+    ]
+    if evidence.llm_model:
+        model = escape_unprintable(evidence.llm_model)
+        version = escape_unprintable(evidence.prompt_version or "unknown")
+        lines.append(f"model: {model} (prompt {version})")
+    if evidence.provisional:
+        lines.append("provisional: yes, the verdict still waits for the language model")
+    lines += [
+        f"tags: {', '.join(a.tags) or 'none'}",
+        f"excerpt: {escape_unprintable(a.excerpt)}",
+        "items:",
+    ]
+    for m in detail.members:
+        gone = _SOURCE_REMOVED if m.source_id in detail.removed_sources else ""
+        state = "active" if m.active else f"no longer qualifies ({m.label.value})"
+        lines.append(
+            f"  {m.item_id}  {escape_unprintable(m.source_name)}{gone}  "
+            f"{m.occurred_at:%Y-%m-%dT%H:%M}  {m.confidence:.2f}  {state}"
+        )
+    lines.append("trail:")
+    for e in detail.events:
+        change = f" ({e.before} -> {e.after})" if e.before or e.after else ""
+        lines.append(
+            f"  {e.at.isoformat()}  {e.kind.value}{change}  "
+            f"{escape_unprintable(e.actor)}: {escape_unprintable(e.reason)}"
+        )
+    return "\n".join(lines)
+
+
+@alerts_app.command("show")
+def alerts_show(alert_id: AlertId) -> None:
+    """Show an alert: what it says, the evidence behind it, the items and its audit trail."""
+    with _guard(), closing(build_container()) as services:
+        detail = services.alerts.detail(alert_id)
+    typer.echo(_render_alert(detail))
+
+
+def _mark(alert_id: str, verb: str, reason: str, actor: str | None) -> None:
+    with _guard(), closing(build_container()) as services:
+        who = resolve_actor(actor, os.environ)
+        if verb == "reopen":
+            result = services.alerts.reopen(alert_id, actor=who, reason=reason)
+        else:
+            target = "seen" if verb == "seen" else "dismissed"
+            result = services.alerts.set_status(alert_id, target, actor=who, reason=reason)
+    now = result.alert.status.value
+    if result.changed:
+        typer.echo(f"{result.alert.id}: {result.previous.value} -> {now}")
+    else:
+        typer.echo(f"{result.alert.id}: already {now}, nothing changed")
+
+
+@alerts_app.command("seen")
+def alerts_seen(alert_id: AlertId, reason: Reason, actor: Actor = None) -> None:
+    """Mark an alert as seen (audited with actor and reason)."""
+    _mark(alert_id, "seen", reason, actor)
+
+
+@alerts_app.command("dismiss")
+def alerts_dismiss(alert_id: AlertId, reason: Reason, actor: Actor = None) -> None:
+    """Dismiss an alert: it stays on record but no longer asks for attention."""
+    _mark(alert_id, "dismiss", reason, actor)
+
+
+@alerts_app.command("reopen")
+def alerts_reopen(alert_id: AlertId, reason: Reason, actor: Actor = None) -> None:
+    """Bring a dismissed alert back as seen."""
+    _mark(alert_id, "reopen", reason, actor)
+
+
+def _render_sync(report: SyncReport) -> str:
+    return (
+        f"{report.created} created, {report.merged} merged, {report.updated} updated, "
+        f"{report.withdrawn} withdrawn, {report.reactivated} brought back, "
+        f"{report.unchanged} unchanged, {report.skipped} skipped, {report.errors} error(s)"
+    )
+
+
+def _sync(*, full: bool) -> None:
+    with _guard(), closing(build_container()) as services:
+        report = services.alerts.rebuild() if full else services.alerts.refresh()
+    typer.echo(_render_sync(report))
+    if report.errors:
+        typer.echo(
+            "error: some items could not be evaluated; run it again to resume (nothing was lost)",
+            err=True,
+        )
+        raise typer.Exit(EXIT_REFUSED)
+
+
+@alerts_app.command("refresh")
+def alerts_refresh() -> None:
+    """Turn the new and changed verdicts into alerts now (the worker does this every pass).
+
+    Reads only what is stored: nothing is fetched or sent. Safe to repeat."""
+    _sync(full=False)
+
+
+@alerts_app.command("rebuild")
+def alerts_rebuild() -> None:
+    """Evaluate every stored verdict again with the threshold in force.
+
+    Idempotent: alerts are raised, withdrawn (never deleted) or brought back so that they match
+    the verdicts and the threshold; running it twice changes nothing the second time."""
+    _sync(full=True)
+
+
+@alerts_app.command("stats")
+def alerts_stats() -> None:
+    """Count the alerts: by status and by severity."""
+    with _guard(), closing(build_container()) as services:
+        counts = services.alerts.counts()
+    lines = [f"alerts: {counts.active} ({counts.new} new, {counts.withdrawn} withdrawn)"]
+    for title, pairs in (
+        ("by status", counts.by_status),
+        ("by severity", counts.by_severity),
+        ("new by severity", counts.new_by_severity),
+    ):
+        if pairs:
+            lines.append(f"{title}:")
+            lines += [f"  {name} {count}" for name, count in pairs]
+    typer.echo("\n".join(lines))
+
+
+@threshold_app.command("show")
+def alerts_threshold_show() -> None:
+    """Show the minimum confidence from which a risk verdict raises an alert."""
+    with _guard(), closing(build_container()) as services:
+        value = services.control.alert_min_confidence()
+    typer.echo(f"alert threshold: {format_confidence(value)}")
+
+
+@threshold_app.command("set")
+def alerts_threshold_set(
+    value: Annotated[
+        str,
+        typer.Argument(
+            metavar="VALUE",
+            help="A decimal from 0 to 1 (a verdict raises an alert from this confidence, "
+            "inclusive). Put -- before a negative number to see it refused.",
+        ),
+    ],
+    reason: Reason,
+    actor: Actor = None,
+) -> None:
+    """Set the alert threshold (audited with actor and reason). Never applied to alerts that
+    already exist: run `alerts rebuild` to re-evaluate them."""
+    with _guard(), closing(build_container()) as services:
+        number = parse_confidence(value)
+        before = services.control.alert_min_confidence()
+        change = services.control.set_alert_min_confidence(
+            number, actor=resolve_actor(actor, os.environ), reason=reason
+        )
+    now = format_confidence(change.value)
+    if change.changed:
+        typer.echo(f"alert threshold set to {now} (was {format_confidence(before)})")
+    else:
+        typer.echo(f"alert threshold unchanged: {now}")
+
+
 # ---- topics ----
 
 
@@ -1136,7 +1431,9 @@ def _render_pass(summary: PassSummary, *, reset_analysis: bool = True) -> str:
         f"{skipped} skipped, {summary.errors} error(s)"
     )
     if isinstance(summary.classification, ClassifyReport):
-        return f"{line}\nclassification: {_render_classify(summary.classification)}"
+        line += f"\nclassification: {_render_classify(summary.classification)}"
+    if isinstance(summary.alerts, SyncReport):
+        line += f"\nalerts: {_render_sync(summary.alerts)}"
     return line
 
 

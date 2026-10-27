@@ -168,6 +168,43 @@ def test_a_withdrawn_alert_can_still_be_marked(w):
     assert w.service.set_status(alert.id, DISMISSED, **WHO).changed
 
 
+# ---- reopening ----
+
+
+def test_a_dismissed_alert_is_reopened_as_seen_with_an_audit_entry(w):
+    alert = current(w)
+    w.service.set_status(alert.id, DISMISSED, **WHO)
+    result = w.service.reopen(alert.id, actor="ana", reason="it matters after all")
+    assert (result.changed, result.alert.status.value) == (True, SEEN)
+    last = w.repo.events(alert.id)[-1]
+    assert (last.kind, last.actor, last.before, last.after) == (
+        AlertEventKind.STATUS_CHANGED,
+        "ana",
+        DISMISSED,
+        SEEN,
+    )
+
+
+def test_a_seen_alert_that_is_reopened_stays_as_it_is(w):
+    alert = current(w)
+    w.service.set_status(alert.id, SEEN, **WHO)
+    events = w.repo.events(alert.id)
+    assert w.service.reopen(alert.id, **WHO).changed is False
+    assert w.repo.events(alert.id) == events
+
+
+def test_an_alert_nobody_has_looked_at_cannot_be_reopened(w):
+    alert = current(w)
+    with pytest.raises(InvalidTransition):
+        w.service.reopen(alert.id, **WHO)
+    assert w.repo.get(alert.id).status is AlertStatus.NEW
+
+
+def test_reopening_an_unknown_alert_is_not_found(w):
+    with pytest.raises(NotFoundError):
+        w.service.reopen("alt_" + "0" * 32, **WHO)
+
+
 # ---- concurrency ----
 
 

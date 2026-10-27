@@ -33,7 +33,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -641,6 +641,29 @@ class AlertFilter:
                 set_(self, name, _aware(getattr(self, name), name))
         if self.since is not None and self.until is not None and self.until < self.since:
             raise ValidationError("the end of the date range is before its start")
+
+
+_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
+_MAX_MOMENT_CHARS = 40
+
+
+def parse_moment(text: Any, *, end: bool) -> datetime:
+    """A bound of a date range as a person types it, in UTC: a day (`2026-03-01`: from its first
+    instant, or with `end` through its last one) or a moment in ISO 8601 (`2026-03-01T10:30:00`,
+    with or without an offset; with none it is UTC). Anything else is a `ValidationError`."""
+    if not isinstance(text, str) or not text.strip() or len(text.strip()) > _MAX_MOMENT_CHARS:
+        raise ValidationError("a date must be a day (2026-03-01) or a moment in ISO 8601")
+    chosen = text.strip()
+    try:
+        if _DAY_RE.fullmatch(chosen):
+            day = datetime.fromisoformat(chosen).replace(tzinfo=UTC)
+            return day.replace(hour=23, minute=59, second=59, microsecond=999999) if end else day
+        moment = datetime.fromisoformat(chosen)
+    except ValueError:
+        raise ValidationError("a date must be a day (2026-03-01) or a moment in ISO 8601") from None
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return ensure_utc(moment)
 
 
 def validate_page(limit: Any, offset: Any) -> tuple[int, int]:
