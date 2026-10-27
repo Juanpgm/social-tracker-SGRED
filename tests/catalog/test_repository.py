@@ -133,9 +133,13 @@ def test_hostile_text_is_stored_as_data(repo, db):
 
 
 def test_a_failed_transaction_leaves_nothing_behind(repo, db):
-    with pytest.raises(RuntimeError), db.transaction():
-        repo.upsert_events([event("a"), event("b")], T)
-        raise RuntimeError("boom")
+    def write_then_fail() -> None:
+        with db.transaction():
+            repo.upsert_events([event("a"), event("b")], T)
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        write_then_fail()
     assert repo.count_by_source() == {}
 
 
