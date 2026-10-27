@@ -51,6 +51,18 @@ class ClassificationRepository(Protocol):
         """Forget the error counter of an item (it was classified, or retried by hand)."""
         ...
 
+    def settle(self, classification: Classification) -> bool:
+        """Replace a verdict that still waits for the LLM (it is queued, `needs_llm`, or it is an
+        exact copy whose original is, `awaiting_original`). Only the label, confidence, stage,
+        rationale, low_confidence, needs_llm, awaiting_original and priority are written; the
+        rest of the stored verdict stays. False, changing nothing, when the item has no verdict
+        or nothing waits: a settled verdict is never settled twice."""
+        ...
+
+    def awaiting(self, original_id: str) -> list[Classification]:
+        """The exact copies waiting for this original to be judged, by item id."""
+        ...
+
 
 @runtime_checkable
 class SignatureRepository(Protocol):

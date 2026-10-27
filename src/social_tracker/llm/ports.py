@@ -1,11 +1,17 @@
 """Ports of the LLM escalation."""
 
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from social_tracker.llm.domain import JudgeRequest, JudgeResponse
+from social_tracker.llm.domain import (
+    EscalationCounts,
+    EscalationState,
+    JudgeRequest,
+    JudgeResponse,
+    Judgment,
+    QueueEntry,
+)
 
 
 @runtime_checkable
@@ -20,63 +26,6 @@ class LlmJudge(Protocol):
     def judge(self, request: JudgeRequest) -> JudgeResponse: ...
 
     def list_models(self) -> tuple[str, ...]: ...
-
-
-@dataclass(frozen=True)
-class QueueEntry:
-    """An item waiting for the judge, in the order it is served."""
-
-    item_id: str
-    priority: float
-    classified_at: datetime
-
-
-@dataclass(frozen=True)
-class Judgment:
-    """What is kept of one judgment, for the audit and for reproducibility. `outcome` is
-    `judged` (a valid answer), `invalid` (RC-9: two invalid answers; `label` is absent) or
-    `reused` (a duplicate that took its original's answer; `reused_from` names it). The prior
-    columns are the verdict the earlier stage had given. `raw_output` is truncated model text,
-    never logged."""
-
-    item_id: str
-    outcome: str
-    label: str | None
-    confidence: float | None
-    rationale: str | None
-    evidence: tuple[str, ...]
-    llm_model: str | None
-    prompt_version: str
-    raw_output: str | None
-    prior_label: str
-    prior_confidence: float
-    prior_stage: str
-    reused_from: str | None
-    judged_at: datetime
-
-
-@dataclass(frozen=True)
-class EscalationState:
-    """Bookkeeping of an item that did not get a judgment (yet): `escalation_failed` (retry after
-    `next_attempt_at`), `parked` (gave up for good) or `dropped` (pushed out of a full queue)."""
-
-    item_id: str
-    state: str
-    attempts: int
-    next_attempt_at: datetime | None
-    last_error: str | None
-    updated_at: datetime
-
-
-@dataclass(frozen=True)
-class EscalationCounts:
-    judged: int
-    invalid: int
-    reused: int
-    failed_waiting: int
-    parked: int
-    dropped: int
-    queued: int
 
 
 @runtime_checkable

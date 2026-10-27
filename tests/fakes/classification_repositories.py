@@ -88,6 +88,35 @@ class InMemoryClassificationRepository:
         with self._lock:
             self._failures.pop(item_id, None)
 
+    def settle(self, classification: Classification) -> bool:
+        if not isinstance(classification, Classification):
+            raise ValidationError("a classification is required")
+        with self._lock:
+            stored = self._rows.get(classification.item_id)
+            if stored is None or not (stored.needs_llm or stored.awaiting_original):
+                return False
+            self._rows[stored.item_id] = replace(
+                stored,
+                label=classification.label,
+                confidence=classification.confidence,
+                stage=classification.stage,
+                rationale=classification.rationale,
+                low_confidence=classification.low_confidence,
+                needs_llm=classification.needs_llm,
+                awaiting_original=classification.awaiting_original,
+                priority=classification.priority,
+            )
+            return True
+
+    def awaiting(self, original_id: str) -> list[Classification]:
+        with self._lock:
+            waiting = [
+                r
+                for r in self._rows.values()
+                if r.awaiting_original and r.duplicate_of == original_id
+            ]
+        return sorted(waiting, key=lambda r: r.item_id)
+
 
 class InMemorySignatureRepository:
     def __init__(self) -> None:

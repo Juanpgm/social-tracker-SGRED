@@ -42,6 +42,11 @@ _INSERT_VERDICT = (
     f"INSERT INTO classifications ({_COLUMNS}) VALUES ({', '.join('?' * 20)}) "
     "ON CONFLICT (item_id) DO NOTHING"
 )
+_SETTLE = (
+    "UPDATE classifications SET label = ?, confidence = ?, stage = ?, rationale = ?, "
+    "low_confidence = ?, needs_llm = ?, awaiting_original = ?, priority = ? "
+    "WHERE item_id = ? AND (needs_llm = 1 OR awaiting_original = 1)"
+)
 _COUNTS = (
     "SELECT count(*), COALESCE(SUM(needs_llm), 0), COALESCE(SUM(low_confidence), 0), "
     "COALESCE(SUM(duplicate_of IS NOT NULL), 0), COALESCE(SUM(recycled_of IS NOT NULL), 0), "
@@ -59,6 +64,14 @@ _CANDIDATES = (
     ") c JOIN item_signatures s ON s.item_id = c.item_id WHERE s.item_id <> ? "
     "GROUP BY s.item_id ORDER BY max(c.shared) DESC, s.ref_at, s.item_id LIMIT ?"
 )
+
+
+def _forget_escalation(conn: sqlite3.Connection, ids: Sequence[str]) -> None:
+    """The judgments and the bookkeeping of the LLM stage go with the verdict they belong to, so
+    an item sent back to the classifier is judged afresh (migration 0008)."""
+    marks = ", ".join("?" * len(ids))
+    conn.execute(f"DELETE FROM llm_judgments WHERE item_id IN ({marks})", list(ids))
+    conn.execute(f"DELETE FROM llm_escalations WHERE item_id IN ({marks})", list(ids))
 
 
 def _verdict_from_row(row: sqlite3.Row) -> Classification:
@@ -159,8 +172,40 @@ class SqliteClassificationRepository:
             awaiting_original=awaiting,
         )
 
+    def settle(self, classification: Classification) -> bool:
+        if not isinstance(classification, Classification):
+            raise ValidationError("a classification is required")
+        c = classification
+        with self._db.transaction() as conn:
+            return (
+                conn.execute(
+                    _SETTLE,
+                    (
+                        c.label.value,
+                        c.confidence,
+                        c.stage.value,
+                        c.rationale,
+                        int(c.low_confidence),
+                        int(c.needs_llm),
+                        int(c.awaiting_original),
+                        c.priority,
+                        c.item_id,
+                    ),
+                ).rowcount
+                > 0
+            )
+
+    def awaiting(self, original_id: str) -> list[Classification]:
+        rows = self._db.query(
+            f"SELECT {_COLUMNS} FROM classifications "
+            "WHERE awaiting_original = 1 AND duplicate_of = ? ORDER BY item_id",
+            (original_id,),
+        )
+        return [_verdict_from_row(row) for row in rows]
+
     def delete(self, item_id: str) -> bool:
         with self._db.transaction() as conn:
+            _forget_escalation(conn, [item_id])
             conn.execute("DELETE FROM classification_failures WHERE item_id = ?", (item_id,))
             removed = conn.execute("DELETE FROM classifications WHERE item_id = ?", (item_id,))
             return removed.rowcount > 0
@@ -182,6 +227,7 @@ class SqliteClassificationRepository:
             return 0
         marks = ", ".join("?" * len(ids))
         with self._db.transaction() as conn:
+            _forget_escalation(conn, ids)
             conn.execute(f"DELETE FROM classification_failures WHERE item_id IN ({marks})", ids)
             removed = conn.execute(f"DELETE FROM classifications WHERE item_id IN ({marks})", ids)
             return removed.rowcount

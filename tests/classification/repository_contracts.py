@@ -12,6 +12,7 @@ What every implementation must honour (and these suites pin):
 - TopicConfigRepository: an append-only history numbered 1, 2, 3...; the latest is in force.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -137,6 +138,64 @@ class ClassificationRepositoryContract:
         assert repo.delete(item(1)) is False
         assert repo.add(verdict(1, label=Label.NO_RISK, confidence=0.9)) is True
         assert repo.get(item(1)).label is Label.NO_RISK
+
+    # ---- settling a verdict that waits for the LLM (unit 3c) ----
+
+    def test_a_queued_verdict_is_settled_in_place_changing_only_what_a_judgment_changes(self, repo):
+        queued = verdict(1, needs_llm=True, priority=0.6, low_confidence=False)
+        repo.add(queued)
+        settled = replace(
+            queued,
+            label=Label.NO_RISK,
+            confidence=0.91,
+            stage=Stage.LLM,
+            rationale="the text only reports a past event",
+            low_confidence=True,
+            needs_llm=False,
+            priority=0.0,
+        )
+        assert repo.settle(settled) is True
+        assert repo.get(item(1)) == settled
+        assert repo.stats().needs_llm == 0
+
+    def test_a_settled_verdict_cannot_be_settled_again(self, repo):
+        repo.add(verdict(1, needs_llm=True))
+        first = replace(verdict(1), label=Label.NO_RISK, stage=Stage.LLM, needs_llm=False)
+        second = replace(first, label=Label.DELIBERATE_DISINFORMATION)
+        assert repo.settle(first) is True
+        assert repo.settle(second) is False
+        assert repo.get(item(1)).label is Label.NO_RISK
+
+    def test_a_verdict_that_never_waited_is_not_settled(self, repo):
+        plain = verdict(1, needs_llm=False)
+        repo.add(plain)
+        assert repo.settle(replace(plain, label=Label.NO_RISK)) is False
+        assert repo.get(item(1)) == plain
+
+    def test_an_unknown_item_is_not_settled(self, repo):
+        assert repo.settle(verdict(9, needs_llm=False)) is False
+
+    def test_a_waiting_duplicate_is_settled_and_stops_waiting(self, repo):
+        waiting = verdict(2, duplicate_of=item(1), stage=Stage.DEDUP, awaiting_original=True)
+        repo.add(waiting)
+        done = replace(waiting, label=Label.NO_RISK, confidence=0.9, awaiting_original=False)
+        assert repo.settle(done) is True
+        assert repo.get(item(2)) == done
+        assert repo.stats().awaiting_original == 0
+
+    def test_only_a_verdict_object_can_settle(self, repo):
+        with pytest.raises(ValidationError):
+            repo.settle("nope")
+
+    def test_the_duplicates_waiting_for_an_original_are_listed_by_id(self, repo):
+        repo.add(verdict(1, needs_llm=True))
+        for n in (4, 2, 3):
+            repo.add(verdict(n, duplicate_of=item(1), stage=Stage.DEDUP, awaiting_original=True))
+        repo.add(verdict(5, duplicate_of=item(1), stage=Stage.DEDUP))  # already settled
+        repo.add(verdict(6, duplicate_of=item(9), stage=Stage.DEDUP, awaiting_original=True))
+        assert [c.item_id for c in repo.awaiting(item(1))] == [item(2), item(3), item(4)]
+        assert [c.item_id for c in repo.awaiting(item(9))] == [item(6)]
+        assert repo.awaiting(item(7)) == []
 
     def test_old_verdicts_are_listed_oldest_first_strictly_before_the_cutoff(self, repo):
         for n, days in ((1, -10), (2, -5), (3, -5), (4, 0)):

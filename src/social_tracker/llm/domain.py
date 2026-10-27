@@ -439,3 +439,144 @@ def released_duplicate(duplicate: Classification) -> Classification:
     """The original left the queue without a verdict to copy: the duplicate keeps the provisional
     verdict it already has and stops waiting."""
     return replace(duplicate, awaiting_original=False)
+
+
+# ---- what the repositories keep ----
+
+JUDGMENT_OUTCOMES: Final = ("judged", "invalid", "reused")
+ESCALATION_STATES: Final = ("escalation_failed", "parked", "dropped")
+_ERROR_CODE_RE = re.compile(r"[a-z0-9_]{1,64}")
+
+
+def _aware(value: object, what: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValidationError(f"{what} must be a timezone-aware time")
+    return value.astimezone(UTC)
+
+
+@dataclass(frozen=True)
+class QueueEntry:
+    """An item waiting for the judge, in the order it is served."""
+
+    item_id: str
+    priority: float
+    classified_at: datetime
+
+
+@dataclass(frozen=True)
+class Judgment:
+    """What is kept of one judgment, for the audit and for reproducibility. `outcome` is
+    `judged` (a valid answer), `invalid` (RC-9: two invalid answers; no label) or `reused` (an
+    exact copy that took the answer of its original; `reused_from` names it, and the label is
+    absent when that original was invalid). The prior columns are the verdict the earlier stage
+    had given. `raw_output` is truncated model text, never logged."""
+
+    item_id: str
+    outcome: str
+    label: str | None
+    confidence: float | None
+    rationale: str | None
+    evidence: tuple[str, ...]
+    llm_model: str | None
+    prompt_version: str
+    raw_output: str | None
+    prior_label: str
+    prior_confidence: float
+    prior_stage: str
+    reused_from: str | None
+    judged_at: datetime
+
+    def __post_init__(self) -> None:
+        set_ = object.__setattr__
+        self._check_shape()
+        if self.outcome == "judged" and None in (
+            self.label,
+            self.confidence,
+            self.rationale,
+            self.llm_model,
+        ):
+            raise ValidationError("a judged answer has a label, confidence, rationale and model")
+        if self.outcome == "invalid" and self.label is not None:
+            raise ValidationError("an invalid answer has no label")
+        if (self.outcome == "reused") != (self.reused_from is not None):
+            raise ValidationError("only a reused judgment names its original")
+        set_(self, "judged_at", _aware(self.judged_at, "the judgment time"))
+
+    def _check_shape(self) -> None:
+        if not isinstance(self.item_id, str) or _SLUG_RE.fullmatch(self.item_id) is None:
+            raise ValidationError("a judgment needs an item id")
+        if self.outcome not in JUDGMENT_OUTCOMES:
+            raise ValidationError("unknown judgment outcome")
+        if self.label is not None and self.label not in {x.value for x in JUDGE_LABELS}:
+            raise ValidationError("unknown judged label")
+        if self.confidence is not None and not _number(self.confidence, 0.0, 1.0):
+            raise ValidationError("the judged confidence must be from 0 to 1")
+        if self.rationale is not None:
+            _text(self.rationale, 1, MAX_RATIONALE_CHARS, "the rationale")
+        if not isinstance(self.evidence, tuple) or len(self.evidence) > MAX_EVIDENCE_ITEMS:
+            raise ValidationError("the evidence is a short tuple of strings")
+        for entry in self.evidence:
+            _text(entry, 1, MAX_EVIDENCE_CHARS, "an evidence string")
+        if self.llm_model is not None:
+            _model_name(self.llm_model)
+        if not isinstance(self.prompt_version, str) or not 1 <= len(self.prompt_version) <= 64:
+            raise ValidationError("the prompt version must be short text")
+        if self.raw_output is not None and (
+            not isinstance(self.raw_output, str) or len(self.raw_output) > MAX_RAW_OUTPUT_CHARS
+        ):
+            raise ValidationError("the raw output is kept truncated")
+        if self.prior_label not in {x.value for x in Label}:
+            raise ValidationError("unknown prior label")
+        if not _number(self.prior_confidence, 0.0, 1.0):
+            raise ValidationError("the prior confidence must be from 0 to 1")
+        if self.prior_stage not in {x.value for x in Stage}:
+            raise ValidationError("unknown prior stage")
+        if self.reused_from is not None and (
+            not isinstance(self.reused_from, str)
+            or _SLUG_RE.fullmatch(self.reused_from) is None
+            or self.reused_from == self.item_id
+        ):
+            raise ValidationError("a reused judgment names another item")
+
+
+@dataclass(frozen=True)
+class EscalationState:
+    """Bookkeeping of an item that did not get a judgment (yet): `escalation_failed` (retry after
+    `next_attempt_at`), `parked` (gave up for good) or `dropped` (pushed out of a full queue).
+    `last_error` is a fixed code, never text."""
+
+    item_id: str
+    state: str
+    attempts: int
+    next_attempt_at: datetime | None
+    last_error: str | None
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, str) or _SLUG_RE.fullmatch(self.item_id) is None:
+            raise ValidationError("a state needs an item id")
+        if self.state not in ESCALATION_STATES:
+            raise ValidationError("unknown escalation state")
+        if not _whole(self.attempts, 0, 1_000_000):
+            raise ValidationError("attempts must be a whole number")
+        if self.last_error is not None and (
+            not isinstance(self.last_error, str)
+            or _ERROR_CODE_RE.fullmatch(self.last_error) is None
+        ):
+            raise ValidationError("the last error is a short code")
+        if self.next_attempt_at is not None:
+            object.__setattr__(
+                self, "next_attempt_at", _aware(self.next_attempt_at, "the next attempt")
+            )
+        object.__setattr__(self, "updated_at", _aware(self.updated_at, "the update time"))
+
+
+@dataclass(frozen=True)
+class EscalationCounts:
+    judged: int
+    invalid: int
+    reused: int
+    failed_waiting: int
+    parked: int
+    dropped: int
+    queued: int
