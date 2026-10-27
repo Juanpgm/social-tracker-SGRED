@@ -63,6 +63,28 @@ def test_starting_when_analysis_is_already_off_writes_no_event(rig):
     assert rig.world.control_repo.list_control_events() == []
 
 
+def test_starting_without_the_reset_leaves_analysis_on_and_writes_no_event(rig):
+    rig.world.analysis_on()
+    before = rig.world.control_repo.list_control_events()
+    rig.worker.start(reset_analysis=False)
+    assert rig.world.control.global_analysis_enabled() is True
+    assert rig.world.control_repo.list_control_events() == before
+    assert "worker startup" not in [e.detail for e in before]
+
+
+def test_starting_without_the_reset_leaves_analysis_off_when_it_is_off(rig):
+    rig.worker.start(reset_analysis=False)
+    assert rig.world.control.global_analysis_enabled() is False
+    assert rig.world.control_repo.list_control_events() == []
+
+
+def test_starting_without_the_reset_still_recovers_an_interrupted_collection(rig):
+    rig.world.ready()
+    rig.world.control.start_collection("src_news", actor="system:worker", reason="before crash")
+    rig.worker.start(reset_analysis=False)
+    assert rig.world.state().state is CollectionState.BACKOFF
+
+
 def test_starting_recovers_a_collection_a_crashed_worker_left_running(rig):
     rig.world.ready()
     rig.world.control.start_collection("src_news", actor="system:worker", reason="before crash")
@@ -150,6 +172,32 @@ def test_once_runs_a_single_pass_without_sleeping(rig):
     rig.world.analysis_on()  # the reset at startup turns it off again
     summary = rig.worker.run(once=True)
     assert rig.sleeps == []
+    assert summary.global_off is True
+    assert rig.world.fetcher.requests == []
+
+
+def test_once_without_the_reset_collects_what_is_due_while_analysis_is_on(rig):
+    rig.world.ready()
+    rig.world.analysis_on()
+    summary = rig.worker.run(once=True, reset_analysis=False)
+    assert summary.global_off is False
+    assert [r.outcome for r in summary.results] == [CollectOutcome.COLLECTED]
+    assert rig.world.items.count("src_news") == 2
+    assert rig.world.control.global_analysis_enabled() is True  # and it stays on afterwards
+    assert rig.sleeps == []
+
+
+def test_once_without_the_reset_and_with_analysis_off_collects_nothing(rig):
+    rig.world.add_source("src_news")  # enabled, but global analysis was never turned on
+    summary = rig.worker.run(once=True, reset_analysis=False)
+    assert (summary.global_off, summary.results) == (True, ())
+    assert rig.world.fetcher.requests == []
+
+
+def test_the_reset_is_the_default_of_run(rig):
+    rig.world.ready()
+    rig.world.analysis_on()
+    summary = rig.worker.run(once=True)
     assert summary.global_off is True
     assert rig.world.fetcher.requests == []
 

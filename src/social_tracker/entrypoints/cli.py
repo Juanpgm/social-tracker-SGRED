@@ -511,11 +511,19 @@ def _logs_to_stderr() -> Iterator[None]:
         logger.setLevel(previous_level)
 
 
-def _render_pass(summary: PassSummary) -> str:
-    if summary.global_off:
+def _render_pass(summary: PassSummary, *, reset_analysis: bool = True) -> str:
+    if summary.global_off and reset_analysis:
         return (
             "global analysis is off: nothing was collected. A starting worker always switches it "
-            "off; turn it on with `social-tracker analysis on` and the running worker picks it up."
+            "off, so a plain `run --once` can never collect. To check a collection, turn analysis "
+            "on with `social-tracker analysis on` and run `social-tracker run --once "
+            "--no-reset-analysis`; or leave `run` running and turn analysis on from another "
+            "terminal."
+        )
+    if summary.global_off:
+        return (
+            "global analysis is off: nothing was collected. Turn it on with "
+            "`social-tracker analysis on` and run this command again."
         )
     counts = Counter(result.outcome for result in summary.results)
     skipped = sum(n for outcome, n in counts.items() if outcome.value.startswith("skipped"))
@@ -543,16 +551,32 @@ def run(
             help="How long to wait between scheduling passes.",
         ),
     ] = DEFAULT_TICK_S,
+    no_reset_analysis: Annotated[
+        bool,
+        typer.Option(
+            "--no-reset-analysis",
+            help="With --once only: do not switch global analysis off at start, so one "
+            "diagnostic pass can collect after `analysis on`. The long-running worker "
+            "always resets it.",
+        ),
+    ] = False,
 ) -> None:
     """Run the collection worker until SIGINT/SIGTERM.
 
     Starting it switches global analysis OFF (audited as system:worker); turn it on afterwards
     with `social-tracker analysis on`. Each pass collects the enabled RSS sources that are due
     (their poll interval, 600 s by default), one at a time, and removes items past the retention
-    period. Stopping lets the collection in flight finish. Run one worker per database.
+    period. Stopping lets the collection in flight finish (a second Ctrl+C or SIGTERM exits at
+    once with status 130 or 143). Run one worker per database.
     """
     if not math.isfinite(interval_tick):
         raise typer.BadParameter("must be a finite number", param_hint="--interval-tick")
+    if no_reset_analysis and not once:
+        raise typer.BadParameter(
+            "only valid with --once (the long-running worker always switches analysis off at "
+            "start)",
+            param_hint="--no-reset-analysis",
+        )
     with _guard(), _logs_to_stderr(), closing(build_worker(tick_s=interval_tick)) as built:
         if not once:
             typer.echo(
@@ -560,8 +584,8 @@ def run(
                 "`social-tracker analysis on`; press Ctrl+C to stop"
             )
         with stop_on_signals(built.worker.request_stop):
-            summary = built.worker.run(once=once)
+            summary = built.worker.run(once=once, reset_analysis=not no_reset_analysis)
     if once and summary is not None:
-        typer.echo(_render_pass(summary))
+        typer.echo(_render_pass(summary, reset_analysis=not no_reset_analysis))
     elif not once:
         typer.echo("worker stopped")

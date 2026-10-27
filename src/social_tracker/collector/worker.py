@@ -5,8 +5,11 @@ What it does, in order:
 - START: global analysis is reset to OFF with an audited event (actor `system:worker`, reason
   `worker startup`; PC-2, PC-10). Nothing is collected until the operator runs
   `social-tracker analysis on` afterwards (the loop reads the switch on every pass). CLI commands
-  never reset it; only starting a worker does. Collections a dead worker left running are then
-  recovered as failed attempts (see `CollectorService.recover_interrupted`).
+  never reset it; only starting a worker does. A one-shot diagnostic run (`once`) may skip the
+  reset (`reset_analysis=False`, the CLI's `--no-reset-analysis`): without it a single pass right
+  after the reset could never collect anything. The long-running worker always resets. Collections
+  a dead worker left running are then recovered as failed attempts (see
+  `CollectorService.recover_interrupted`).
 - EACH PASS: housekeeping (the retention purge, at most once per `purge_every_s`), then, if
   global analysis is on, every due source is collected, one at a time and in id order
   (concurrency 1), through `CollectorService.collect_once`. A source that fails, or a storage
@@ -81,16 +84,22 @@ class Worker:
 
     # ---- lifecycle ----
 
-    def start(self) -> None:
-        """Reset global analysis to OFF (audited) and recover interrupted collections."""
-        change = self._control.set_global_analysis(False, actor=ACTOR, reason=STARTUP_REASON)
-        _LOG.info("worker started; global analysis is off%s", " (was on)" if change.changed else "")
+    def start(self, reset_analysis: bool = True) -> None:
+        """Reset global analysis to OFF (audited, unless `reset_analysis` is false) and recover
+        interrupted collections."""
+        if reset_analysis:
+            change = self._control.set_global_analysis(False, actor=ACTOR, reason=STARTUP_REASON)
+            _LOG.info(
+                "worker started; global analysis is off%s", " (was on)" if change.changed else ""
+            )
+        else:
+            _LOG.info("worker started; global analysis left as it is")
         for source_id in self._collector.recover_interrupted():
             _LOG.warning("recovered an interrupted collection of %s", source_id)
 
-    def run(self, *, once: bool = False) -> PassSummary | None:
+    def run(self, *, once: bool = False, reset_analysis: bool = True) -> PassSummary | None:
         """Start, then pass after pass until stopped (or after one pass with `once`)."""
-        self.start()
+        self.start(reset_analysis)
         summary = None
         while not self._stop.is_set():
             summary = self.run_pass()

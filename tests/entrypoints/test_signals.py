@@ -32,42 +32,60 @@ def test_a_second_signal_escalates_to_an_immediate_exit_with_the_conventional_co
     first, second, code
 ):
     requested = []
-    with pytest.raises(SystemExit) as caught, stop_on_signals(lambda: requested.append(1)):
-        signal.raise_signal(first)
-        assert requested == [1]  # the first one only asked for a stop
-        signal.raise_signal(second)
-        pytest.fail("the second signal must not return")
+
+    def impatient():
+        with stop_on_signals(lambda: requested.append(1)):
+            signal.raise_signal(first)
+            assert requested == [1]  # the first one only asked for a stop
+            signal.raise_signal(second)
+            pytest.fail("the second signal must not return")
+
+    with pytest.raises(SystemExit) as caught:
+        impatient()
     assert caught.value.code == code
     assert requested == [1]  # and the stop was requested once, not again
 
 
 def test_the_escalation_unwinds_the_stack_so_cleanup_runs():
     cleaned = []
-    with pytest.raises(SystemExit), stop_on_signals(lambda: None):
-        try:
-            signal.raise_signal(signal.SIGTERM)
-            signal.raise_signal(signal.SIGTERM)
-        finally:
-            cleaned.append("closed")
+
+    def impatient():
+        with stop_on_signals(lambda: None):
+            try:
+                signal.raise_signal(signal.SIGTERM)
+                signal.raise_signal(signal.SIGTERM)
+            finally:
+                cleaned.append("closed")
+
+    with pytest.raises(SystemExit):
+        impatient()
     assert cleaned == ["closed"]
 
 
 def test_signals_during_the_cleanup_after_an_escalation_are_ignored():
-    with pytest.raises(SystemExit), stop_on_signals(lambda: None):
-        try:
-            signal.raise_signal(signal.SIGTERM)
-            signal.raise_signal(signal.SIGTERM)
-        finally:
-            signal.raise_signal(signal.SIGINT)  # the impatient third one: no second exception
-            signal.raise_signal(signal.SIGTERM)
+    def impatient():
+        with stop_on_signals(lambda: None):
+            try:
+                signal.raise_signal(signal.SIGTERM)
+                signal.raise_signal(signal.SIGTERM)
+            finally:
+                signal.raise_signal(signal.SIGINT)  # the impatient third one: no new exception
+                signal.raise_signal(signal.SIGTERM)
+
+    with pytest.raises(SystemExit):
+        impatient()
 
 
 def test_a_new_context_starts_counting_from_zero_again():
+    def twice():
+        with stop_on_signals(lambda: None):
+            signal.raise_signal(signal.SIGTERM)
+            signal.raise_signal(signal.SIGTERM)
+
     with stop_on_signals(lambda: None):
         signal.raise_signal(signal.SIGTERM)
-    with pytest.raises(SystemExit), stop_on_signals(lambda: None):
-        signal.raise_signal(signal.SIGTERM)
-        signal.raise_signal(signal.SIGTERM)
+    with pytest.raises(SystemExit):
+        twice()
 
 
 def test_the_previous_handlers_are_restored_afterwards_even_after_an_error():
