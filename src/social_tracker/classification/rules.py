@@ -4,18 +4,30 @@ decision (RC-7). Pure and deterministic (RC-10): the same text and configuration
 same result, whatever the order of anything.
 
 How a decision is reached
-- Detectors look for signals in the item's text (see `SIGNALS` for the list). Each signal argues
-  for one label with a weight; a weight of 0 in the configuration switches a signal off.
+- Detectors look for signals in the item's text (see `SIGNALS` for the list), in the plain view
+  and, when the text spells words around the detectors, in the decoded one (`text.PreparedText`).
+  Each signal argues for one label with a weight; a weight of 0 in the configuration switches a
+  signal off.
 - The evidence for a label is the noisy-or of its signals' weights, 1 - prod(1 - w): independent
   clues add up but never pass 1. The label with the most evidence wins; an exact tie goes to the
-  more serious label. No signal at all, or a top evidence under `inconclusive_below`, leaves the
-  item `unclassified` (inconclusive).
-- Two labels that are both strong and close are CONFLICTING signals.
+  more serious label. Evidence under `inconclusive_below` (0.4) decides nothing: the item is
+  `unclassified` and inconclusive.
+- Nothing argues for risk (no risk signal, no obfuscation): an on-topic text with enough words is
+  `no_risk` at `neutral_confidence`, or at the strength of its benign evidence if that is higher;
+  such a verdict is settled from `no_risk_settled_min` on. A text too short for that, or with
+  only thin benign evidence, is inconclusive.
+- A risk signal (except the stylistic ones, `WEAK_SIGNALS`) or an obfuscation next to benign
+  evidence means `no_risk` cannot win, however much benign evidence there is: a panic message with
+  a harmless sentence appended stays suspect. The item is then marked conflicting and its queue
+  priority is raised.
+- Two labels that are both strong and close are CONFLICTING signals. The time of a prediction
+  restates the prediction (`COMPANION_SIGNALS`) and is not counted as a second opinion for that.
 - The credibility of the source (1..5) is a prior: it moves the confidence of a label the
   evidence already chose, down for a risk label and up for `no_risk` as credibility grows, by 0.03
   per step from 3. It never picks a label and never touches an unclassified item.
-- An in-scope item that is inconclusive, conflicting or whose confidence is in [0.4, 0.8) is
-  marked for the LLM, unless it duplicates an item already judged.
+- An in-scope item is marked for the LLM when it is inconclusive, conflicting or, for a risk
+  label, when its confidence is in [0.4, 0.8), unless it duplicates an item already judged. A
+  settled `no_risk` is never queued: only a risk signal, a conflict or too little evidence queues.
 
 Detectors read the folded text (`text.fold`) except those that need case or punctuation, which
 read the NFKC text. Item text is data: nothing in it is ever interpreted as an instruction, and a
@@ -28,20 +40,26 @@ from dataclasses import dataclass
 from typing import Final
 
 from social_tracker.classification.domain import (
+    COMPANION_SIGNALS,
     MAX_RATIONALE_CHARS,
+    PLAIN_ATTRIBUTION_FACTOR,
     RISK_LABELS,
     SIGNALS,
+    WEAK_SIGNALS,
     ClassifierSettings,
     Label,
     Signal,
     TopicVerdict,
 )
+from social_tracker.classification.links import links_in, official_hosts
 from social_tracker.classification.text import PreparedText
-from social_tracker.classification.topics import TopicConfig, TopicMatcher
+from social_tracker.classification.topics import TopicConfig, TopicMatcher, reads_spanish
 from social_tracker.shared.errors import ValidationError
 
 PRIOR_STEP: Final = 0.03  # confidence moved per credibility step away from 3
 NEUTRAL_CREDIBILITY: Final = 3
+MIXED_RISK_FLOOR: Final = 0.5  # the queue strength of an item whose benign evidence cannot win
+CORROBORATED_CASUALTY_FACTOR: Final = 0.6  # a casualty claim next to a report or an official link
 _LABEL_ORDER = (
     Label.DELIBERATE_DISINFORMATION,
     Label.UNINTENTIONAL_RUMOR,
@@ -60,6 +78,7 @@ _QUAKE = r"(?:temblor|sismo|terremoto|replica|sacudon|movimiento telurico)"
 _FUTURE = r"(?:habra|va a haber|vendra|ocurrira|se viene|se aproxima|se acerca|llegara|tendremos)"
 _FORECAST = r"(?:pronostican|pronostico|pronosticaron|predicen|predijo|prediccion|profecia)"
 _TOMORROW = r"(?<!\besta )(?<!\bla )manana"
+_QUAKE_VERB = r"(?:sacudira|azotara|golpeara|ocurrira|remecera|estremecera|afectara)"
 _PREDICTIONS = tuple(
     re.compile(p)
     for p in (
@@ -67,10 +86,15 @@ _PREDICTIONS = tuple(
         r"\b(?:va a|van a|vamos a|ira a) (?:temblar|sacudir)\b",
         rf"\b{_FORECAST}\b(?: \w+){{0,6}} {_QUAKE}\b",
         rf"\b{_QUAKE}\b(?: \w+){{0,4}} (?:{_TOMORROW}|pasado manana|esta noche|esta madrugada)\b",
+        rf"\b{_QUAKE}\b(?: \w+){{0,4}} {_QUAKE_VERB}\b",
+        rf"\b{_QUAKE}\b(?: \w+){{0,3}} habra\b(?: \w+){{0,3}} (?:replicas?|otro|otra|magnitud)\b",
     )
 )
 _NEGATION = re.compile(
     r"\b(?:no|ni|sin|falso|falsa|desmiente|desmienten|descarta|descartan|imposible|nunca|jamas)\b"
+)
+_NEGATION_WORDS = _words(
+    "no ni sin falso falsa desmiente desmienten descarta descartan imposible nunca jamas"
 )
 _NEGATION_WINDOW = 40
 _MONTHS = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre"
@@ -96,6 +120,8 @@ _VIRAL_WORDS = _words(
     "difundelo pasalo pasenlo viralicen viralizalo urgente"
 )
 _VIRAL_PHRASES = ("corre la voz", "comparte esto")
+_VIRAL_RE = re.compile("(?<= )(?:" + "|".join([*sorted(_VIRAL_WORDS), *_VIRAL_PHRASES]) + ")(?= )")
+_VIRAL_NEGATION_REACH = 2  # words before a viral word that can negate it ("no es urgente")
 _CENSORSHIP = (
     "antes de que lo borren",
     "antes de que lo eliminen",
@@ -168,6 +194,8 @@ _CASUALTIES = (
 _MEDIA = "video|videos|imagenes|imagen|foto|fotos|fotografia|audio"
 _RECYCLED = (
     re.compile(rf"\b(?:{_MEDIA})\b(?: \w+){{0,2}} (?:de|del) (?:19|20)\d\d\b"),
+    re.compile(rf"\b(?:{_MEDIA})\b(?: \w+){{0,2}} (?:de|del) archivo\b"),
+    re.compile(r"\b(?:de )?hace \d{1,2} anos\b"),
     re.compile(
         r"\b(?:hace anos|de hace anos|video antiguo|video viejo|imagen antigua|imagen vieja|"
         r"foto antigua|foto vieja|imagenes de archivo|video de archivo|foto de archivo|"
@@ -178,8 +206,11 @@ _YEAR = re.compile(r"\b(19[5-9]\d|20\d\d)\b")
 _REPORT_VERB = re.compile(
     r"\b(?:reporto|registro|informo|confirmo|detecto|midio|ocurrio|se presento|se sintio)\b"
 )
-_MAGNITUDE = re.compile(r"\bmagnitud \d")
-_URL = re.compile(r"(?:https?://|www\.)([a-z0-9.-]+)")
+_MAGNITUDE = re.compile(r"\bmagnitud \d|\bde \d{1,2}(?: \d)? grados\b")
+_AGENCY_REPORT = re.compile(
+    r"\b(?:servicio geologico colombiano|sgc|red sismologica(?: nacional)?|ungrd)"
+    r" (?:informo|reporto|registro|detecto|confirmo)\b"
+)
 _CAPS_MIN_LETTERS = 20
 _CAPS_RATIO = 0.7
 _EXCLAMATIONS = 3
@@ -224,17 +255,14 @@ def _exclaiming(raw: str) -> bool:
     return raw.count("!") >= _EXCLAMATIONS or "!!" in raw or "¡¡" in raw
 
 
-def _hosts(text: str) -> set[str]:
-    return {host.strip(".-") for host in _URL.findall(text.lower())}
-
-
-def _official_host(host: str, domains: Sequence[str]) -> bool:
-    return any(host == d or host.endswith("." + d) for d in domains)
-
-
-def _official_link(raw: str, item_url: str | None, domains: Sequence[str]) -> bool:
-    hosts = _hosts(raw) | (_hosts(item_url) if item_url else set())
-    return any(_official_host(host, domains) for host in hosts)
+def _viral(plain: str) -> bool:
+    """A viral word or phrase that is not negated right before it ("no compartan" asks for the
+    opposite)."""
+    padded = _padded(plain)
+    return any(
+        not _NEGATION_WORDS.intersection(padded[: m.start()].split()[-_VIRAL_NEGATION_REACH:])
+        for m in _VIRAL_RE.finditer(padded)
+    )
 
 
 def _attributed(words: Sequence[str], spans: Sequence[tuple[int, int]]) -> bool:
@@ -249,10 +277,10 @@ def _attributed(words: Sequence[str], spans: Sequence[tuple[int, int]]) -> bool:
 
 
 def _news_report(plain: str) -> bool:
+    if not re.search(rf"\b{_QUAKE}\b", plain):
+        return False
     return bool(
-        _REPORT_VERB.search(plain)
-        and _MAGNITUDE.search(plain)
-        and re.search(rf"\b{_QUAKE}\b", plain)
+        (_REPORT_VERB.search(plain) and _MAGNITUDE.search(plain)) or _AGENCY_REPORT.search(plain)
     )
 
 
@@ -267,6 +295,51 @@ def weights_for(config: TopicConfig) -> dict[str, float]:
     return weights
 
 
+_TEXT_SIGNALS = (
+    "prediction_claim",
+    "prediction_specific_time",
+    "pseudo_authority",
+    "virality_phrases",
+    "censorship_bait",
+    "unverifiable_sources",
+    "evacuation_claim",
+    "casualty_claim",
+    "recycled_marker",
+    "old_year_reference",
+    "news_report",
+)
+
+
+def _view_flags(
+    plain: str, words: Sequence[str], matcher: TopicMatcher, reference_year: int, gap: int
+) -> dict[str, bool]:
+    """The text-reading detectors on one view of the text."""
+    padded = _padded(plain)
+    predictions = _predictions(plain)
+    return {
+        "prediction_claim": bool(predictions),
+        "prediction_specific_time": _prediction_with_time(plain, predictions),
+        "pseudo_authority": any(p.search(plain) for p in _PSEUDO_AUTHORITY),
+        "virality_phrases": _viral(plain),
+        "censorship_bait": _any_phrase(padded, _CENSORSHIP),
+        "unverifiable_sources": _any_phrase(padded, _UNVERIFIABLE),
+        "attributed": _attributed(words, matcher.official_bodies(words)),
+        "alarmed": bool(_ALARM_WORDS.intersection(words)),
+        "evacuation_claim": bool(_EVACUATION_WORDS.intersection(words))
+        or _any_phrase(padded, _EVACUATION_PHRASES),
+        "casualty_claim": any(p.search(plain) for p in _CASUALTIES),
+        "recycled_marker": any(p.search(plain) for p in _RECYCLED),
+        "old_year_reference": _old_years(plain, reference_year, gap),
+        "news_report": _news_report(plain),
+    }
+
+
+def is_official_item(item_url: str | None, domains: Sequence[str]) -> bool:
+    """True when the item itself is served from an official domain (its address, or the address
+    of its source)."""
+    return item_url is not None and official_hosts(links_in(item_url), domains)
+
+
 def detect_signals(
     prepared: PreparedText,
     matcher: TopicMatcher,
@@ -275,35 +348,41 @@ def detect_signals(
     reference_year: int,
     item_url: str | None,
     settings: ClassifierSettings,
+    source_official: bool = False,
 ) -> tuple[Signal, ...]:
     """Every signal the text shows, sorted by name, each once, with its weight. Signals whose
-    configured weight is 0 are left out."""
-    plain, raw, words = prepared.plain, prepared.raw, prepared.tokens
-    padded = _padded(plain)
-    predictions = _predictions(plain)
-    linked = _official_link(raw, item_url, config.official_domains)
-    spans = matcher.official_bodies(words)
-    alarmed = bool(_ALARM_WORDS.intersection(words))
-    present = {
-        "prediction_claim": bool(predictions),
-        "prediction_specific_time": _prediction_with_time(plain, predictions),
-        "pseudo_authority": any(p.search(plain) for p in _PSEUDO_AUTHORITY),
-        "virality_phrases": bool(_VIRAL_WORDS.intersection(words))
-        or _any_phrase(padded, _VIRAL_PHRASES),
-        "censorship_bait": _any_phrase(padded, _CENSORSHIP),
-        "all_caps": _shouting(raw),
-        "repeated_exclamation": _exclaiming(raw),
-        "unverifiable_sources": _any_phrase(padded, _UNVERIFIABLE),
-        "official_attribution_unlinked": not linked and alarmed and _attributed(words, spans),
-        "official_link": linked,
-        "evacuation_claim": bool(_EVACUATION_WORDS.intersection(words))
-        or _any_phrase(padded, _EVACUATION_PHRASES),
-        "casualty_claim": any(p.search(plain) for p in _CASUALTIES),
-        "recycled_marker": any(p.search(plain) for p in _RECYCLED),
-        "old_year_reference": _old_years(plain, reference_year, settings.old_year_gap),
-        "news_report": _news_report(plain),
-    }
+    configured weight is 0 are left out.
+
+    `source_official` says that the source of the item is itself an official domain: its
+    attributions are genuine and it counts as served from one."""
+    domains = config.official_domains
+    linked = (
+        official_hosts(links_in(prepared.raw), domains)
+        or is_official_item(item_url, domains)
+        or source_official
+    )
+    flags: dict[str, bool] = {}
+    for plain, words in prepared.views:
+        found = _view_flags(plain, words, matcher, reference_year, settings.old_year_gap)
+        for name, value in found.items():
+            flags[name] = flags.get(name, False) or value
     weights = weights_for(config)
+    if not flags["alarmed"]:  # no order or alarm word: a plain attribution counts for less
+        weights["official_attribution_unlinked"] = round(
+            weights["official_attribution_unlinked"] * PLAIN_ATTRIBUTION_FACTOR, 4
+        )
+    if flags["news_report"] or linked:
+        weights["casualty_claim"] = round(
+            weights["casualty_claim"] * CORROBORATED_CASUALTY_FACTOR, 4
+        )
+    present = {
+        **{name: flags[name] for name in _TEXT_SIGNALS},
+        "all_caps": _shouting(prepared.raw),
+        "repeated_exclamation": _exclaiming(prepared.raw),
+        "official_attribution_unlinked": not linked and flags["attributed"],
+        "official_link": linked,
+        "obfuscated_text": bool(prepared.obfuscation),
+    }
     return tuple(
         Signal(name, SIGNALS[name].label, weights[name])
         for name in sorted(present)
@@ -317,7 +396,8 @@ def detect_signals(
 @dataclass(frozen=True)
 class RuleOutcome:
     """The preliminary result of the rules. `risk_strength` is the evidence for the strongest
-    risk label (before the prior), used for the LLM queue priority."""
+    risk label (before the prior), used for the LLM queue priority. `mixed` says that benign
+    evidence was present next to a risk signal or an obfuscation and was not allowed to win."""
 
     label: Label
     confidence: float
@@ -325,6 +405,7 @@ class RuleOutcome:
     inconclusive: bool
     conflicting: bool
     risk_strength: float
+    mixed: bool = False
 
 
 def apply_prior(label: Label, confidence: float, credibility: int) -> float:
@@ -342,33 +423,96 @@ def apply_prior(label: Label, confidence: float, credibility: int) -> float:
     return round(min(1.0, max(0.0, confidence)), 4)
 
 
+def undo_prior(label: Label, confidence: float, credibility: int) -> float:
+    """The inverse of `apply_prior`: the confidence before the credibility moved it (exact except
+    where the clamp to [0, 1] had cut it)."""
+    apply_prior(Label.UNCLASSIFIED, 0.0, credibility)  # validates the credibility
+    shift = PRIOR_STEP * (credibility - NEUTRAL_CREDIBILITY)
+    if label in RISK_LABELS:
+        confidence += shift
+    elif label is Label.NO_RISK:
+        confidence -= shift
+    return round(min(1.0, max(0.0, confidence)), 4)
+
+
 def _evidence(signals: Sequence[Signal]) -> dict[Label, float]:
     remaining: dict[Label, float] = {}
     for signal in signals:
+        if signal.label is Label.UNCLASSIFIED:
+            continue  # an obfuscation argues for no label
         remaining[signal.label] = remaining.get(signal.label, 1.0) * (1.0 - signal.weight)
     return {label: round(1.0 - left, 4) for label, left in remaining.items()}
 
 
-def combine(
-    signals: Sequence[Signal], *, credibility: int, settings: ClassifierSettings
+def _independent(signals: Sequence[Signal]) -> list[Signal]:
+    """The signals without those that only restate another one present (see COMPANION_SIGNALS)."""
+    names = {s.name for s in signals}
+    return [s for s in signals if COMPANION_SIGNALS.get(s.name) not in names]
+
+
+def _conflicts(signals: Sequence[Signal], top_label: Label, settings: ClassifierSettings) -> bool:
+    """True when the label that won and its strongest rival are both strong and close, counting
+    every claim once."""
+    evidence = _evidence(_independent(signals))
+    mine = evidence.get(top_label, 0.0)
+    rival = max((v for label, v in evidence.items() if label is not top_label), default=0.0)
+    return rival >= settings.conflict_min and round(abs(mine - rival), 4) < settings.conflict_margin
+
+
+def _unsettled(
+    confidence: float,
+    signals: tuple[Signal, ...],
+    risk: float,
+    *,
+    conflicting: bool = False,
+    mixed: bool = False,
 ) -> RuleOutcome:
-    """Turn signals into a label, a confidence and the inconclusive/conflicting flags."""
+    return RuleOutcome(Label.UNCLASSIFIED, confidence, signals, True, conflicting, risk, mixed)
+
+
+def combine(
+    signals: Sequence[Signal],
+    *,
+    credibility: int,
+    settings: ClassifierSettings,
+    neutral: bool = False,
+) -> RuleOutcome:
+    """Turn signals into a label, a confidence and the inconclusive/conflicting flags.
+
+    `neutral` says the text is on topic and long enough to be called harmless when nothing at all
+    argues for risk (see the module doc)."""
     apply_prior(Label.UNCLASSIFIED, 0.0, credibility)  # validates the credibility
     ordered = tuple(sorted(signals, key=lambda s: s.name))
     evidence = _evidence(ordered)
+    risk_signals = [s for s in ordered if s.label in RISK_LABELS]
+    obfuscation = [s.weight for s in ordered if s.name == "obfuscated_text"]
+    risk = max(
+        [v for label, v in evidence.items() if label in RISK_LABELS] + obfuscation, default=0.0
+    )
+    benign = evidence.get(Label.NO_RISK, 0.0)
+    if not risk_signals and not obfuscation:
+        base = max(benign, settings.neutral_confidence) if neutral else benign
+        if base < settings.no_risk_settled_min:
+            return _unsettled(benign, ordered, 0.0)
+        confidence = apply_prior(Label.NO_RISK, base, credibility)
+        return RuleOutcome(Label.NO_RISK, confidence, ordered, False, False, 0.0)
+    blocking = bool(obfuscation) or any(s.name not in WEAK_SIGNALS for s in risk_signals)
+    mixed = blocking and benign > 0
+    if mixed:
+        evidence = {label: v for label, v in evidence.items() if label is not Label.NO_RISK}
+        risk = max(risk, MIXED_RISK_FLOOR)
     if not evidence:
-        return RuleOutcome(Label.UNCLASSIFIED, 0.0, ordered, True, False, 0.0)
+        return _unsettled(0.0, ordered, risk, conflicting=mixed, mixed=mixed)
     ranked = sorted(evidence.items(), key=lambda item: (-item[1], _LABEL_ORDER.index(item[0])))
     top_label, top = ranked[0]
-    risk = max((score for label, score in evidence.items() if label in RISK_LABELS), default=0.0)
-    if top < settings.inconclusive_below:
-        return RuleOutcome(Label.UNCLASSIFIED, top, ordered, True, False, risk)
-    second = ranked[1][1] if len(ranked) > 1 else 0.0
-    conflicting = (
-        second >= settings.conflict_min and round(top - second, 4) < settings.conflict_margin
+    floor = (
+        settings.no_risk_settled_min if top_label is Label.NO_RISK else settings.inconclusive_below
     )
+    if top < floor:
+        return _unsettled(top, ordered, risk, conflicting=mixed, mixed=mixed)
+    conflicting = mixed or _conflicts(ordered, top_label, settings)
     confidence = apply_prior(top_label, top, credibility)
-    return RuleOutcome(top_label, confidence, ordered, False, conflicting, risk)
+    return RuleOutcome(top_label, confidence, ordered, False, conflicting, risk, mixed)
 
 
 def evaluate_rules(
@@ -380,6 +524,7 @@ def evaluate_rules(
     reference_year: int,
     item_url: str | None,
     settings: ClassifierSettings,
+    source_official: bool = False,
 ) -> RuleOutcome:
     """The whole stage: detect the signals, then combine them."""
     signals = detect_signals(
@@ -389,8 +534,10 @@ def evaluate_rules(
         reference_year=reference_year,
         item_url=item_url,
         settings=settings,
+        source_official=source_official,
     )
-    return combine(signals, credibility=credibility, settings=settings)
+    neutral = len(prepared.tokens) >= settings.neutral_min_tokens and reads_spanish(prepared.tokens)
+    return combine(signals, credibility=credibility, settings=settings, neutral=neutral)
 
 
 # ---- decisions on a result ----
@@ -404,13 +551,23 @@ def needs_escalation(
     conflicting: bool,
     duplicate_of_judged: bool,
     settings: ClassifierSettings,
+    label: Label | None = None,
 ) -> bool:
     """RC-7: send to the LLM an in-scope item that the earlier stages could not settle
-    (inconclusive, conflicting, or a confidence in [escalate_low, escalate_high)) unless it
-    duplicates an item already judged. A confidence of 0.8 or more is settled; 0.4 is not."""
+    (inconclusive, conflicting, or a risk label with a confidence under escalate_high; for an
+    unlabelled confidence, in [escalate_low, escalate_high)) unless it duplicates an item already
+    judged. A confidence of 0.8 or more is settled; 0.4 is not. A `no_risk` verdict has no band:
+    the rules only give it when nothing argues for risk, so it is settled."""
     if not in_scope or duplicate_of_judged:
         return False
     in_band = settings.escalate_low <= confidence < settings.escalate_high
+    if label is Label.NO_RISK:
+        in_band = False
+    elif label in RISK_LABELS:
+        # A risk label always rests on evidence from `inconclusive_below` up. The credibility prior
+        # may move its confidence a little under `escalate_low`; that must not let it slip between
+        # "inconclusive" and the band (no dead zone), so only the upper bound applies.
+        in_band = confidence < settings.escalate_high
     return inconclusive or conflicting or in_band
 
 
@@ -445,8 +602,10 @@ def rationale_for_rules(outcome: RuleOutcome, topic: TopicVerdict) -> str:
         )
         names = ", ".join(s.name for s in ranked[:_SIGNALS_SHOWN])
         head = f"{outcome.label.value} candidate from rules: {names}"
-        if outcome.conflicting:
+        if outcome.conflicting and not outcome.mixed:
             head += "; conflicting signals"
+    if outcome.mixed:
+        head += "; benign evidence next to a risk signal"
     topics = ", ".join(t.value for t in topic.topics)
     matched = ", ".join(f'"{t[:_TERM_SHOWN_CHARS]}"' for t in topic.matched_terms[:_MATCHED_SHOWN])
     return f"{head}; topics: {topics}; matched: {matched}"[:MAX_RATIONALE_CHARS]

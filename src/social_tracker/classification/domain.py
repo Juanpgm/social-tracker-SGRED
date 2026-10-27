@@ -66,6 +66,7 @@ class OutOfScopeReason(StrEnum):
     NO_TOPIC_MATCH = "no_topic_match"
     CRIME_PUBLIC_ORDER = "crime_public_order"
     EMPTY_TEXT = "empty_text"
+    NON_SPANISH = "non_spanish"
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,8 @@ class SignalSpec:
 # The signals of the rules stage (RC-1 stage 2). The weight of each can be overridden in the topic
 # configuration (`weights`); the names are fixed because the detectors are code. A weight is the
 # confidence one signal alone gives its label; signals of one label combine as 1 - prod(1 - w).
+# `obfuscated_text` argues for no label (UNCLASSIFIED): it is evidence of an evasion attempt that
+# raises suspicion and the queue priority and never decides a label alone.
 SIGNALS: dict[str, SignalSpec] = {
     "prediction_claim": SignalSpec(Label.UNINTENTIONAL_RUMOR, 0.45),
     "prediction_specific_time": SignalSpec(Label.DELIBERATE_DISINFORMATION, 0.35),
@@ -101,13 +104,25 @@ SIGNALS: dict[str, SignalSpec] = {
     "repeated_exclamation": SignalSpec(Label.UNINTENTIONAL_RUMOR, 0.10),
     "unverifiable_sources": SignalSpec(Label.UNINTENTIONAL_RUMOR, 0.25),
     "official_attribution_unlinked": SignalSpec(Label.DELIBERATE_DISINFORMATION, 0.45),
-    "official_link": SignalSpec(Label.NO_RISK, 0.35),
+    "official_link": SignalSpec(Label.NO_RISK, 0.50),
     "evacuation_claim": SignalSpec(Label.UNINTENTIONAL_RUMOR, 0.20),
     "casualty_claim": SignalSpec(Label.UNINTENTIONAL_RUMOR, 0.25),
     "recycled_marker": SignalSpec(Label.RECYCLED_CONTENT, 0.50),
     "old_year_reference": SignalSpec(Label.RECYCLED_CONTENT, 0.25),
-    "news_report": SignalSpec(Label.NO_RISK, 0.50),
+    "news_report": SignalSpec(Label.NO_RISK, 0.60),
+    "obfuscated_text": SignalSpec(Label.UNCLASSIFIED, 0.30),
 }
+
+# Risk signals that are only style or a passing mention: they argue for their label but do not, on
+# their own, stop a clean report from being settled as `no_risk` (see `rules.combine`).
+WEAK_SIGNALS = frozenset({"all_caps", "repeated_exclamation", "old_year_reference"})
+
+# A signal that restates another one: the time of a prediction is part of the same claim, so the
+# pair must not be counted as two opinions when looking for a conflict between labels.
+COMPANION_SIGNALS = {"prediction_specific_time": "prediction_claim"}
+
+# An unlinked attribution without an alarm word counts this share of its weight.
+PLAIN_ATTRIBUTION_FACTOR = 0.55
 
 
 @dataclass(frozen=True)
@@ -144,45 +159,75 @@ def _whole(value: object, low: int, high: int) -> bool:
 class ClassifierSettings:
     """Thresholds of the cascade; the defaults are the product's (RC-5, RC-7).
 
-    - `recycle_days`: a match to content first seen/published STRICTLY more than this many days
-      earlier is recycled; a match within it is a plain duplicate.
+    - `recycle_days`: a match to content first SEEN (by this application, never by a date the feed
+      claims) strictly more than this many days apart is recycled; a match within it is a plain
+      duplicate.
     - `near_duplicate_threshold`: estimated Jaccard similarity from which two texts are near
       duplicates (inclusive).
-    - `escalate_low`/`escalate_high`: the confidence band [low, high) that goes to the LLM.
-    - `inconclusive_below`: a top evidence score under this decides nothing.
+    - `min_near_tokens`: a text with fewer words than this is compared by identical content only;
+      short headlines and templated bulletins are alike without being copies.
+    - `candidate_limit`: near-duplicate candidates verified per item (1..1000); the most
+      band-sharing ones first. Hitting it is counted in the report.
+    - `escalate_low`/`escalate_high`: the confidence band [low, high) of a RISK label that goes to
+      the LLM.
+    - `inconclusive_below`: the evidence of the strongest label under this decides nothing (the
+      item is `unclassified` and goes to the LLM). It equals `escalate_low` by default so the
+      escalation is monotonic: all the evidence under `escalate_high` is escalated, none above.
+    - `neutral_confidence`/`neutral_min_tokens`: an on-topic text of at least that many words with
+      no signal at all is `no_risk` at that confidence and is not escalated.
+    - `no_risk_settled_min`: a `no_risk` verdict resting on some evidence is settled from this
+      confidence on; below it the item is inconclusive.
     - `conflict_min`/`conflict_margin`: two labels both at least `conflict_min` and closer than
       `conflict_margin` conflict.
     - `old_year_gap`: a year at least this many years before the item's own is an old reference.
-    - `max_text_chars`: longer text is cut (and flagged) before the stages see it.
+    - `max_text_chars`: longer text is read at both ends (and flagged) before the stages see it.
     - `signature_retention_days`: how long near-duplicate signatures are kept.
+    - `classification_retention_days`: how long the verdict of an item that no longer exists is
+      kept.
+    - `max_item_failures`: consecutive per-item errors after which an item is parked as
+      `classification_failed`.
     """
 
     recycle_days: int = 7
     near_duplicate_threshold: float = 0.8
+    min_near_tokens: int = 12
+    candidate_limit: int = 500
     escalate_low: float = 0.4
     escalate_high: float = 0.8
-    inconclusive_below: float = 0.2
+    inconclusive_below: float = 0.4
+    neutral_confidence: float = 0.6
+    neutral_min_tokens: int = 6
+    no_risk_settled_min: float = 0.5
     conflict_min: float = 0.3
     conflict_margin: float = 0.15
     old_year_gap: int = 2
     max_text_chars: int = 20_000
     signature_retention_days: int = 730
+    classification_retention_days: int = 180
+    max_item_failures: int = 3
 
     def __post_init__(self) -> None:
         valid = (
             _whole(self.recycle_days, 1, 3650)
             and _in_range(self.near_duplicate_threshold, 0.0, 1.0)
             and self.near_duplicate_threshold > 0
+            and _whole(self.min_near_tokens, 1, 10_000)
+            and _whole(self.candidate_limit, 1, 1000)
             and _in_range(self.escalate_low, 0.0, 1.0)
             and _in_range(self.escalate_high, 0.0, 1.0)
             and self.escalate_low <= self.escalate_high
             and _in_range(self.inconclusive_below, 0.0, 1.0)
+            and _in_range(self.neutral_confidence, 0.0, 1.0)
+            and _whole(self.neutral_min_tokens, 1, 10_000)
+            and _in_range(self.no_risk_settled_min, 0.0, 1.0)
             and _in_range(self.conflict_min, 0.0, 1.0)
             and _in_range(self.conflict_margin, 0.0, 1.0)
             and self.conflict_margin > 0
             and _whole(self.old_year_gap, 1, 100)
             and _whole(self.max_text_chars, 1, 1_000_000)
             and _whole(self.signature_retention_days, 1, 3650)
+            and _whole(self.classification_retention_days, 1, 3650)
+            and _whole(self.max_item_failures, 1, 100)
         )
         if not valid:
             raise ValidationError("invalid classifier settings")

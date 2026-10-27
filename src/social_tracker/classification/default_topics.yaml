@@ -11,6 +11,10 @@
 version: 1
 
 # Primary focus (a): earthquakes, aftershocks, damage, rumors and the people who talk about them.
+# List every form you want to match: verbs and plurals are separate entries ("tiembla", "tembló").
+# "réplica(s)" and "magnitud" are ambiguous words (an official "replica" to criticism, "the
+# magnitude of the problem"): they count only next to an earthquake term, "magnitud" also when a
+# number follows it. Keep them here; the context rule is part of the matcher.
 earthquake:
   - sismo
   - sismos
@@ -22,6 +26,23 @@ earthquake:
   - temblores
   - temblar
   - tembló
+  - temblaba
+  - temblaron
+  - tiembla
+  - tiemblan
+  - temblando
+  - está temblando
+  - están temblando
+  - estaba temblando
+  - sacudió
+  - sacudieron
+  - sacudida
+  - sacudidas
+  - estremeció
+  - estremecimiento
+  - remezón
+  - movimiento fuerte
+  - movimiento sísmico
   - terremoto
   - terremotos
   - réplica
@@ -127,6 +148,8 @@ official_bodies:
   - Defensa Civil
   - Cuerpo de Bomberos
   - Bomberos Cali
+  - Red Sismológica Nacional
+  - la Secretaría
   - Cruz Roja Colombiana
   - Alcaldía de Cali
   - Gobernación del Valle del Cauca
@@ -134,6 +157,7 @@ official_bodies:
 # CONFIG ONLY - verify before relying. These are generic placeholders, NOT real addresses: nobody
 # has checked them. Replace them with the domains you have verified yourself. A link to one of
 # these domains (or an item served from one) lowers the suspicion of an unverified attribution.
+# A domain needs at least two labels and must not be a public suffix ("gov.co", "com" are refused).
 official_domains:
   - official-domain.example
 
@@ -146,5 +170,5 @@ official_channel_hints:
 # their default. Names: prediction_claim, prediction_specific_time, pseudo_authority,
 # virality_phrases, censorship_bait, all_caps, repeated_exclamation, unverifiable_sources,
 # official_attribution_unlinked, official_link, evacuation_claim, casualty_claim, recycled_marker,
-# old_year_reference, news_report.
+# old_year_reference, news_report, obfuscated_text.
 weights: {}

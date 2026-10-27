@@ -399,7 +399,8 @@ def test_a_real_quake_report_is_not_a_prediction(world):
     verdict = world.verdict(item)
     assert verdict.label is Label.NO_RISK
     assert [s.name for s in verdict.signals] == ["news_report"]
-    assert verdict.confidence == 0.5
+    assert verdict.confidence == 0.6
+    assert verdict.needs_llm is False  # a report with nothing arguing for risk is settled
 
 
 def test_an_unlinked_attribution_to_the_secretariat_is_disinformation_with_priority(world):
@@ -432,11 +433,24 @@ def test_a_more_credible_source_gets_a_lower_risk_confidence_and_the_same_label(
 def test_credibility_alone_never_produces_a_label(credibility):
     world = memory_world()
     world.ready(credibility=credibility)
-    item = world.add("a", BENIGN_QUAKE)
+    item = world.add("a", "Sismo en Cali")  # too short to be called harmless
     run(world)
     verdict = world.verdict(item)
     assert (verdict.label, verdict.confidence, verdict.signals) == (Label.UNCLASSIFIED, 0.0, ())
     assert verdict.source_credibility_used == credibility
+
+
+@pytest.mark.parametrize(("credibility", "confidence"), [(1, 0.54), (3, 0.6), (5, 0.66)])
+def test_neutral_chatter_is_no_risk_without_the_llm_and_the_prior_moves_its_confidence(
+    credibility, confidence
+):
+    world = memory_world()
+    world.ready(credibility=credibility)
+    item = world.add("a", BENIGN_QUAKE)
+    run(world)
+    verdict = world.verdict(item)
+    assert (verdict.label, verdict.confidence, verdict.signals) == (Label.NO_RISK, confidence, ())
+    assert (verdict.needs_llm, verdict.priority, verdict.stage) == (False, 0.0, Stage.RULES)
 
 
 @pytest.mark.parametrize(
@@ -457,7 +471,8 @@ def with_weights(**weights: float) -> str:
 @pytest.mark.parametrize(
     ("weight", "escalated"),
     [
-        (0.39, False),
+        (0.1, True),
+        (0.39, True),  # no dead zone: everything under 0.8 is escalated
         (0.4, True),
         (0.49, True),
         (0.5, True),
@@ -478,8 +493,8 @@ def test_the_escalation_boundaries_hold_end_to_end(world, weight, escalated):
 
 
 def test_a_conflict_between_strong_labels_is_escalated_even_when_confident(world):
-    world.topics.set_text(with_weights(prediction_claim=0.9, prediction_specific_time=0.85), **WHO)
-    item = world.add("a", "Mañana habrá un temblor en Cali")
+    world.topics.set_text(with_weights(prediction_claim=0.9, censorship_bait=0.85), **WHO)
+    item = world.add("a", "Habrá un temblor en Cali, antes de que lo borren")
     run(world)
     verdict = world.verdict(item)
     assert verdict.confidence == 0.9
@@ -645,7 +660,7 @@ def test_the_report_counts_what_happened(world):
     world.add("d", OFF_TOPIC)
     world.add("e", "")
     assert run(world) == ClassifyReport(
-        classified=4, out_of_scope=1, skipped=0, errors=0, needs_llm=3, eligible_sources=1
+        classified=4, out_of_scope=1, skipped=0, errors=0, needs_llm=2, eligible_sources=1
     )
 
 

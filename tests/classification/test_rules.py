@@ -234,8 +234,8 @@ def test_an_alarming_order_attributed_to_an_official_body_without_a_link_is_a_si
 @pytest.mark.parametrize(
     "text",
     [
-        "Según la Secretaría de Gestión del Riesgo, el sismo de ayer fue leve",  # no alarm
         "Según la Secretaría de Gestión Ambiental, evacuen la zona",  # look-alike body
+        "Según la Secretaría de Hacienda, evacuen la zona",  # another secretariat
         "Evacuen ya, dicen",  # no body named
         "Según dagrdx, evacuen",  # look-alike abbreviation
         # no attribution verb
@@ -523,12 +523,12 @@ def test_an_exact_tie_goes_to_the_more_serious_label():
 @pytest.mark.parametrize(
     ("top", "second", "conflicting"),
     [
-        (0.45, 0.35, True),  # the rumor and disinformation of a dated prediction
-        (0.50, 0.35, False),  # a gap of exactly the margin is not a conflict
-        (0.50, 0.36, True),
-        (0.60, 0.30, False),
-        (0.35, 0.30, True),  # the second at exactly the minimum counts
-        (0.35, 0.29, False),
+        (0.50, 0.45, True),
+        (0.60, 0.45, False),  # a gap of exactly the margin is not a conflict
+        (0.60, 0.46, True),
+        (0.70, 0.30, False),
+        (0.45, 0.45, True),  # the second at exactly the minimum counts
+        (0.45, 0.29, False),
     ],
 )
 def test_conflicting_signals_are_two_labels_that_are_both_strong_and_close(
@@ -542,19 +542,19 @@ def test_conflicting_signals_are_two_labels_that_are_both_strong_and_close(
     assert outcome.conflicting is conflicting
 
 
-def test_evidence_of_no_risk_next_to_a_risk_signal_can_conflict():
+def test_evidence_of_no_risk_next_to_a_risk_signal_cannot_win():
     outcome = combine(
-        [sig("prediction_claim", 0.45), sig("news_report", 0.5)], credibility=3, settings=SETTINGS
+        [sig("prediction_claim", 0.45), sig("news_report", 0.6)], credibility=3, settings=SETTINGS
     )
-    assert outcome.label is Label.NO_RISK
-    assert outcome.conflicting is True
+    assert outcome.label is Label.UNINTENTIONAL_RUMOR  # not no_risk, however strong
+    assert (outcome.conflicting, outcome.mixed) == (True, True)
 
 
 @pytest.mark.parametrize(
     ("weight", "label", "inconclusive"),
     [
-        (0.19, Label.UNCLASSIFIED, True),
-        (0.20, Label.UNINTENTIONAL_RUMOR, False),
+        (0.39, Label.UNCLASSIFIED, True),
+        (0.40, Label.UNINTENTIONAL_RUMOR, False),
         (0.0, Label.UNCLASSIFIED, True),
     ],
 )
@@ -768,11 +768,11 @@ def test_the_whole_stage_on_a_real_report_has_no_risk_signal():
     )
     assert [s.name for s in outcome.signals] == ["news_report"]
     assert outcome.label is Label.NO_RISK
-    assert outcome.confidence == 0.56
+    assert outcome.confidence == 0.66
 
 
 @pytest.mark.parametrize(
-    ("weight", "escalated"), [(0.39, False), (0.4, True), (0.79, True), (0.8, False)]
+    ("weight", "escalated"), [(0.39, True), (0.4, True), (0.79, True), (0.8, False)]
 )
 def test_the_boundaries_hold_through_a_configured_weight(weight, escalated):
     config = TopicConfig.from_mapping(
@@ -818,7 +818,7 @@ def test_gibberish_with_a_topic_word_has_nothing_to_decide_on():
         Label.UNCLASSIFIED,
         0.0,
         True,
-    )
+    )  # no Spanish function word: a pile of tokens is not a harmless sentence
     assert is_low_confidence(outcome.confidence, 0.5) is True
 
 

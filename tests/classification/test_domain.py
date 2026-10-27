@@ -36,7 +36,11 @@ def test_the_stages_are_the_cascade_stages():
 
 def test_every_default_signal_argues_for_a_label_the_rules_can_pick_with_a_valid_weight():
     for name, spec in SIGNALS.items():
-        assert spec.label in (*RISK_LABELS, Label.NO_RISK), name
+        # an obfuscation argues for no label: it only raises suspicion
+        allowed = (
+            (*RISK_LABELS, Label.NO_RISK) if name != "obfuscated_text" else (Label.UNCLASSIFIED,)
+        )
+        assert spec.label in allowed, name
         assert 0.0 < spec.weight <= 1.0, name
 
 

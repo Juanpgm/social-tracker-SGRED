@@ -57,6 +57,7 @@ from social_tracker.classification.rules import (
     apply_prior,
     evaluate_rules,
     is_low_confidence,
+    is_official_item,
     needs_escalation,
     priority,
     rationale_for_rules,
@@ -302,6 +303,15 @@ class ClassifierService:
         except NotFoundError:
             return None
 
+    def _source_is_official(self, source_id: str, config: TopicConfig) -> bool:
+        """True when the source's own address is on a configured official domain."""
+        try:
+            source = self._sources.get(source_id)
+        except NotFoundError:
+            return False
+        url = getattr(source, "feed_url", None) or getattr(source, "stream_url", None)
+        return is_official_item(url, config.official_domains)
+
     def _classify_one(
         self,
         item_id: str,
@@ -318,7 +328,10 @@ class ClassifierService:
             credibility = self._credibility(item.source_id)
             if credibility is None:
                 return None
-            verdict, sign = self._decide(item, credibility, config, matcher, version, alert_min)
+            source_official = self._source_is_official(item.source_id, config)
+            verdict, sign = self._decide(
+                item, credibility, source_official, config, matcher, version, alert_min
+            )
             if not self._classifications.add(verdict):
                 existing = self._classifications.get(item_id)
                 if existing is not None:  # a verdict without its status: finish that write
@@ -335,6 +348,7 @@ class ClassifierService:
         self,
         item: Item,
         credibility: int,
+        source_official: bool,
         config: TopicConfig,
         matcher: TopicMatcher,
         version: str,
@@ -349,7 +363,7 @@ class ClassifierService:
             "truncated": prepared.truncated,
             "source_credibility_used": credibility,
         }
-        topic = matcher.evaluate(prepared.tokens)
+        topic = matcher.evaluate_prepared(prepared)
         if not topic.in_scope:
             return self._without_topic(topic, common), None
         outcome = evaluate_rules(
@@ -360,6 +374,7 @@ class ClassifierService:
             reference_year=reference_time(item).year,
             item_url=item.url,
             settings=settings,
+            source_official=source_official,
         )
         sign = signature(prepared.tokens)
         original = self._find_original(item, sign)
@@ -426,6 +441,7 @@ class ClassifierService:
             conflicting=outcome.conflicting,
             duplicate_of_judged=False,
             settings=self._settings,
+            label=outcome.label,
         )
         return Classification(
             label=outcome.label,

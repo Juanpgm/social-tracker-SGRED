@@ -11,6 +11,12 @@ Matching works on folded tokens (see `text.fold`): whole words and whole phrases
 case, accents, punctuation and invisible characters. A place term alone never puts an item in
 scope; it only raises the score of an item that is. A crime term puts an item out of scope only
 when no disaster term is present.
+
+Two earthquake words are ambiguous alone and count only with context: `magnitud` (a number right
+after it, or an earthquake term nearby: "la magnitud del problema" is not a quake) and `replica` /
+`replicas` (an earthquake term nearby: "el alcalde replica a las criticas" is not an aftershock).
+"Nearby" is `CONTEXT_WINDOW` words on either side. An item with no topic is counted as
+`non_spanish` instead of `no_topic_match` when it reads as English.
 """
 
 import json
@@ -22,7 +28,7 @@ from datetime import datetime
 from typing import Any
 
 from social_tracker.classification.domain import SIGNALS, OutOfScopeReason, Topic, TopicVerdict
-from social_tracker.classification.text import fold
+from social_tracker.classification.text import PreparedText, fold
 from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ValidationError
 
@@ -39,7 +45,37 @@ _TERM_GROUPS = (*TOPIC_GROUPS, "places", "exclude", "official_bodies")
 _FREE_GROUPS = ("official_domains", "official_channel_hints")
 _KEYS = frozenset({"version", "weights", *_TERM_GROUPS, *_FREE_GROUPS})
 _EXCLUSIVE_GROUPS = (*TOPIC_GROUPS, "places", "exclude")  # a term lives in at most one of these
-_DOMAIN_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
+_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+CONTEXT_WINDOW = 8
+MAGNITUDE_REACH = 3  # words after "magnitud" where its number may stand
+CONTEXTUAL_TERMS = frozenset({"magnitud", "replica", "replicas"})
+
+
+def _word_set(text: str) -> frozenset[str]:
+    return frozenset(text.split())
+
+
+# Names that are a whole registry, not an organisation: nobody owns them, so a link "to" one of them
+# proves nothing. Not exhaustive; a single label (a bare top-level domain) is refused anyway.
+PUBLIC_SUFFIXES = _word_set(
+    "com org net gov edu mil int info biz name pro co io app dev xyz online site top club "
+    "news live com.co org.co net.co gov.co edu.co mil.co nom.co info.co co.uk org.uk gov.uk "
+    "ac.uk com.br gov.br com.mx gob.mx com.ar gob.ar com.pe gob.pe com.ec gob.ec com.ve "
+    "gob.ve com.es gob.es co.za co.jp com.au gov.au co.in gov.in github.io blogspot.com "
+    "wordpress.com herokuapp.com vercel.app netlify.app pages.dev web.app firebaseapp.com"
+)
+_ENGLISH_WORDS = _word_set(
+    "the and is are was were of to in that it for on with as this from at be by have has not "
+    "you they will an or but we their there been what when who how which about into than "
+    "then these those would could should"
+)
+_SPANISH_WORDS = _word_set(
+    "el la los las de del en y que se un una por con para es son al lo como mas pero sus le "
+    "ya o este esta si porque muy sin sobre entre cuando tambien hasta hay donde quien desde "
+    "todo nos"
+)
+_SECRETARY = "secretaria"
+_OF = frozenset({"de", "del"})
 _BASE_SCORE = 0.5
 _PER_EXTRA_TERM = 0.15
 _PER_PLACE = 0.1
@@ -82,13 +118,28 @@ def _terms(data: Mapping[str, Any], group: str) -> tuple[tuple[str, ...], set[st
     return tuple(sorted(seen)), seen
 
 
+def _valid_domain(host: str) -> bool:
+    """A registrable name: at least two labels, valid labels, not an address, not a public suffix
+    (a link to `com` or `gov.co` proves nothing about who wrote it)."""
+    labels = host.split(".")
+    return (
+        len(host) <= 253
+        and len(labels) >= 2
+        and all(_LABEL_RE.fullmatch(label) for label in labels)
+        and not all(label.isdigit() for label in labels)
+        and host not in PUBLIC_SUFFIXES
+    )
+
+
 def _domains(data: Mapping[str, Any]) -> tuple[str, ...]:
     seen: dict[str, str] = {}
     for domain in _text_items(data, "official_domains"):
         host = domain.strip().lower()
-        if not _DOMAIN_RE.fullmatch(host) or host in seen:
+        if not _valid_domain(host) or host in seen:
             raise _bad(
-                "'official_domains' must list distinct bare domain names", "official_domains"
+                "'official_domains' must list distinct registrable domain names with at least "
+                "two labels, not a public suffix such as com or gov.co",
+                "official_domains",
             )
         seen[host] = host
     return tuple(sorted(seen))
@@ -215,20 +266,39 @@ class _PhraseIndex:
     """Phrases looked up by their first word: a scan costs one dict lookup per token."""
 
     def __init__(self, terms: Sequence[str]) -> None:
-        self._by_first: dict[str, list[tuple[str, ...]]] = defaultdict(list)
+        by_first: dict[str, list[tuple[str, ...]]] = defaultdict(list)
         for term in {fold(t) for t in terms}:
             words = tuple(term.split())
-            self._by_first[words[0]].append(words)
+            by_first[words[0]].append(words)
+        # sorted once here, so a scan never sorts and its order does not depend on set order
+        self._by_first = {first: sorted(phrases) for first, phrases in by_first.items()}
 
     def find(self, words: Sequence[str]) -> list[tuple[int, int, str]]:
         """Every `(start, end, folded term)` occurrence, in text order."""
         found: list[tuple[int, int, str]] = []
         for start, word in enumerate(words):
-            for phrase in sorted(self._by_first.get(word, ())):
+            for phrase in self._by_first.get(word, ()):
                 end = start + len(phrase)
                 if tuple(words[start:end]) == phrase:
                     found.append((start, end, " ".join(phrase)))
         return found
+
+
+def _has_number(words: Sequence[str]) -> bool:
+    return any(any(ch.isdigit() for ch in word) for word in words)
+
+
+def _reads_english(words: Sequence[str]) -> bool:
+    english = sum(word in _ENGLISH_WORDS for word in words)
+    spanish = sum(word in _SPANISH_WORDS for word in words)
+    return english >= 2 and english > 2 * spanish
+
+
+def reads_spanish(words: Sequence[str]) -> bool:
+    """True when enough of the words are common Spanish function words for the text to be
+    sentences rather than a pile of tokens."""
+    spanish = sum(word in _SPANISH_WORDS for word in words)
+    return spanish >= 1 and spanish * 10 >= len(words)
 
 
 class TopicMatcher:
@@ -240,19 +310,37 @@ class TopicMatcher:
         self._exclude = _PhraseIndex(config.exclude)
         self._bodies = _PhraseIndex((*config.official_bodies, *config.secretariat))
 
+    def _topic_hits(self, topic: Topic, words: Sequence[str]) -> set[str]:
+        found = self._topics[topic].find(words)
+        if topic is not Topic.EARTHQUAKE:
+            return {term for _, _, term in found}
+        plain = [(start, end) for start, end, term in found if term not in CONTEXTUAL_TERMS]
+        hits = {term for _, _, term in found if term not in CONTEXTUAL_TERMS}
+        for start, end, term in found:
+            if term not in CONTEXTUAL_TERMS:
+                continue
+            nearby = any(
+                other_start < end + CONTEXT_WINDOW and other_end > start - CONTEXT_WINDOW
+                for other_start, other_end in plain
+            )
+            numbered = term == "magnitud" and _has_number(words[end : end + MAGNITUDE_REACH])
+            if nearby or numbered:
+                hits.add(term)
+        return hits
+
     def evaluate(self, words: Sequence[str]) -> TopicVerdict:
         """Decide the scope of folded `words`."""
         if not words:
             return TopicVerdict(False, (), (), 0.0, OutOfScopeReason.EMPTY_TEXT)
-        hits = {
-            topic: {t for _, _, t in index.find(words)} for topic, index in self._topics.items()
-        }
+        hits = {topic: self._topic_hits(topic, words) for topic in self._topics}
         topics = tuple(topic for topic in Topic if hits[topic])
         if not topics:
-            crime = bool(self._exclude.find(words))
-            reason = (
-                OutOfScopeReason.CRIME_PUBLIC_ORDER if crime else OutOfScopeReason.NO_TOPIC_MATCH
-            )
+            if self._exclude.find(words):
+                reason = OutOfScopeReason.CRIME_PUBLIC_ORDER
+            elif _reads_english(words):
+                reason = OutOfScopeReason.NON_SPANISH
+            else:
+                reason = OutOfScopeReason.NO_TOPIC_MATCH
             return TopicVerdict(False, (), (), 0.0, reason)
         strong = set().union(*hits.values())
         places = {t for _, _, t in self._places.find(words)}
@@ -260,6 +348,23 @@ class TopicMatcher:
         score += _PER_PLACE * min(len(places), _MAX_PLACES_COUNTED)
         return TopicVerdict(True, topics, tuple(sorted(strong | places)), round(min(score, 1.0), 4))
 
+    def evaluate_prepared(self, prepared: PreparedText) -> TopicVerdict:
+        """The scope of a prepared text: as written, or else as decoded (a word spelled around the
+        vocabulary, such as `t3mblor`, is still the word)."""
+        verdict = self.evaluate(prepared.tokens)
+        if verdict.in_scope or prepared.decoded == prepared.plain:
+            return verdict
+        decoded = self.evaluate(prepared.decoded_tokens)
+        return decoded if decoded.in_scope else verdict
+
     def official_bodies(self, words: Sequence[str]) -> list[tuple[int, int]]:
-        """Token spans `(start, end)` where an official body (or the secretariat) is named."""
-        return [(start, end) for start, end, _ in self._bodies.find(words)]
+        """Token spans `(start, end)` where an official body (or the secretariat) is named. A
+        bare "la secretaria" followed by "de" starts the name of some other secretariat ("la
+        secretaria de gestion ambiental"): it is not the risk secretariat unless the full name is
+        listed, and then that longer span is found on its own."""
+        spans = []
+        for start, end, _ in self._bodies.find(words):
+            bare = words[end - 1] == _SECRETARY and end < len(words) and words[end] in _OF
+            if not bare:
+                spans.append((start, end))
+        return spans
