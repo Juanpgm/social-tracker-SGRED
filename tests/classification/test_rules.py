@@ -892,3 +892,63 @@ def test_the_rationale_never_exceeds_the_stored_limit():
     outcome = combine([sig("prediction_claim")], credibility=3, settings=SETTINGS)
     huge = TopicVerdict(True, (Topic.EARTHQUAKE,), tuple("y" * 40 for _ in range(50)), 0.5)
     assert len(rationale_for_rules(outcome, huge)) <= MAX_RATIONALE_CHARS
+
+
+# ---- exact edges of the windows and look-arounds ----
+
+
+@pytest.mark.parametrize(
+    ("distance", "negated"), [(10, True), (39, True), (40, True), (41, False), (80, False)]
+)
+def test_a_negation_counts_only_within_forty_characters_before_the_prediction(distance, negated):
+    # "no" starts `distance` characters before "habra"; the window is the 40 before it
+    text = "no " + "x" * (distance - 4) + " habra un temblor"
+    assert ("prediction_claim" in names(text)) is (not negated)
+
+
+@pytest.mark.parametrize(("gap", "found"), [(0, True), (75, True), (76, False)])
+def test_a_time_counts_up_to_eighty_characters_after_the_prediction(gap, found):
+    text = "habra un temblor " + "x" * gap + " hoy"
+    assert ("prediction_specific_time" in names(text)) is found
+
+
+@pytest.mark.parametrize(("gap", "found"), [(0, True), (75, True), (76, False)])
+def test_a_time_counts_up_to_eighty_characters_before_the_prediction(gap, found):
+    text = "hoy " + "x" * gap + " habra un temblor"
+    assert ("prediction_specific_time" in names(text)) is found
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Esta mañana dijeron que habrá un temblor",  # "this morning", not "tomorrow"
+        "Por la mañana dijeron que habrá un temblor",
+        "ESTA MAÑANA se rumora que habrá un sismo",
+    ],
+)
+def test_the_morning_is_not_tomorrow(text):
+    found = names(text)
+    assert "prediction_claim" in found
+    assert "prediction_specific_time" not in found
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://official-domain.example.",  # a sentence ending right after the address
+        "(https://official-domain.example/aviso)",
+        "https://official-domain.example-",
+    ],
+)
+def test_punctuation_after_a_link_does_not_hide_an_official_domain(link):
+    assert "official_link" in names(f"Según el DAGRD: {link}")
+
+
+def test_a_report_verb_and_a_quake_without_a_magnitude_is_not_a_news_report():
+    assert "news_report" not in names("Se reportó un sismo en Cali")
+    assert "news_report" not in names("La magnitud 4 no se reportó, dijo un vecino")
+
+
+def test_the_year_of_the_item_decides_what_is_old():
+    assert "old_year_reference" in names("El terremoto de 2019", year=2026)
+    assert "old_year_reference" not in names("El terremoto de 2019", year=2020)

@@ -1,5 +1,7 @@
 """ClassifierService: gating, the topic filter, the rules and the escalation flags, end to end."""
 
+from datetime import UTC, datetime
+
 import pytest
 
 from social_tracker.classification.domain import (
@@ -14,7 +16,7 @@ from social_tracker.classification.service import ClassifyReport
 from social_tracker.classification.topics import TopicConfig
 from social_tracker.classification.yaml_io import default_topic_config, dump_topic_config
 from social_tracker.items.domain import ItemStatus
-from social_tracker.shared.errors import NotFoundError, ValidationError
+from social_tracker.shared.errors import NotFoundError, StorageError, ValidationError
 from tests.actors import WHO
 from tests.classification.harness import (
     ATTRIBUTION,
@@ -22,6 +24,7 @@ from tests.classification.harness import (
     CRIME,
     OFF_TOPIC,
     PREDICTION,
+    PUBLISHED,
     REPORT,
     START,
     World,
@@ -29,6 +32,7 @@ from tests.classification.harness import (
     long_text,
     memory_world,
 )
+from tests.fakes.classification_repositories import InMemoryClassificationRepository
 from tests.fakes.item_repository import InMemoryItemRepository
 
 
@@ -491,6 +495,84 @@ def test_a_catalog_that_fails_never_blocks_the_classification(catalog):
     assert run(world).classified == 1
     assert world.verdict(item).catalog_status == "unavailable"
     assert world.verdict(item).label is Label.UNINTENTIONAL_RUMOR
+
+
+class FailingAdds(InMemoryClassificationRepository):
+    """Fails its next `left` stores with `error`. The counter lives on the class so that the
+    rollback of a transaction (which restores instance attributes) cannot reset it."""
+
+    left = 0
+    error: Exception = StorageError("database error: SQLITE_BUSY")
+
+    def add(self, classification):
+        if type(self).left > 0:
+            type(self).left -= 1
+            raise self.error
+        return super().add(classification)
+
+
+def failing(left: int, error: Exception) -> FailingAdds:
+    repo = type("Failing", (FailingAdds,), {"left": left, "error": error})()
+    return repo
+
+
+def test_a_storage_error_ends_the_run_and_the_next_run_resumes():
+    repo = failing(1, StorageError("database error: SQLITE_BUSY"))
+    world = memory_world(classifications=repo)
+    world.ready()
+    items = [world.add(f"n{n}", long_text(n)) for n in range(3)]
+    report = run(world)
+    assert (report.classified, report.errors) == (0, 1)  # the run stopped: nothing else was tried
+    assert {world.status(i) for i in items} == {ItemStatus.NEW}
+    assert world.classifications.stats().total == 0
+    assert run(world).classified == 3
+
+
+def test_an_item_that_cannot_be_classified_costs_only_that_item():
+    repo = failing(1, ValidationError("stored data is invalid"))
+    world = memory_world(classifications=repo)
+    world.ready()
+    items = [world.add(f"n{n}", long_text(n)) for n in range(3)]
+    report = run(world)
+    assert (report.classified, report.errors) == (2, 1)
+    assert sorted(world.status(i).value for i in items) == ["classified", "classified", "new"]
+    assert run(world).classified == 1  # the one that failed is picked up again
+
+
+def test_a_copy_inherits_the_catalog_outcome_of_the_original_without_asking_again():
+    catalog = RecordingCatalog(CatalogResult("checked"))
+    world = memory_world(catalog=catalog)
+    world.ready("src_a")
+    world.add_source("src_b")
+    world.add("a", BENIGN_QUAKE, source_id="src_a")
+    copy = world.add("b", BENIGN_QUAKE, source_id="src_b", published_at=PUBLISHED + days(1))
+    run(world)
+    assert len(catalog.calls) == 1
+    assert world.verdict(copy).catalog_status == "checked"
+
+
+def test_a_recycled_item_is_checked_against_the_catalog_at_its_own_time():
+    catalog = RecordingCatalog(CatalogResult("checked"))
+    world = memory_world(catalog=catalog)
+    world.ready("src_a")
+    world.add_source("src_b")
+    world.add("a", BENIGN_QUAKE, source_id="src_a")
+    late = world.add("b", BENIGN_QUAKE, source_id="src_b", published_at=PUBLISHED + days(30))
+    run(world)
+    assert [when for _, when in catalog.calls] == [PUBLISHED, late.published_at]
+
+
+def test_the_year_of_the_item_decides_whether_a_year_in_its_text_is_old():
+    recent, old = memory_world(), memory_world()
+    for w in (recent, old):
+        w.ready()
+    text = "El terremoto de 2019 sacudió Cali"
+    now_item = recent.add("a", text)
+    then_item = old.add("a", text, published_at=datetime(2020, 6, 1, tzinfo=UTC))
+    run(recent)
+    run(old)
+    assert "old_year_reference" in {s.name for s in recent.verdict(now_item).signals}
+    assert "old_year_reference" not in {s.name for s in old.verdict(then_item).signals}
 
 
 # ---- reports, lookups, signatures ----

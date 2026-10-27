@@ -237,8 +237,6 @@ class SqliteItemRepository:
     ) -> list[Item]:
         stage = _stage(status)
         validate_limit(limit)
-        if source_ids is not None and not source_ids:
-            return []
         sql = f"{_SELECT} WHERE status = ?"
         params: list[Any] = [stage.value]
         if source_ids is not None:

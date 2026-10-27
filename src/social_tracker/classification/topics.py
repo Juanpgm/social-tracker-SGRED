@@ -30,7 +30,6 @@ FORMAT_VERSION = 1
 MAX_TERMS_PER_GROUP = 500
 MAX_TERM_CHARS = 80
 MAX_TERM_WORDS = 12
-MAX_TOTAL_TERMS = 3000
 MAX_STORED_BYTES = 256 * 1024
 MAX_ACTOR_CHARS = 100
 MAX_REASON_CHARS = 500
@@ -158,8 +157,6 @@ class TopicConfig:
                         )
         if not any(groups[g] for g in TOPIC_GROUPS):
             raise _bad("at least one earthquake, secretariat or other_disaster term is required")
-        if sum(map(len, groups.values())) > MAX_TOTAL_TERMS:
-            raise _bad(f"the configuration has more than {MAX_TOTAL_TERMS} terms")
         return cls(
             **groups,
             official_domains=_domains(data),

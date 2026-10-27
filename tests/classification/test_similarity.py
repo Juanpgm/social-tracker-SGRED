@@ -1,5 +1,6 @@
 """Near-duplicate detection: word-shingle MinHash with LSH bands, pure and deterministic (RC-5)."""
 
+import hashlib
 import random
 import time
 
@@ -42,6 +43,12 @@ def test_the_signature_is_deterministic_across_processes():
     sig = signature(tokens("el sismo de ayer fue sentido en toda la ciudad de cali"))
     assert sig[:3] == (776558042, 202218136, 51220112)
     assert sig == signature(tokens("el sismo de ayer fue sentido en toda la ciudad de cali"))
+
+
+def test_the_whole_signature_is_pinned_so_that_no_hash_function_can_drift():
+    sig = signature(tokens("el sismo de ayer fue sentido en toda la ciudad de cali"))
+    digest = hashlib.sha256(pack(sig)).hexdigest()
+    assert digest == "2c4f60a9d8c093c2248ba79914d7c180221cae4cb5a09ce3e310d95eb3d6ccc6"
 
 
 def test_identical_texts_are_identical_and_different_texts_are_not():

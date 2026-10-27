@@ -145,20 +145,21 @@ class ClassificationRepositoryContract:
         repo.add(verdict(2, truncated=True))
         repo.add(verdict(3, label=Label.NO_RISK, duplicate_of=item(1), stage=Stage.DEDUP))
         repo.add(verdict(4, label=Label.RECYCLED_CONTENT, recycled_of=item(1), stage=Stage.DEDUP))
+        repo.add(verdict(8, label=Label.RECYCLED_CONTENT, recycled_of=item(1), stage=Stage.DEDUP))
         repo.add(out_of_scope(5, OutOfScopeReason.NO_TOPIC_MATCH))
         repo.add(out_of_scope(6, OutOfScopeReason.NO_TOPIC_MATCH))
         repo.add(out_of_scope(7, OutOfScopeReason.CRIME_PUBLIC_ORDER))
         stats = repo.stats()
-        assert stats.total == 7
+        assert stats.total == 8
         assert stats.by_label == (
             ("no_risk", 1),
             ("out_of_scope", 3),
-            ("recycled_content", 1),
+            ("recycled_content", 2),
             ("unintentional_rumor", 2),
         )
         assert stats.out_of_scope_by_reason == (("crime_public_order", 1), ("no_topic_match", 2))
         assert (stats.needs_llm, stats.low_confidence) == (1, 1)
-        assert (stats.duplicates, stats.recycled, stats.truncated) == (1, 1, 1)
+        assert (stats.duplicates, stats.recycled, stats.truncated) == (1, 2, 1)
 
 
 def signature(n: int | str, *, content_hash: str | None = None, minhash=None, days: int = 0):

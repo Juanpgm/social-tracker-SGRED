@@ -234,3 +234,36 @@ def test_the_limits_are_exact_at_the_boundary():
     assert len(config(earthquake=[f"term{n}" for n in range(500)]).earthquake) == 500
     assert config(earthquake=["x" * 80]).earthquake == ("x" * 80,)
     assert config(earthquake=["a b c d e f g h i j k l"]).earthquake == ("a b c d e f g h i j k l",)
+
+
+def test_places_add_a_tenth_to_the_score_and_at_most_two_of_them_count():
+    three = {"places": ["Cali", "Palmira", "Yumbo"]}
+    assert verdict("sismo", **three).score == 0.5
+    assert verdict("sismo Cali", **three).score == 0.6
+    assert verdict("sismo Cali Palmira", **three).score == 0.7
+    assert verdict("sismo Cali Palmira Yumbo", **three).score == 0.7  # the third adds nothing
+
+
+@pytest.mark.parametrize("weight", [0, 0.0, 1, 1.0, 0.5])
+def test_a_weight_is_accepted_from_zero_to_one_inclusive(weight):
+    assert dict(config(weights={"all_caps": weight}).weights) == {"all_caps": float(weight)}
+
+
+def test_the_stored_size_limit_is_inclusive(monkeypatch):
+    import social_tracker.classification.topics as module
+
+    cfg = config()
+    size = len(cfg.to_json().encode("utf-8"))
+    monkeypatch.setattr(module, "MAX_STORED_BYTES", size)
+    assert len(cfg.to_json().encode("utf-8")) == size
+    monkeypatch.setattr(module, "MAX_STORED_BYTES", size - 1)
+    with pytest.raises(ValidationError):
+        cfg.to_json()
+
+
+def test_the_stored_json_round_trips_and_a_corrupt_one_is_refused():
+    cfg = config(weights={"all_caps": 0.3})
+    assert TopicConfig.from_json(cfg.to_json()) == cfg
+    for bad in ("", "not json", "[]", '{"version": 7}', "{" * 100000):
+        with pytest.raises(ValidationError):
+            TopicConfig.from_json(bad)

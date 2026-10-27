@@ -186,10 +186,12 @@ def memory_world(
     catalog: CatalogCheck | None = None,
     default: TopicConfig | None = None,
     items: Any = None,
+    classifications: Any = None,
 ) -> World:
     sources, control_repo = InMemorySourceRepository(), InMemoryControlRepository()
     items = items if items is not None else InMemoryItemRepository()
-    classifications, signatures = InMemoryClassificationRepository(), InMemorySignatureRepository()
+    classifications = classifications or InMemoryClassificationRepository()
+    signatures = InMemorySignatureRepository()
     topic_repo = InMemoryTopicConfigRepository()
     uow = InMemoryUnitOfWork(
         [sources, control_repo, items, classifications, signatures, topic_repo]

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from social_tracker.bootstrap import BUSY_TIMEOUT_ENV
 from social_tracker.classification.yaml_io import default_topic_config, load_topic_config
 from social_tracker.persistence.db import Database
 from social_tracker.persistence.items_repo import SqliteItemRepository
@@ -92,6 +93,16 @@ def test_run_leaves_items_of_a_source_with_analysis_off_alone(cli: Cli):
     assert "No classifications yet." in cli.ok("classify", "stats").stdout
 
 
+def test_run_exits_with_status_one_when_a_storage_error_stopped_it(ready: Cli):
+    with Database(ready.db_path).transaction():  # another process holds the write lock
+        from_outside = ready("classify", "run", env={BUSY_TIMEOUT_ENV: "50"})
+    assert from_outside.exit_code == 1
+    assert "1 error(s)" in from_outside.stdout
+    assert "classified 0 item(s)" in from_outside.stdout
+    assert "a storage error stopped the run" in from_outside.stderr
+    assert ready.ok("classify", "run").stdout.startswith("classified 2 item(s)")  # it resumes
+
+
 # ---- classify show ----
 
 
@@ -113,6 +124,15 @@ def test_show_prints_the_verdict_of_an_item(ready: Cli):
     assert "source credibility used: 3" in out
     assert "classifier version: cascade-1/topics-0" in out
     assert "rationale: unintentional_rumor candidate from rules" in out
+
+
+def test_show_lists_every_flag_that_is_set(ready: Cli):
+    seed(ready, make_item("z", title="Raro", text="sismo xkqzv wpfhj zzzq", published_at=NOW))
+    ready.ok("classify", "run")
+    out = ready.ok("classify", "show", make_item("z").id).stdout
+    assert "label: unclassified" in out
+    assert "flags: needs_llm, low_confidence" in out
+    assert "signals: none" in out
 
 
 def test_show_prints_an_out_of_scope_verdict_with_its_reason(ready: Cli):
