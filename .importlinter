@@ -149,19 +149,23 @@ forbidden_modules =
     requests
     aiohttp
 
-# The classification core (RC-10: the CPU stages are deterministic). Vocabulary, text folding, the
-# topic filter, the rules and the near-duplicate maths are pure: no storage, no format libraries,
-# no files or sockets, and no source of non-determinism (randomness or the wall clock). They know
-# nothing of the other modules; the service, the ports and the YAML codec stay outside this set.
+# The classification core (RC-10: the CPU stages are deterministic). EVERY module of
+# `social_tracker.classification` is core unless it is on the allowlist below, so a module added
+# later is checked from its first line without anyone remembering to list it. The core is pure:
+# no storage, no format libraries, no files, logging, threads or sockets, and no source of
+# non-determinism (randomness, the wall clock). It knows nothing of the other modules.
+#
+# The allowlist (the exceptions, all imports ignored) is the application layer and its seams:
+#   service  the use cases: they log, and they hold the clock and the repositories by injection
+#   ports    the interfaces the service needs
+#   yaml_io  the YAML codec of the vocabulary
+# `datetime.now()` and friends cannot be banned by an import rule (the core needs the `datetime`
+# types); tests/architecture/test_classification_clock.py reads the source for those calls instead.
 [importlinter:contract:classification-core-pure]
 name = The classification core must be pure and deterministic
 type = forbidden
 source_modules =
-    social_tracker.classification.domain
-    social_tracker.classification.text
-    social_tracker.classification.topics
-    social_tracker.classification.rules
-    social_tracker.classification.similarity
+    social_tracker.classification.*
 forbidden_modules =
     social_tracker.persistence
     social_tracker.entrypoints
@@ -197,3 +201,10 @@ forbidden_modules =
     time
     secrets
     uuid
+    logging
+    threading
+ignore_imports =
+    social_tracker.classification.service -> **
+    social_tracker.classification.ports -> **
+    social_tracker.classification.yaml_io -> **
+unmatched_ignore_imports_alerting = none

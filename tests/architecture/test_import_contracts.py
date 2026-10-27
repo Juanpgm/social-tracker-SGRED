@@ -40,7 +40,7 @@ FORBIDDEN_EXTERNALS = [
     "glob",
 ]
 COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy", "service", "worker")
-CLASSIFICATION_CORE_MODULES = ("domain", "text", "topics", "rules", "similarity")
+CLASSIFICATION_CORE_MODULES = ("domain", "text", "links", "topics", "rules", "similarity")
 FORBIDDEN_LAYERS = ["adapters", "persistence", "entrypoints", "infrastructure", "storage"]
 
 
