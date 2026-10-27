@@ -145,6 +145,16 @@ _EVACUATION_PHRASES = (
     "evacuacion inmediata",
     "ordenan la evacuacion",
     "orden de evacuacion",
+    "habilitan albergues",
+    "albergues temporales",
+    "albergue temporal",
+    "cierre de vias",
+    "vias cerradas",
+    "cierran las vias",
+    "suspendidas las clases",
+    "suspenden las clases",
+    "clases suspendidas",
+    "suspension de clases",
 )
 _VICTIMS = "muertos?|fallecidos?|victimas?|cadaveres|heridos?|desaparecidos?"
 _STRUCTURES = "edificios?|casas?|puentes?|torres?|hospital(?:es)?|viviendas?"

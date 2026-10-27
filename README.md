@@ -473,7 +473,7 @@ ends up here). Two labels that are both at least 0.3 and closer than 0.15 are *c
 | `unverifiable_sources` | unintentional_rumor | 0.25 | "fuentes confiables", "dicen que", "me dijo un amigo" |
 | `official_attribution_unlinked` | deliberate_disinformation | 0.45 | an official body (the secretariat, UNGRD, ...) is named as the speaker, an order or alarm word ("evacuen", "salgan", "peligro") is present and there is no link to a configured official domain |
 | `official_link` | no_risk | 0.35 | a link to (or an item served from) a configured official domain |
-| `evacuation_claim` | unintentional_rumor | 0.20 | evacuation orders ("evacuen", "salgan de") |
+| `evacuation_claim` | unintentional_rumor | 0.20 | evacuation, shelter and closure claims ("evacuen", "salgan de", "habilitan albergues", "cierre de vías", "suspendidas las clases") |
 | `casualty_claim` | unintentional_rumor | 0.25 | casualty counts or collapse claims ("300 muertos", "el edificio colapsó") |
 | `recycled_marker` | recycled_content | 0.50 | "video de 2016", "video viejo", "hace años", "imágenes de archivo" |
 | `old_year_reference` | recycled_content | 0.25 | a year at least two years before the item's own |

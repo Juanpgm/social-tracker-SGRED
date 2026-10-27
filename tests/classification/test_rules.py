@@ -294,10 +294,27 @@ def test_an_item_served_from_an_official_domain_counts_as_linked():
 
 @pytest.mark.parametrize(
     "text",
-    ["Evacuen el edificio", "Ordenan evacuar el barrio", "Salgan de sus casas", "Refúgiense ya"],
+    [
+        "Evacuen el edificio",
+        "Ordenan evacuar el barrio",
+        "Salgan de sus casas",
+        "Refúgiense ya",
+        "Habilitan albergues temporales en el coliseo",  # shelter claims
+        "Cierre de vías en toda la ciudad",  # closure claims
+        "Quedan suspendidas las clases",
+        "Cierran las vías por el sismo",
+    ],
 )
-def test_evacuation_claims(text):
+def test_evacuation_shelter_and_closure_claims(text):
     assert "evacuation_claim" in names(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Las vías de acceso están despejadas", "Hay clases normales", "El albergue de animales abrió"],
+)
+def test_no_evacuation_claim_without_an_order_a_shelter_set_up_or_a_closure(text):
+    assert "evacuation_claim" not in names(text)
 
 
 @pytest.mark.parametrize(
