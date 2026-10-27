@@ -281,6 +281,17 @@ def sources_disable(source_id: SourceId, reason: Reason, actor: Actor = None) ->
     _set_enabled(source_id, False, reason, actor)
 
 
+@sources_app.command("reset")
+def sources_reset(source_id: SourceId, reason: Reason, actor: Actor = None) -> None:
+    """Put a FAILED source back to work (idle, failures forgotten, stale error cleared). A source
+    that is not failed is left as it is."""
+    with _guard(), closing(build_container()) as services:
+        change = services.control.reset_if_failed(
+            source_id, actor=resolve_actor(actor, os.environ), reason=reason
+        )
+    typer.echo(f"reset {source_id}" if change.changed else f"{source_id} is not failed")
+
+
 @sources_app.command("delete")
 def sources_delete(source_id: SourceId, reason: Reason, actor: Actor = None) -> None:
     """Delete a source and its runtime state. The audit events are kept."""

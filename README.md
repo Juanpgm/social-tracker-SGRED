@@ -81,6 +81,7 @@ Collecting content needs only the first two (see [Collecting content](#collectin
 | `sources add ID --type T --name N [--set KEY=VALUE]...` | Register a source (disabled). |
 | `sources edit ID --set KEY=VALUE...` | Change fields. `id`, `type` and `enabled` cannot be edited. |
 | `sources enable ID` / `sources disable ID` | Turn collection eligibility on or off. |
+| `sources reset ID` | Put a source whose collection `failed` back to work (idle, failures forgotten, stale error cleared). Any other source is left as it is. Also a **Reset** button in the web list. |
 | `sources delete ID` | Remove a source and its runtime state. Audit events are kept. |
 | `sources import FILE [--dry-run]` | Load sources from YAML, all or nothing. |
 | `sources export [-o, --output FILE] [--force]` | Write every source as YAML to stdout or a file. |

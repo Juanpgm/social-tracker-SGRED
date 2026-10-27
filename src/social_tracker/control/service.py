@@ -37,7 +37,7 @@ Per-source analysis flags are settings named by `source_analysis_key(source_id)`
 no environment override: the settings store is the single source of truth.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -401,7 +401,29 @@ class ControlService:
         return self.apply_collection_event(source_id, Event.RETRY, actor=actor, reason=reason)
 
     def reset_failed(self, source_id: str, *, actor: str, reason: str) -> CollectionChange:
-        return self.apply_collection_event(source_id, Event.RESET, actor=actor, reason=reason)
+        """Move a FAILED source back to idle (failures forgotten) and forget its stale error.
+        Any other state is `InvalidTransition`; see `reset_if_failed` for the idempotent form."""
+        with self._uow.transaction():
+            change = self.apply_collection_event(source_id, Event.RESET, actor=actor, reason=reason)
+            if change.changed:
+                self._forget_last_error(source_id)
+        return change
+
+    def reset_if_failed(self, source_id: str, *, actor: str, reason: str) -> CollectionChange:
+        """`reset_failed`, but a source that is not failed is left alone (`changed` is False):
+        what a CLI command or a double-clicked button needs, since the second request finds
+        the work already done. An unknown source is still `NotFoundError`."""
+        actor, reason = validate_actor(actor), validate_reason(reason)
+        with self._uow.transaction():
+            current = self.get_state(source_id)
+            if current.state is not CollectionState.FAILED:
+                return CollectionChange(current, changed=False)
+            return self.reset_failed(source_id, actor=actor, reason=reason)
+
+    def _forget_last_error(self, source_id: str) -> None:
+        status = self._control.get_fetch_status(source_id)
+        if status is not None and status.last_error is not None:
+            self._control.save_fetch_status(replace(status, last_error=None))
 
     # ---- alert threshold ----
 

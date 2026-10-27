@@ -22,6 +22,12 @@
 <input type="hidden" name="on" value="{{ flag }}">
 <button type="submit" aria-label="Turn analysis {{ "off" if row.overview.analysis else "on" }} for {{ s.name }}">Analysis {{ "off" if row.overview.analysis else "on" }}</button>
 </form>
+{% if row.overview.state.value == "failed" %}
+<form method="post" action="/sources/{{ s.id }}/reset" hx-post="/sources/{{ s.id }}/reset" hx-target="#row-{{ s.id }}" hx-swap="outerHTML" hx-disabled-elt="find button">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<button type="submit" aria-label="Reset {{ s.name }} after its failures">Reset</button>
+</form>
+{% endif %}
 <a href="/sources/{{ s.id }}/edit" aria-label="Edit {{ s.name }}">Edit</a>
 <a href="/sources/{{ s.id }}/delete" aria-label="Delete {{ s.name }}">Delete</a>
 </td>

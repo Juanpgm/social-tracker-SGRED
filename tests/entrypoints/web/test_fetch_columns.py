@@ -65,6 +65,14 @@ def test_an_error_text_is_escaped_never_interpreted_as_markup(web: Web):
 def test_the_row_fragment_after_a_toggle_shows_the_same_values(web: Web):
     web.seed("src_tog")
     record(web, FetchStatus("src_tog", FETCHED, "timeout"))
-    response = web.post_htmx("/sources/src_tog/enable")
+    response = web.post_htmx("/sources/src_tog/analysis", {"on": "1"})
     assert "2026-03-01 08:30:15 UTC" in response.text
     assert "timeout" in response.text
+
+
+def test_enabling_a_source_drops_its_stale_error_but_keeps_the_last_fetch(web: Web):
+    web.seed("src_tog")
+    record(web, FetchStatus("src_tog", FETCHED, "timeout"))
+    response = web.post_htmx("/sources/src_tog/enable")
+    assert "2026-03-01 08:30:15 UTC" in response.text
+    assert "timeout" not in response.text

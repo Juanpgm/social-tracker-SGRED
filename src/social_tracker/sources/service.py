@@ -25,7 +25,7 @@ had.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -170,6 +170,11 @@ class SourceRegistry:
         self._control.save_source_state(result.state)
         return {"state_from": current.state.value, "state_to": result.state.state.value}
 
+    def _forget_last_error(self, source_id: str) -> None:
+        status = self._control.get_fetch_status(source_id)
+        if status is not None and status.last_error is not None:
+            self._control.save_fetch_status(replace(status, last_error=None))
+
     def _require(self, source_id: str) -> Source:
         return self._sources.get(_check_id(source_id))
 
@@ -271,6 +276,8 @@ class SourceRegistry:
             updated = current.with_changes({"enabled": enabled, "updated_at": now})
             self._sources.update(updated)
             moved = self._sync_state(updated, now)
+            if enabled:  # a fresh start: what went wrong before is no longer news
+                self._forget_last_error(updated.id)
             kind = SOURCE_ENABLED if enabled else SOURCE_DISABLED
             self._audit(now, kind, updated.id, who, moved)
         return SourceChange(updated, changed=True)

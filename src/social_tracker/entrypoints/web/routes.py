@@ -83,6 +83,7 @@ NOTICES = {
     "analysis_off": "Analysis is now off.",
     "enabled": "Source enabled.",
     "disabled": "Source disabled.",
+    "reset": "Source reset: a failed source goes back to work, any other one was left as it is.",
     "added": "Source added. It stays disabled until you enable it.",
     "updated": "Source updated.",
     "unchanged": "Nothing to change: the source already has these values.",
@@ -198,6 +199,19 @@ def disable(request: Request, source_id: str, form: Form) -> Response:
         return f"{services.sources.get(source_id).name} is disabled."
 
     return _switch(request, source_id, form, act, "disabled")
+
+
+@router.post("/sources/{source_id}/reset")
+def reset(request: Request, source_id: str, form: Form) -> Response:
+    """Put a FAILED source back to work. Idempotent: a source that is not (or no longer) failed
+    is left alone, so a double click or a stale page is harmless."""
+
+    def act(services: Container, reason: str) -> str:
+        change = services.control.reset_if_failed(source_id, actor=ACTOR, reason=reason)
+        name = services.sources.get(source_id).name
+        return f"{name} was reset." if change.changed else f"{name} is not failed: left as it is."
+
+    return _switch(request, source_id, form, act, "reset")
 
 
 @router.post("/sources/{source_id}/analysis")
