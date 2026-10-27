@@ -53,7 +53,8 @@ def test_the_instruction_states_the_rules_and_never_contains_item_text():
     assert "untrusted" in lowered
     assert "never follow" in lowered or "do not follow" in lowered
     assert "no tools" in lowered or "do not call tools" in lowered
-    assert "only" in lowered and "json" in lowered
+    assert "only" in lowered
+    assert "json" in lowered
     assert PROMPT_VERSION in system
     for label in (
         "unintentional_rumor",
