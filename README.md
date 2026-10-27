@@ -79,7 +79,7 @@ source is enabled, and the source's own analysis switch is on. `status` counts t
 | `sources export [-o, --output FILE] [--force]` | Write every source as YAML to stdout or a file. |
 | `analysis on` / `analysis off` `[--source ID]` | Switch analysis for the system or for one source. |
 | `status` | Switches, alert threshold, source counts, collection states. |
-| `serve [--host H] [--port N] [--allow-non-loopback]` | Run the local web UI (see [Web UI](#web-ui)). |
+| `serve [--host H] [--port N] [--allow-non-loopback] [--allowed-host NAME]` | Run the local web UI (see [Web UI](#web-ui)). |
 
 `--set KEY=VALUE` takes a source field. The value is read as JSON when it parses (`600`, `true`,
 `null`, `["flood","fire"]`) and as plain text otherwise; wrap text that looks like JSON in quotes
@@ -214,17 +214,30 @@ guide per source type is at `/howto` and in [docs/howto.md](docs/howto.md). The 
 panel (GPU and model, stream lag) reads `n/a - no worker running` until the workers exist, and
 there is no alerts view yet.
 
+The list has a **Health** column read from the collection state: `ok` while a source is idle or
+collecting, `degraded` in backoff (with the failure count and the next retry time), `failed` once
+collection stopped (with the failure count), and `n/a` for a disabled source. The **Last fetch**
+and **Last error** columns are explicit `n/a` placeholders: nothing records a fetch or an error
+until the collection worker exists, so the UI shows no invented value (a known deviation from the
+full list of UI-2; the cells are filled when that worker lands).
+
 It is meant for one operator on this machine:
 
 - **Loopback only.** `serve` refuses any other `--host` unless you pass `--allow-non-loopback`,
   because the UI has no login: anyone who can connect can change your sources. Pages are only
-  served for `localhost`, `127.0.0.1`, `[::1]` and the host you bind (the `Host` header is
-  checked, which defeats DNS rebinding), so binding `0.0.0.0` is reachable only through those
-  names; bind a specific address to use it from elsewhere.
+  served for `localhost`, `127.0.0.1`, `[::1]` and the host you bind. The `Host` header is parsed
+  strictly (`name[:port]` or `[ipv6][:port]`, nothing else) and compared in canonical form, which
+  defeats DNS rebinding; a wildcard bind (`0.0.0.0`, `::`) adds no name of its own, so name the
+  ones clients use with `--allowed-host NAME` (repeatable).
+- **Cleartext.** The UI speaks plain HTTP: beyond loopback its traffic is not encrypted and the
+  session cookie has no `Secure` flag. Use `--allow-non-loopback` only on a network you trust, or
+  put a TLS proxy you control in front of it.
 - **Protected requests.** Every change is a POST that needs a CSRF token tied to your browser
-  session (a `SameSite=Strict` cookie), bodies are limited to 16 KiB, and responses carry a strict
-  `Content-Security-Policy`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and
-  `X-Content-Type-Options: nosniff`. All text is escaped; a name such as `<script>` is shown as
+  session (a `SameSite=Strict` cookie), bodies are limited to 16 KiB and must arrive within 10
+  seconds (a slower client gets a 408), and responses carry a strict `Content-Security-Policy`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`,
+  a `Permissions-Policy` that denies every browser feature, and `Cross-Origin-Opener-Policy` and
+  `Cross-Origin-Resource-Policy` set to `same-origin`. All text is escaped; a name such as `<script>` is shown as
   text.
 - **Offline and read-only toward the world.** htmx is vendored under the package's `static/`
   directory (no CDN), the UI makes no outbound request, and it has no publish, share, post or
@@ -234,7 +247,16 @@ It is meant for one operator on this machine:
 - **Audited.** Each change is attributed to the actor `web:local` with the reason you give (it
   defaults to `via web UI`; the row buttons use that default).
 - **Failures stay readable.** A busy database or a source deleted in another tab shows a short
-  message, never a traceback; a switch that fails shows the row as the server holds it.
+  message, never a traceback; a switch that fails shows the row as the server holds it, and an
+  add, edit or delete that hits a busy database comes back with what you typed (an address is
+  echoed only when it carries no login or query string; a secret reference never) and a message to
+  try again. Every failure of an in-page (htmx) request is a small fragment announced in the
+  status region, never a page pasted into the table; a refused token also reloads the page.
+- **Safe to repeat.** Submitting the add form twice creates one source (the repeat with identical
+  values is a success, a different one with the same id is a conflict). The edit form carries the
+  version it was opened at: saving after someone else changed the source shows the current values
+  with a message instead of overwriting them. The address of a stored feed or stream is shown with
+  its query string masked (`?***`); leave it as it is to keep the stored value.
 
 Pages work without JavaScript; with it, the row buttons update in place.
 
@@ -260,6 +282,17 @@ uv run ruff format --check
 uv run pytest -q
 uv run lint-imports
 ```
+
+A few checks drive the UI in a real Chromium (double click, a server restart under an open page,
+a busy database, the status announcements). They are opt-in and excluded from the default run:
+
+```bash
+set PLAYWRIGHT_BROWSERS_PATH=D:\social_tracker_models\playwright   # any folder you like
+uv run playwright install chromium
+uv run pytest -m browser
+```
+
+Without a browser installed they are skipped.
 
 The architecture is hexagonal. Domain modules are pure, services depend on ports only, and
 `social_tracker.bootstrap` is the composition root that wires the SQLite adapters into the

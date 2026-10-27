@@ -24,12 +24,3 @@ document.addEventListener("submit", function (event) {
     });
   }, 0);
 });
-
-// Coming back through the history restores the page as it was left: give the buttons back.
-window.addEventListener("pageshow", function (event) {
-  if (event.persisted) {
-    document.querySelectorAll("form[data-once] button[type='submit']").forEach(function (button) {
-      button.disabled = false;
-    });
-  }
-});
