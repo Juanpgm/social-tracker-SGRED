@@ -10,12 +10,18 @@ Rules enforced here (the repositories only store):
 - Error messages never echo user-supplied names or keys; conflicts are described by field.
 
 Event kinds are stable identifiers (see the `SOURCE_*` constants). Event details are compact
-JSON objects with known keys only; they never contain URLs, secret references or free text.
+JSON objects with known keys only; they never contain URLs or secret references. The only free
+text in them is the validated `actor` and `reason` of the operator.
 
-Deleting a source removes its runtime state row and switches its per-source analysis flag off,
-but the audit events stay (SR-9). Deleting a source that is currently `collecting` is allowed:
-the running collection is not interrupted by this service, and the detail of the
-`source_deleted` event records the state it had.
+`Source.enabled` is the operator's intent and the ONLY way to enable or disable a source: the
+collection state row is kept in step inside the same transaction (`_sync_state`), so
+`source.enabled <=> collection state is not disabled` (a missing row means disabled).
+
+Deleting a source removes its runtime state row and its per-source analysis setting row (the
+previous values are recorded in the `source_deleted` event), but the audit events stay (SR-9).
+Deleting a source that is currently `collecting` is allowed: the running collection is not
+interrupted by this service, and the detail of the `source_deleted` event records the state it
+had.
 """
 
 import json

@@ -7,6 +7,11 @@ Design:
 - Writes go through `transaction()` (BEGIN IMMEDIATE ... COMMIT/ROLLBACK). Reads use `query()`.
   A nested `transaction()` on the owning thread joins the outer one through a SAVEPOINT, so the
   application layer can make several repository calls atomic.
+- Single-writer caveat (slices 2 and 3): `query()` and `transaction()` take the same re-entrant
+  lock, so a long write transaction blocks the reads of every other thread in the process until
+  it commits. WAL would allow concurrent readers, so a later slice should give reads their own
+  connection. A lock timeout (busy) is still reported as the generic `StorageError`; mapping it
+  to a distinct, retryable error is future work.
 - Every `sqlite3.Error` is translated: unique violations become `ConflictError`, everything
   else `StorageError`. Messages are fixed strings plus SQLite's constant error name; they never
   carry SQL text, parameters, paths or file contents.

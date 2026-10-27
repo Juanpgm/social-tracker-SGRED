@@ -44,6 +44,9 @@ forbidden_modules =
 # Services (application layer) depend on ports only. They receive repositories, the clock and a
 # UnitOfWork by constructor injection and must never import the storage adapters, SQLite or the
 # entrypoints. `yaml` stays allowed for the codec, which is I/O-format code and not a domain module.
+# Planned for unit 1e (the entrypoints package does not exist yet): entrypoints (CLI, API) must
+# not import `social_tracker.persistence`; only the composition root that wires the adapters
+# into the services may. The contract is added together with the package.
 [importlinter:contract:services-use-ports-only]
 name = Services must not depend on persistence, SQLite or entrypoints
 type = forbidden

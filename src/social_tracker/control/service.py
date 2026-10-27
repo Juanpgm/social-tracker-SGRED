@@ -22,6 +22,12 @@ of every source and the alert threshold. Rules enforced here (the repositories o
   no state row is `disabled`.
 - Nothing here ever publishes or sends anything outside the system (G-1).
 
+Worker eligibility (the rule slice 3's collection worker must apply): a source may be picked up
+only when `source.enabled` AND its state is `idle`, or `backoff` once `next_run_at` has elapsed
+(`retry_collection` then moves it back to idle). Disabled, collecting and failed sources are
+never eligible. This service enforces the first half by refusing worker transitions on a
+disabled source; choosing WHICH eligible source to run is the worker's job.
+
 Event kinds are stable identifiers (`EVENT_*` and `COLLECTION_EVENT_KINDS`). Details are compact
 JSON objects with known keys only; `actor` and `reason` are validated free text and never echo
 into error messages.

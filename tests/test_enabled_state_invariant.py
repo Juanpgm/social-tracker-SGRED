@@ -11,7 +11,7 @@ from functools import partial
 
 import pytest
 
-from social_tracker.control.domain import CollectionState
+from social_tracker.control.domain import CollectionState, source_analysis_key
 from social_tracker.persistence.db import Database
 from social_tracker.shared.errors import InvalidTransition
 from social_tracker.sources.domain import parse_source
@@ -24,6 +24,7 @@ from tests.control.service_contract import (
     assert_chains_are_consistent,
     assert_enabled_matches_state,
     assert_log_reproduces_state,
+    replay,
 )
 from tests.sources.factories import payload
 from tests.sources.registry_contract import data, race
@@ -98,6 +99,27 @@ def test_importing_an_entry_without_enabled_stops_a_running_source(stack: Stack)
     stack.registry.import_sources(hand_written, **WHO)
     assert stack.env.sources.get("src_one").enabled is False
     assert stack.state() is CollectionState.DISABLED
+    stack.check()
+
+
+def test_replaying_the_log_across_a_delete_drops_the_state_and_flag_the_delete_recorded(
+    stack: Stack,
+):
+    # The exact rule: replaying reproduces the state of every source that EXISTS. A delete removes
+    # the state row and the flag row without a collection event, so `source_deleted` carries the
+    # previous state and analysis value and the replay drops both.
+    stack.registry.add(data(enabled=True), **WHO)
+    stack.service.start_collection("src_one", **WHO)
+    stack.service.set_source_analysis("src_one", True, **WHO)
+    assert replay(stack.env).states["src_one"][0] == "collecting"
+    stack.registry.delete("src_one", **WHO)
+    detail = stack.env.events()[-1][2]
+    assert (detail["state"], detail["analysis"]) == ("collecting", "true")
+    replayed = replay(stack.env)
+    assert "src_one" not in replayed.states
+    assert "src_one" not in replayed.source_flags
+    assert stack.env.control.get_source_state("src_one") is None
+    assert stack.env.control.get_setting(source_analysis_key("src_one")) is None
     stack.check()
 
 
