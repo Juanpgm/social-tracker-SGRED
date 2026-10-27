@@ -268,7 +268,11 @@ def test_the_random_walk_really_reaches_the_paths_the_invariant_is_about():
     run_state_machine_as_test(
         InMemoryMachine,
         settings=settings(
-            max_examples=120,
+            # Derandomized, yet the walk still shifts with what the process has imported (heap
+            # layout changes hypothesis' internal ordering): 120 examples reached the rare
+            # "disabled while backoff" path in one process and missed it in another. 250 reach it
+            # in every layout tried.
+            max_examples=250,
             stateful_step_count=40,
             deadline=None,
             derandomize=True,  # the same walk every time, so this guard can never flake
