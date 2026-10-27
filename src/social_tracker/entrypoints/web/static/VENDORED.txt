@@ -1,3 +1,10 @@
 htmx.min.js is htmx.org 2.0.4 (0BSD licence), vendored unchanged from
 https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js so the UI works offline.
 sha256: e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447
+
+Verification (2026-10-27): the same sha256 was computed for dist/htmx.min.js
+- inside the official npm package (`npm pack htmx.org@2.0.4`; the registry lists the tarball
+  as sha1 74fce66b177eb59c6d251ecf1052a2478743bec9),
+- as served by unpkg.com and by cdn.jsdelivr.net.
+To check again: `npm pack htmx.org@2.0.4`, extract it and compare the sha256 of
+package/dist/htmx.min.js with the value above and with this file's htmx.min.js.

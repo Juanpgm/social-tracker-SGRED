@@ -62,6 +62,7 @@ _IMMUTABLE_FIELDS = ("id", "type", "enabled", "created_at", "updated_at")
 _VIA_IMPORT = {"via": "import"}
 _ID_CONFLICT = "a source with this id already exists"
 _NAME_CONFLICT = "a source with this name already exists"
+STALE_SOURCE = "the source was changed after the version this edit was based on"
 
 
 @dataclass(frozen=True)
@@ -215,9 +216,20 @@ class SourceRegistry:
         return source
 
     def edit(
-        self, source_id: str, changes: Mapping[str, Any], *, actor: str, reason: str
+        self,
+        source_id: str,
+        changes: Mapping[str, Any],
+        *,
+        actor: str,
+        reason: str,
+        expected_updated_at: datetime | None = None,
     ) -> SourceChange:
-        """Apply field changes. `id`, `type`, `enabled` and the timestamps cannot be edited."""
+        """Apply field changes. `id`, `type`, `enabled` and the timestamps cannot be edited.
+
+        With `expected_updated_at` the edit applies only if the source still carries that
+        `updated_at`, checked inside the same transaction as the write: an editor working from a
+        stale copy gets a `ConflictError` (`STALE_SOURCE`) and nothing is written.
+        """
         who = _who(actor, reason)
         if not isinstance(changes, Mapping) or not all(isinstance(k, str) for k in changes):
             raise ValidationError("changes must be a mapping of field names to values")
@@ -227,6 +239,8 @@ class SourceRegistry:
         with self._uow.transaction():
             now = self._clock.now()
             current = self._require(source_id)
+            if expected_updated_at is not None and current.updated_at != expected_updated_at:
+                raise ConflictError(STALE_SOURCE)
             # Unknown keys (`self`, another type's field...) are rejected by the model itself
             # (extra="forbid") with a fixed message that never echoes the key.
             candidate = current.with_changes(changes)

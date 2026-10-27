@@ -1,6 +1,7 @@
 """One user journey through the whole UI, following redirects like a browser would."""
 
 import json
+import re
 from contextlib import closing
 
 from tests.entrypoints.web.conftest import TOKEN_FIELD, Web, row_of, visible_text
@@ -39,7 +40,10 @@ def test_add_list_edit_disable_enable_global_toggle_delete(web: Web):
     # edit
     page = web.client.get("/sources/city_news/edit").text
     assert 'name="name" value="City News"' in page
-    edited = submit(web, "/sources/city_news/edit", {**form, "name": "City News Daily"})
+    version = re.search(r'name="updated_at" value="([^"]+)"', page)
+    assert version  # the page carries the version it was opened at
+    changes = {**form, "name": "City News Daily", "updated_at": version.group(1)}
+    edited = submit(web, "/sources/city_news/edit", changes)
     assert "Source updated" in visible_text(edited.text)
     assert "City News Daily" in visible_text(row_of(edited.text, "city_news"))
 

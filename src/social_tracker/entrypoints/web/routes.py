@@ -6,7 +6,7 @@ or stale submit is an idempotent no-op and the response always shows the state t
 """
 
 from collections.abc import Callable
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -17,19 +17,25 @@ from social_tracker.entrypoints.web.formdata import read_form
 from social_tracker.entrypoints.web.forms import (
     ACTOR,
     CHECKBOXES,
+    DEFAULT_REASON,
     INITIAL_CHECKED,
     INITIAL_VALUES,
     NO_ERRORS,
+    QUERY_MASK,
     TYPE_LABELS,
+    VERSION_FIELD,
     FormErrors,
     build_data,
     check_reason,
     fields_for,
+    keep_masked_urls,
     map_conflict,
     map_validation,
+    parse_version,
     reason_of,
     values_from_source,
     view_fields,
+    without_unvalidated_secrets,
 )
 from social_tracker.entrypoints.web.pages import (
     BUSY_TEXT,
@@ -53,12 +59,18 @@ from social_tracker.sources.domain import (
     NEWS_RSS_MIN_POLL_S,
     SOURCE_TYPES,
     Source,
+    parse_source,
 )
+from social_tracker.sources.service import STALE_SOURCE
 
 router = APIRouter(dependencies=[Depends(read_form)])
 Form = Annotated[dict[str, str], Depends(read_form)]
 
 GONE_TEXT = "That source no longer exists. The list below is up to date."
+STALE_TEXT = (
+    "This source was changed by someone else since you opened it. The form now shows the "
+    "current values: check them and save again."
+)
 NOTICES = {
     "not_found": GONE_TEXT,
     "busy": BUSY_TEXT,
@@ -224,6 +236,7 @@ def _form_page(
     checked: dict[str, bool],
     errors: FormErrors = NO_ERRORS,
     status: int = 200,
+    version: str = "",
 ) -> HTMLResponse:
     editing = source_id is not None
     return render(
@@ -238,6 +251,8 @@ def _form_page(
         form_errors=errors.form,
         editing=editing,
         has_reference=editing and source_type == "instagram",
+        version=version,
+        mask_suffix=f"?{QUERY_MASK}",
     )
 
 
@@ -248,7 +263,8 @@ def _failure(
     form: dict[str, str],
     errors: FormErrors,
     *,
-    conflict: bool,
+    status: int,
+    version: str = "",
 ) -> HTMLResponse:
     return _form_page(
         request,
@@ -257,7 +273,24 @@ def _failure(
         values=form,
         checked={name: name in form for name in CHECKBOXES},
         errors=errors,
-        status=409 if conflict else 422,
+        status=status,
+        version=version,
+    )
+
+
+def _busy_failure(
+    request: Request, source_type: str, source_id: str | None, form: dict[str, str], version: str
+) -> HTMLResponse:
+    """The database was locked: the form comes back as typed, minus anything never validated
+    that could be a credential, with a message that asks to try again."""
+    return _failure(
+        request,
+        source_type,
+        source_id,
+        without_unvalidated_secrets(source_type, form),
+        FormErrors({}, [BUSY_TEXT]),
+        status=503,
+        version=version,
     )
 
 
@@ -274,56 +307,132 @@ def new_form(request: Request, source_type: str) -> HTMLResponse:
     )
 
 
+def _is_repeat(services: Container, data: dict[str, Any]) -> bool:
+    """True when the source `data` describes already exists exactly as described (enabled flag and
+    timestamps aside): the add form was submitted twice, the second submit has nothing to add."""
+    try:
+        existing = services.sources.get(str(data.get("id")))
+        candidate = parse_source(
+            {
+                **data,
+                "enabled": existing.enabled,
+                "created_at": existing.created_at,
+                "updated_at": existing.updated_at,
+            }
+        )
+    except (NotFoundError, ValidationError):
+        return False
+    return candidate == existing
+
+
 @router.post("/sources/new/{source_type}")
 def create_source(request: Request, source_type: str, form: Form) -> Response:
     _type_or_404(source_type)
     ctx: WebContext = request.app.state.ctx
-    errors, conflict = check_reason(form), False
+    errors, status = check_reason(form), 422
     if not errors:
         try:
             with ctx.services() as services:
                 data = build_data(source_type, form, editing=False)
-                services.sources.add(data, actor=ACTOR, reason=reason_of(form))
+                try:
+                    services.sources.add(data, actor=ACTOR, reason=reason_of(form))
+                except ConflictError:
+                    if not _is_repeat(services, data):
+                        raise
             return _redirect("added")
         except ValidationError as exc:
             errors = map_validation(exc, _names(source_type, editing=False))
         except ConflictError as exc:
-            errors, conflict = map_conflict(exc), True
-    return _failure(request, source_type, None, form, errors, conflict=conflict)
+            errors, status = map_conflict(exc), 409
+        except StorageError:
+            return _busy_failure(request, source_type, None, form, "")
+    return _failure(request, source_type, None, form, errors, status=status)
 
 
 @router.get("/sources/{source_id}/edit", response_class=HTMLResponse)
 def edit_form(request: Request, source_id: str) -> HTMLResponse:
     source = _load(request.app.state.ctx, source_id)
     values, checked = values_from_source(source)
-    return _form_page(request, source.type, source_id=source.id, values=values, checked=checked)
+    return _form_page(
+        request,
+        source.type,
+        source_id=source.id,
+        values=values,
+        checked=checked,
+        version=source.updated_at.isoformat(),
+    )
+
+
+def _stale_form(request: Request, ctx: WebContext, source_id: str) -> HTMLResponse:
+    """The edit form as the source is stored now, with a message that someone else changed it."""
+    source = _load(ctx, source_id)
+    values, checked = values_from_source(source)
+    return _form_page(
+        request,
+        source.type,
+        source_id=source.id,
+        values=values,
+        checked=checked,
+        errors=FormErrors({}, [STALE_TEXT]),
+        status=409,
+        version=source.updated_at.isoformat(),
+    )
 
 
 @router.post("/sources/{source_id}/edit")
 def update_source(request: Request, source_id: str, form: Form) -> Response:
     ctx: WebContext = request.app.state.ctx
     source = _load(ctx, source_id)
-    errors, conflict = check_reason(form), False
+    expected = parse_version(form.get(VERSION_FIELD))
+    if expected is None:  # no version, or one that cannot be compared: treat it as stale
+        return _stale_form(request, ctx, source_id)
+    effective = keep_masked_urls(source, form)  # what is saved; `form` is what is shown back
+    version = expected.isoformat()
+    errors, status = check_reason(form), 422
     if not errors:
         try:
             with ctx.services() as services:
-                changes = build_data(source.type, form, editing=True)
+                changes = build_data(source.type, effective, editing=True)
                 change = services.sources.edit(
-                    source.id, changes, actor=ACTOR, reason=reason_of(form)
+                    source.id,
+                    changes,
+                    actor=ACTOR,
+                    reason=reason_of(form),
+                    expected_updated_at=expected,
                 )
             return _redirect("updated" if change.changed else "unchanged")
         except ValidationError as exc:
             errors = map_validation(exc, _names(source.type, editing=True))
         except ConflictError as exc:
-            errors, conflict = map_conflict(exc), True
-    return _failure(request, source.type, source.id, form, errors, conflict=conflict)
+            if exc.message == STALE_SOURCE:
+                return _stale_form(request, ctx, source_id)
+            errors, status = map_conflict(exc), 409
+        except StorageError:
+            return _busy_failure(request, source.type, source.id, form, version)
+    return _failure(request, source.type, source.id, form, errors, status=status, version=version)
 
 
 # ---- delete ----
 
 
-def _confirm_page(request: Request, source: Source, error: str = "", status: int = 200) -> Response:
-    return render(request, "confirm_delete.html", status=status, source=source, error=error)
+def _confirm_page(
+    request: Request,
+    source: Source,
+    *,
+    error: str = "",
+    busy: str = "",
+    reason: str = DEFAULT_REASON,
+    status: int = 200,
+) -> Response:
+    return render(
+        request,
+        "confirm_delete.html",
+        status=status,
+        source=source,
+        error=error,
+        busy=busy,
+        reason=reason,
+    )
 
 
 @router.get("/sources/{source_id}/delete", response_class=HTMLResponse)
@@ -336,14 +445,24 @@ def delete_source(request: Request, source_id: str, form: Form) -> Response:
     ctx: WebContext = request.app.state.ctx
     if not is_valid_slug(source_id):
         return _redirect("not_found")
+    reason = reason_of(form)
     errors = check_reason(form)
     try:
         if errors:
-            return _confirm_page(request, _load(ctx, source_id), errors.fields["reason"], 422)
+            source = _load(ctx, source_id)
+            return _confirm_page(
+                request, source, error=errors.fields["reason"], reason=reason, status=422
+            )
         with ctx.services() as services:
-            services.sources.delete(source_id, actor=ACTOR, reason=reason_of(form))
+            services.sources.delete(source_id, actor=ACTOR, reason=reason)
     except NotFoundError:
         return _redirect("not_found")
+    except StorageError:
+        try:
+            source = _load(ctx, source_id)
+        except NotFoundError:
+            return _redirect("not_found")
+        return _confirm_page(request, source, busy=BUSY_TEXT, reason=reason, status=503)
     return _redirect("deleted")
 
 

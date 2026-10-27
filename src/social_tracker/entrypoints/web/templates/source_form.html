@@ -12,8 +12,9 @@
 <ul>{% for message in form_errors %}<li>{{ message }}</li>{% endfor %}</ul>
 </div>
 {% endif %}
-<form method="post" action="{{ action }}">
+<form method="post" action="{{ action }}" data-once>
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+{% if editing %}<input type="hidden" name="updated_at" value="{{ version }}">{% endif %}
 {% for f in fields %}
 {% set name = f.spec.name %}
 <div class="field">
@@ -29,6 +30,7 @@
 {% endif %}
 {% endif %}
 {% if f.spec.hint %}<p class="hint">{{ f.spec.hint }}{% if name == "secret_ref" and has_reference %} A reference is set; leave this blank to keep it.{% endif %}</p>{% endif %}
+{% if f.value.endswith(mask_suffix) %}<p class="hint">The stored address has a query string that is not shown. Leave it as it is to keep it.</p>{% endif %}
 {% if f.error %}<p class="error" id="err-{{ name }}" role="alert">{{ f.error }}</p>{% endif %}
 </div>
 {% endfor %}

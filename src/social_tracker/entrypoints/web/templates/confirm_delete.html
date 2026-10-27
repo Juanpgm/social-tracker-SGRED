@@ -3,11 +3,12 @@
 {% block content %}
 <h1>Delete this source?</h1>
 <p>You are about to delete <strong>{{ source.name }}</strong> ({{ source.id }}, {{ source.type }}). The source and its collection state are removed and nothing more is collected from it. Its alerts and derived data are kept, and the audit log keeps every change. This cannot be undone.</p>
-<form method="post" action="/sources/{{ source.id }}/delete">
+{% if busy %}<p class="error" role="alert">{{ busy }}</p>{% endif %}
+<form method="post" action="/sources/{{ source.id }}/delete" data-once>
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <div class="field">
 <label for="f-reason">Reason (required)</label>
-<input type="text" id="f-reason" name="reason" value="via web UI" autocomplete="off"{% if error %} aria-invalid="true" aria-describedby="err-reason"{% endif %}>
+<input type="text" id="f-reason" name="reason" value="{{ reason }}" autocomplete="off"{% if error %} aria-invalid="true" aria-describedby="err-reason"{% endif %}>
 <p class="hint">Kept in the audit log.</p>
 {% if error %}<p class="error" id="err-reason" role="alert">The reason is not valid: {{ error }}</p>{% endif %}
 </div>

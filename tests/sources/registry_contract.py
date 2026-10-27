@@ -39,6 +39,7 @@ from social_tracker.sources.service import (
     SOURCE_EDITED,
     SOURCE_ENABLED,
     SOURCES_IMPORTED,
+    STALE_SOURCE,
     ImportConflictError,
     ImportReport,
     SourceChange,
@@ -283,6 +284,40 @@ class RegistryContract:
         assert result.source == added
         assert env.sources.get("src_one").updated_at == START
         assert kinds(env) == [SOURCE_ADDED]
+
+    def test_edit_with_the_expected_version_applies_and_with_a_stale_one_changes_nothing(
+        self, env: Env
+    ):
+        added = env.registry.add(data(), **WHO)
+        env.clock.advance(HOUR)
+        env.registry.edit("src_one", {"name": "First"}, expected_updated_at=START, **WHO)
+        env.clock.advance(HOUR)
+        before = events(env)
+        with pytest.raises(ConflictError) as raised:
+            env.registry.edit("src_one", {"name": "Second"}, expected_updated_at=START, **WHO)
+        assert raised.value.message == STALE_SOURCE
+        assert env.sources.get("src_one").name == "First"
+        assert env.sources.get("src_one").updated_at == START + HOUR
+        assert events(env) == before
+        assert added.updated_at == START
+
+    def test_a_stale_version_is_refused_before_the_new_values_are_validated(self, env: Env):
+        env.registry.add(data(), **WHO)
+        env.clock.advance(HOUR)
+        env.registry.edit("src_one", {"name": "First"}, **WHO)
+        with pytest.raises(ConflictError):
+            env.registry.edit("src_one", {"credibility": 99}, expected_updated_at=START, **WHO)
+
+    def test_a_stale_version_on_a_noop_edit_is_still_refused(self, env: Env):
+        env.registry.add(data(), **WHO)
+        env.clock.advance(HOUR)
+        env.registry.edit("src_one", {"name": "First"}, **WHO)
+        with pytest.raises(ConflictError):
+            env.registry.edit("src_one", {"name": "First"}, expected_updated_at=START, **WHO)
+
+    def test_the_expected_version_of_an_unknown_source_is_not_found(self, env: Env):
+        with pytest.raises(NotFoundError):
+            env.registry.edit("src_gone", {"name": "x"}, expected_updated_at=START, **WHO)
 
     def test_edit_with_no_changes_is_a_noop(self, env: Env):
         env.registry.add(data(), **WHO)

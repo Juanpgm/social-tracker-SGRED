@@ -1,9 +1,10 @@
 """Editing a source: id and type are fixed, secrets are never shown, blanks keep or clear."""
 
 import json
-from contextlib import closing
+from contextlib import closing, suppress
 from typing import Any
 
+from social_tracker.shared.errors import NotFoundError, ValidationError
 from tests.entrypoints.web.conftest import Web, visible_text
 from tests.entrypoints.web.test_forms_add import CANARY, error_of
 
@@ -13,6 +14,15 @@ EDIT = "/sources/src_one/edit"
 def current(web: Web, source_id: str = "src_one") -> Any:
     with closing(web.services()) as services:
         return services.sources.get(source_id)
+
+
+def edit(web: Web, form: dict[str, str], path: str = EDIT) -> Any:
+    """Post an edit the way the page does: with the version the form was opened at."""
+    version: dict[str, str] = {}
+    source_id = path.split("/")[2]
+    with closing(web.services()) as services, suppress(NotFoundError, ValidationError):
+        version = {"updated_at": services.sources.get(source_id).updated_at.isoformat()}
+    return web.post(path, {**version, **form})
 
 
 def news_form(**overrides: str) -> dict[str, str]:
@@ -51,7 +61,7 @@ def test_the_stored_secret_reference_is_never_shown_in_the_edit_form(web: Web):
 
 def test_editing_saves_the_changes_and_audits_them(web: Web):
     web.seed(name="Old")
-    response = web.post(EDIT, news_form(reason="renamed after merger"))
+    response = edit(web, news_form(reason="renamed after merger"))
     assert response.status_code == 303
     assert response.headers["location"] == "/?notice=updated"
     source = current(web)
@@ -64,7 +74,7 @@ def test_editing_saves_the_changes_and_audits_them(web: Web):
 
 def test_saving_without_changes_is_a_no_op_that_says_so(web: Web):
     web.seed(name="Renamed Feed", credibility=4)
-    response = web.post(EDIT, news_form())
+    response = edit(web, news_form())
     assert response.status_code == 303
     assert response.headers["location"] == "/?notice=unchanged"
     assert web.events("source_edited") == []
@@ -73,7 +83,7 @@ def test_saving_without_changes_is_a_no_op_that_says_so(web: Web):
 def test_the_type_the_id_and_the_enabled_flag_cannot_be_changed_by_a_forged_post(web: Web):
     web.seed()
     forged = news_form(type="instagram", id="other_id", enabled="true", mode="streaming")
-    assert web.post(EDIT, forged).status_code == 303
+    assert edit(web, forged).status_code == 303
     source = current(web)
     assert (source.type, source.id, source.enabled, source.mode) == (
         "news_rss",
@@ -85,7 +95,7 @@ def test_the_type_the_id_and_the_enabled_flag_cannot_be_changed_by_a_forged_post
 
 def test_an_invalid_edit_shows_the_errors_and_keeps_the_stored_source(web: Web):
     web.seed(name="Keep Me")
-    response = web.post(EDIT, news_form(credibility="7", feed_url="ftp://example.org"))
+    response = edit(web, news_form(credibility="7", feed_url="ftp://example.org"))
     assert response.status_code == 422
     assert error_of(response.text, "credibility")
     assert error_of(response.text, "feed_url")
@@ -96,10 +106,10 @@ def test_an_invalid_edit_shows_the_errors_and_keeps_the_stored_source(web: Web):
 def test_renaming_to_another_sources_name_is_a_conflict_but_its_own_name_is_fine(web: Web):
     web.seed("src_one", name="One")
     web.seed("src_two", name="Two")
-    clash = web.post(EDIT, news_form(name="  two "))
+    clash = edit(web, news_form(name="  two "))
     assert clash.status_code == 409
     assert "already exists" in error_of(clash.text, "name")
-    own = web.post(EDIT, news_form(name="ONE", credibility="3"))
+    own = edit(web, news_form(name="ONE", credibility="3"))
     assert own.status_code == 303
     assert current(web).name == "ONE"
 
@@ -107,7 +117,7 @@ def test_renaming_to_another_sources_name_is_a_conflict_but_its_own_name_is_fine
 def test_an_edit_of_an_unknown_or_malformed_id_is_a_not_found_page(web: Web):
     for path in ("/sources/src_gone/edit", "/sources/UPPER/edit", "/sources/x/edit"):
         assert web.client.get(path).status_code == 404, path
-        response = web.post(path, news_form())
+        response = edit(web, news_form(), path)
         assert response.status_code == 404, path
         assert "does not exist" in visible_text(response.text)
 
@@ -117,7 +127,7 @@ def test_a_source_deleted_in_another_tab_while_editing_is_a_not_found_page(web: 
     assert web.client.get(EDIT).status_code == 200
     with closing(web.services()) as services:
         services.sources.delete("src_one", actor="other-tab", reason="deleted elsewhere")
-    response = web.post(EDIT, news_form())
+    response = edit(web, news_form())
     assert response.status_code == 404
     assert "does not exist" in visible_text(response.text)
 
@@ -125,9 +135,9 @@ def test_a_source_deleted_in_another_tab_while_editing_is_a_not_found_page(web: 
 def test_a_blank_reference_keeps_the_stored_one_and_a_new_one_replaces_it(web: Web):
     web.seed(type_="instagram")
     base = {"name": "Insta", "credibility": "3", "handle": "some.handle", "poll_interval_s": ""}
-    assert web.post(EDIT, {**base, "secret_ref": "", "reason": "keep"}).status_code == 303
+    assert edit(web, {**base, "secret_ref": "", "reason": "keep"}).status_code == 303
     assert current(web).secret_ref == "env:ig_main"
-    changed = web.post(EDIT, {**base, "secret_ref": "env:IG_NEW"})
+    changed = edit(web, {**base, "secret_ref": "env:IG_NEW"})
     assert changed.status_code == 303
     assert current(web).secret_ref == "env:IG_NEW"
     kept, replaced = (json.loads(e.detail) for e in web.events("source_edited"))
@@ -139,7 +149,7 @@ def test_a_blank_reference_keeps_the_stored_one_and_a_new_one_replaces_it(web: W
 def test_a_secret_pasted_as_a_new_reference_is_rejected_and_not_echoed(web: Web):
     web.seed(type_="instagram")
     form = {"name": "Insta", "credibility": "3", "handle": "some.handle", "secret_ref": CANARY}
-    response = web.post(EDIT, form)
+    response = edit(web, form)
     assert response.status_code == 422
     assert error_of(response.text, "secret_ref")
     assert CANARY not in response.text
@@ -148,7 +158,7 @@ def test_a_secret_pasted_as_a_new_reference_is_rejected_and_not_echoed(web: Web)
 
 def test_blank_keywords_clear_them_and_a_blank_interval_keeps_the_stored_one(web: Web):
     web.seed(keywords=["flood"], poll_interval_s=300)
-    assert web.post(EDIT, news_form(poll_interval_s="", name="Same Name")).status_code == 303
+    assert edit(web, news_form(poll_interval_s="", name="Same Name")).status_code == 303
     source = current(web)
     assert source.keywords is None
     assert source.poll_interval_s == 300
@@ -157,7 +167,7 @@ def test_blank_keywords_clear_them_and_a_blank_interval_keeps_the_stored_one(web
 def test_a_recorded_audio_source_can_move_from_a_feed_to_a_directory(web: Web):
     web.seed(type_="recorded_audio")
     form = {"name": "Audio", "credibility": "3", "feed_url": "", "watch_dir": "/srv/in"}
-    assert web.post(EDIT, form).status_code == 303
+    assert edit(web, form).status_code == 303
     source = current(web)
     assert (source.feed_url, source.watch_dir) == (None, "/srv/in")
 
@@ -165,7 +175,7 @@ def test_a_recorded_audio_source_can_move_from_a_feed_to_a_directory(web: Web):
 def test_unchecking_a_box_on_edit_turns_the_option_off(web: Web):
     web.seed(type_="instagram")
     form = {"name": "Insta", "credibility": "3", "handle": "some.handle", "include_posts": "on"}
-    assert web.post(EDIT, form).status_code == 303
+    assert edit(web, form).status_code == 303
     source = current(web)
     assert (source.include_posts, source.include_stories) == (True, False)
 

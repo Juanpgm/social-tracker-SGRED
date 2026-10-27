@@ -13,7 +13,9 @@ credential.
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from social_tracker.control.domain import validate_reason
 from social_tracker.shared.errors import ConflictError, ValidationError
@@ -26,6 +28,9 @@ _INT = re.compile(r"[+-]?[0-9]{1,18}")
 _UNKNOWN_FIELD_PREFIX = "<source>: "
 _VALUE_ERROR_PREFIX = "Value error, "
 REF_FIELD = "secret_ref"
+VERSION_FIELD = "updated_at"  # hidden on the edit form: the version the editor started from
+URL_SCHEMES = frozenset({"http", "https", "rtmp", "icecast"})
+QUERY_MASK = "***"
 
 # How a blank input is sent: REQUIRED as an empty value (the domain rejects it), DEFAULT not at
 # all (the stored or default value stays), CLEAR as null on an edit and not at all on an add.
@@ -112,6 +117,7 @@ TYPE_FIELDS: dict[str, tuple[FormField, ...]] = {
     ),
 }
 CHECKBOXES = {"include_stories", "include_posts"}
+URL_FIELDS = frozenset({"feed_url", "stream_url"})
 INITIAL_VALUES = {"credibility": "3", "reason": DEFAULT_REASON}
 INITIAL_CHECKED = dict.fromkeys(CHECKBOXES, True)
 
@@ -201,6 +207,70 @@ def map_conflict(exc: ConflictError) -> FormErrors:
     return FormErrors({}, [exc.message])
 
 
+def is_plain_url(value: str) -> bool:
+    """True for an address that carries nothing worth hiding: a known scheme and a host, with no
+    login, query string or fragment (any of which may hold a credential)."""
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+    except ValueError:
+        return False
+    return (
+        parts.scheme in URL_SCHEMES
+        and bool(host)
+        and "@" not in parts.netloc
+        and not parts.query
+        and not parts.fragment
+    )
+
+
+def mask_url(url: str) -> str:
+    """The address as an edit form shows it: the query string (where tokens live) is replaced."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.query:
+        return url
+    netloc = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, netloc, parts.path, QUERY_MASK, ""))
+
+
+def keep_masked_urls(source: Source, form: Mapping[str, str]) -> dict[str, str]:
+    """A form field still holding the mask of the stored address means "unchanged": put the stored
+    address back, so saving never replaces it with the mask."""
+    kept = dict(form)
+    for name in URL_FIELDS:
+        stored = getattr(source, name, None)
+        if stored and form.get(name, "").strip() == mask_url(stored):
+            kept[name] = stored
+    return kept
+
+
+def without_unvalidated_secrets(source_type: str, form: Mapping[str, str]) -> dict[str, str]:
+    """The form as typed, minus any sensitive value that was never validated (storage failed
+    first): an address is kept only when it is plain, and the secret reference never."""
+    safe = dict(form)
+    safe.pop(REF_FIELD, None)
+    for field in fields_for(source_type, editing=False):
+        if field.sensitive and not (
+            field.name in URL_FIELDS and is_plain_url(safe.get(field.name, ""))
+        ):
+            safe.pop(field.name, None)
+    return safe
+
+
+def parse_version(raw: str | None) -> datetime | None:
+    """The `updated_at` a form was opened at, or None when it is missing, malformed or naive."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def values_from_source(source: Source) -> tuple[dict[str, str], dict[str, bool]]:
     """What an edit form starts with. The secret reference is deliberately absent."""
     values: dict[str, str] = {"reason": DEFAULT_REASON}
@@ -213,6 +283,8 @@ def values_from_source(source: Source) -> tuple[dict[str, str], dict[str, bool]]
                 checked[name] = value
         elif isinstance(value, tuple):
             values[name] = "\n".join(value)
+        elif name in URL_FIELDS:
+            values[name] = mask_url(str(value))
         else:
             values[name] = str(value)
     return values, checked

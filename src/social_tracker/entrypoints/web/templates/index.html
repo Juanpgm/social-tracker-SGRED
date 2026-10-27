@@ -5,7 +5,7 @@
 <section aria-labelledby="analysis-heading">
 <h2 id="analysis-heading">Analysis</h2>
 <p>Analysis is {{ "on" if global_on else "off" }}.</p>
-<form method="post" action="/analysis">
+<form method="post" action="/analysis" data-once>
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <input type="hidden" name="on" value="{{ "0" if global_on else "1" }}">
 <button type="submit">Turn analysis {{ "off" if global_on else "on" }}</button>
