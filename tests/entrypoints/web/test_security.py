@@ -126,3 +126,12 @@ def test_the_htmx_configuration_swaps_error_answers_and_forbids_script_evaluatio
     assert config["allowEval"] is False
     assert config["allowScriptTags"] is False
     assert config["includeIndicatorStyles"] is False  # no injected <style>: CSP forbids it
+
+
+@pytest.mark.parametrize(
+    "path", ["/static/..%2f..%2fpyproject.toml", "/static/../app.py", "/static/%2e%2e/app.py"]
+)
+def test_static_files_cannot_escape_their_directory(web: Web, path: str):
+    response = web.client.get(path)
+    assert response.status_code in (404, 400)
+    assert "social_tracker" not in response.text.replace("Social risk monitor", "")
