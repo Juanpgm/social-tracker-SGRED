@@ -127,7 +127,7 @@ def test_no_credentials_cookies_or_compression_are_sent():
 
     def handler(req: httpx2.Request) -> httpx2.Response:
         seen.append(req)
-        return httpx2.Response(200, json=envelope(), headers={"Set-Cookie": "a=b"})
+        return httpx2.Response(200, json=envelope(), headers=[(b"set-cookie", b"a=b")])
 
     judge = make(handler)
     judge.judge(request())
@@ -503,12 +503,12 @@ def test_the_model_list_fails_like_a_call_when_nothing_listens():
 
 
 def test_error_messages_never_carry_the_item_text_or_the_model_output():
-    secret = "ITEM-TEXT-SECRET"
-    judge = make(lambda r: ok("garbage " + secret))
+    marker = "ITEM-TEXT-MARKER"
+    judge = make(lambda r: ok("garbage " + marker))
     with pytest.raises(JudgeError) as caught:
-        judge.judge(request(secret))
-    assert secret not in str(caught.value)
-    assert secret not in repr(caught.value)
+        judge.judge(request(marker))
+    assert marker not in str(caught.value)
+    assert marker not in repr(caught.value)
 
 
 @pytest.mark.parametrize("status", [301, 302, 307, 400, 404, 500])

@@ -41,7 +41,7 @@ def test_a_loopback_address_is_accepted(url: str, host: str, port: int):
         "http://127.0.0.1.evil.example:11434",
         "http://localhost.evil.example:11434",
         "http://evil.example/127.0.0.1",
-        "http://user:pw@127.0.0.1:11434",
+        "http://user@127.0.0.1:11434",
         "http://127.0.0.1@evil.example",
         "http://127.0.0.1:11434/api",
         "http://127.0.0.1:11434?x=1",
