@@ -18,8 +18,15 @@ What it guarantees, per request:
   validators (`If-None-Match`, `If-Modified-Since`) are sent only to the authority the fetch
   started at, never to a host or port a redirect led to.
 - The body is capped at `max_bytes` AFTER decompression (only `gzip` is requested; a
-  decompression bomb stops at the cap) and the whole fetch has a wall-clock deadline, so a
-  server that trickles bytes cannot hold the worker.
+  decompression bomb stops at the cap).
+- The whole fetch has a wall-clock deadline (`deadline_s`) that is enforced INSIDE the I/O, not
+  just between steps: every connect, TLS handshake, read and write gets at most the budget that
+  is left (a per-read timeout alone restarts on every byte, so a peer sending one byte at a time
+  would hold the worker for hours), and name resolution runs in a helper thread that is given up
+  on at the deadline. A redirect chain, all the addresses of a host and the body share the one
+  budget. A fetch therefore ends within `deadline_s` plus a small scheduling slack; the helper
+  thread of a lookup the system never answers is a daemon and at most `MAX_PENDING_LOOKUPS` of
+  them are tolerated at once. The response head is capped at 100 KiB by the HTTP layer.
 - An operator may allow named private hosts (`private_hosts`); every use is logged with the host
   name only. It is off by default.
 - Every failure is a `FetchError` with a fixed message: no URL, header or body text escapes.
@@ -29,12 +36,15 @@ import ipaddress
 import logging
 import math
 import socket
+import ssl
+import threading
 import time
 import zlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
+import httpcore2
 import httpx2
 
 from social_tracker.collector.domain import (
@@ -60,6 +70,7 @@ _ACCEPT = (
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _MAX_ADDRESSES_TRIED = 3
 DEFAULT_ALLOWED_PORTS = frozenset({80, 443, 8080, 8443})
+MAX_PENDING_LOOKUPS = 8
 _ETAG_MAX = 512
 _LAST_MODIFIED_MAX = 100
 _LOG = logging.getLogger("social_tracker.collector")
@@ -78,8 +89,9 @@ def _positive_number(value: Any) -> bool:
 
 @dataclass(frozen=True)
 class FetchLimits:
-    """Bounds of one fetch. `timeout_s` applies to each network operation, `deadline_s` to the
-    whole fetch (redirects and body included), so a fetch ends within about their sum."""
+    """Bounds of one fetch. `timeout_s` caps each network operation; `deadline_s` is the wall-clock
+    budget of the WHOLE fetch (name lookup, redirects, headers and body included), enforced inside
+    every operation, so a fetch ends within `deadline_s` however slowly the peer sends."""
 
     timeout_s: float = 10.0
     deadline_s: float = 15.0
@@ -145,6 +157,77 @@ class _Redirect:
     url: str
 
 
+class _DeadlineStream(httpcore2.NetworkStream):
+    """A connection whose every operation gets at most the budget that is left."""
+
+    def __init__(self, inner: httpcore2.NetworkStream, remaining: Callable[[], float]) -> None:
+        self._inner = inner
+        self._remaining = remaining
+
+    def _budget(self, timeout: float | None, expired: type[Exception]) -> float:
+        left = self._remaining()
+        if left <= 0:
+            raise expired("fetch deadline reached")
+        return left if timeout is None else min(timeout, left)
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return self._inner.read(max_bytes, self._budget(timeout, httpcore2.ReadTimeout))
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._inner.write(buffer, self._budget(timeout, httpcore2.WriteTimeout))
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore2.NetworkStream:
+        budget = self._budget(timeout, httpcore2.ConnectTimeout)
+        wrapped = self._inner.start_tls(ssl_context, server_hostname, budget)
+        return _DeadlineStream(wrapped, self._remaining)
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._inner.get_extra_info(info)
+
+
+class _DeadlineBackend(httpcore2.NetworkBackend):
+    def __init__(self, inner: httpcore2.NetworkBackend, remaining: Callable[[], float]) -> None:
+        self._inner = inner
+        self._remaining = remaining
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore2.NetworkStream:
+        left = self._remaining()
+        if left <= 0:
+            raise httpcore2.ConnectTimeout("fetch deadline reached")
+        budget = left if timeout is None else min(timeout, left)
+        stream = self._inner.connect_tcp(host, port, budget, local_address, socket_options)
+        return _DeadlineStream(stream, self._remaining)
+
+
+class _DeadlineTransport(httpx2.HTTPTransport):
+    """The default HTTP transport with its connections wrapped in the deadline of one fetch."""
+
+    def __init__(self, ssl_context: ssl.SSLContext, remaining: Callable[[], float]) -> None:
+        super().__init__(verify=ssl_context, trust_env=False)
+        self._pool.close()  # replaced below by a pool over the deadline-aware backend
+        self._pool = httpcore2.ConnectionPool(
+            ssl_context=ssl_context,
+            network_backend=_DeadlineBackend(httpcore2.SyncBackend(), remaining),
+            http2=False,
+            retries=0,
+        )
+
+
 class HttpFetcher:
     def __init__(
         self,
@@ -164,12 +247,16 @@ class HttpFetcher:
         self._private_hosts = frozenset(host.strip().lower() for host in private_hosts)
         self._monotonic = monotonic
         self._allowed_ports = None if allowed_ports is None else frozenset(allowed_ports)
+        self._ssl_context = (
+            httpx2.create_ssl_context(trust_env=False) if transport is None else None
+        )
+        self._lookup_slots = threading.BoundedSemaphore(MAX_PENDING_LOOKUPS)
 
     def fetch(self, request: FetchRequest) -> FetchResponse:
         started = self._monotonic()
         url = request.url
         with httpx2.Client(
-            transport=self._transport,
+            transport=self._transport_for(started),
             follow_redirects=False,
             trust_env=False,
             timeout=httpx2.Timeout(self._limits.timeout_s),
@@ -185,27 +272,66 @@ class HttpFetcher:
                     _LOG.warning("redirect from https to http refused (downgrade)")
                     raise FetchError(FetchErrorKind.INSECURE_REDIRECT)
                 hop_request = request if target.authority == origin.authority else _bare(request)
-                outcome = self._hop(client, target, self._addresses(target), hop_request, started)
+                outcome = self._hop(
+                    client, target, self._addresses(target, started), hop_request, started
+                )
                 if isinstance(outcome, FetchResponse):
                     return outcome
                 url = outcome.url
         raise FetchError(FetchErrorKind.TOO_MANY_REDIRECTS)
+
+    def _remaining(self, started: float) -> float:
+        return self._limits.deadline_s - (self._monotonic() - started)
+
+    def _transport_for(self, started: float) -> httpx2.BaseTransport:
+        if self._transport is not None:
+            return self._transport
+        assert self._ssl_context is not None
+        return _DeadlineTransport(self._ssl_context, lambda: self._remaining(started))
 
     def _check_port(self, target: FetchTarget) -> None:
         if self._allowed_ports is not None and target.port not in self._allowed_ports:
             raise FetchError(FetchErrorKind.BLOCKED_ADDRESS)
 
     def _check_deadline(self, started: float) -> None:
-        if self._monotonic() - started > self._limits.deadline_s:
+        if self._remaining(started) <= 0:
             raise FetchError(FetchErrorKind.TIMEOUT)
 
-    def _addresses(self, target: FetchTarget) -> list[str]:
+    def _lookup(self, host: str, port: int, started: float) -> list[str]:
+        """The resolver's answer, or a timeout once the budget is spent. The lookup runs in a
+        daemon thread because the system resolver cannot be interrupted."""
+        left = self._remaining(started)
+        if left <= 0:
+            raise FetchError(FetchErrorKind.TIMEOUT)
+        if not self._lookup_slots.acquire(blocking=False):
+            raise FetchError(FetchErrorKind.DNS)  # earlier lookups are still hanging
+        outcome: list[tuple[bool, Any]] = []
+
+        def work() -> None:
+            try:
+                outcome.append((True, self._resolver(host, port)))
+            except BaseException as exc:  # noqa: BLE001 - handed to the caller below
+                outcome.append((False, exc))
+            finally:
+                self._lookup_slots.release()
+
+        thread = threading.Thread(target=work, name="social-tracker-dns", daemon=True)
+        thread.start()
+        thread.join(left)
+        if not outcome:
+            raise FetchError(FetchErrorKind.TIMEOUT)
+        succeeded, value = outcome[0]
+        if not succeeded:
+            raise value
+        return value  # type: ignore[no-any-return]
+
+    def _addresses(self, target: FetchTarget, started: float) -> list[str]:
         allow_private = target.host in self._private_hosts
         try:
             ipaddress.ip_address(target.host)
             answer: Iterable[str] = [target.host]
         except ValueError:
-            answer = self._resolver(target.host, target.port)
+            answer = self._lookup(target.host, target.port, started)
         addresses = usable_addresses(answer, allow_private=allow_private)
         if allow_private and any(is_blocked_address(ipaddress.ip_address(a)) for a in addresses):
             _LOG.warning("private address allowed by configuration for host %s", target.host)
@@ -220,6 +346,7 @@ class HttpFetcher:
         started: float,
     ) -> FetchResponse | _Redirect:
         for address in addresses[:_MAX_ADDRESSES_TRIED]:
+            self._check_deadline(started)
             try:
                 return self._request_once(client, target, address, request, started)
             except httpx2.ConnectError:

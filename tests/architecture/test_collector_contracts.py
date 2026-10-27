@@ -21,6 +21,7 @@ from tests.architecture.test_import_contracts import (
 OUTBOUND_CONTRACT = "Only the fetcher adapter may open network connections"
 OUTBOUND_IMPORTS = [
     "import httpx2",
+    "import httpcore2",
     "import httpx",
     "import socket",
     "import requests",

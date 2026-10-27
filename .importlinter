@@ -26,6 +26,7 @@ forbidden_modules =
     typer
     httpx
     httpx2
+    httpcore2
     requests
     aiohttp
     os
@@ -85,6 +86,7 @@ source_modules =
 forbidden_modules =
     httpx
     httpx2
+    httpcore2
     requests
     aiohttp
     http
@@ -96,7 +98,8 @@ forbidden_modules =
 allow_indirect_imports = True
 
 # The one outbound path (G-1): the collector's fetcher adapter is the only module of the
-# application allowed to import an HTTP client or sockets, and it may use only httpx2 and socket.
+# application allowed to import an HTTP client or sockets, and it may use only httpx2, httpcore2
+# (the connection layer under httpx2) and socket.
 # Everything else, the composition root included, reaches the network through the Fetcher port.
 # Indirect imports are allowed so that the composition root can wire the adapter.
 [importlinter:contract:outbound-only-in-fetcher]
@@ -107,6 +110,7 @@ source_modules =
 forbidden_modules =
     httpx
     httpx2
+    httpcore2
     requests
     aiohttp
     socket
@@ -116,6 +120,7 @@ forbidden_modules =
 allow_indirect_imports = True
 ignore_imports =
     social_tracker.collector.http_fetcher -> httpx2
+    social_tracker.collector.http_fetcher -> httpcore2
     social_tracker.collector.http_fetcher -> socket
 unmatched_ignore_imports_alerting = none
 
@@ -140,5 +145,6 @@ forbidden_modules =
     subprocess
     httpx
     httpx2
+    httpcore2
     requests
     aiohttp
