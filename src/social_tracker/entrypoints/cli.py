@@ -457,6 +457,9 @@ ItemLimit = Annotated[
         "--limit", min=1, max=MAX_LIST_LIMIT, help="How many items to show (newest first)."
     ),
 ]
+ShowIds = Annotated[
+    bool, typer.Option("--ids", help="Show the id of each item first (what `classify show` takes).")
+]
 _LABEL_CHARS = 100
 _NO_ITEMS = "No items."
 
@@ -472,14 +475,15 @@ def _item_label(item: Item) -> str:
     return escape_unprintable(flat)
 
 
-def _render_items(items: Sequence[Item]) -> str:
+def _render_items(items: Sequence[Item], *, ids: bool = False) -> str:
     stamps = [f"{item.published_at:%Y-%m-%d %H:%M}" for item in items]
     width = max([len("SOURCE"), *(len(item.source_id) for item in items)])
-    lines = [f"{'PUBLISHED':<16}  {'SOURCE':<{width}}  TITLE"]
-    lines += [
-        f"{stamp:<16}  {item.source_id:<{width}}  {_item_label(item)}"
-        for stamp, item in zip(stamps, items, strict=True)
-    ]
+    id_width = max([len("ID"), *(len(item.id) for item in items)])
+    lead = f"{'ID':<{id_width}}  " if ids else ""
+    lines = [f"{lead}{'PUBLISHED':<16}  {'SOURCE':<{width}}  TITLE"]
+    for stamp, item in zip(stamps, items, strict=True):
+        lead = f"{item.id:<{id_width}}  " if ids else ""
+        lines.append(f"{lead}{stamp:<16}  {item.source_id:<{width}}  {_item_label(item)}")
     return "\n".join(lines)
 
 
@@ -489,11 +493,12 @@ def items_list(
         str | None, typer.Option("--source", help="Only items of this source id.")
     ] = None,
     limit: ItemLimit = DEFAULT_LIST_LIMIT,
+    ids: ShowIds = False,
 ) -> None:
     """List collected items, newest first."""
     with _guard(), closing(build_container()) as services:
         found = services.items.list_items(source_id=source, limit=limit)
-    typer.echo(_render_items(found) if found else _NO_ITEMS)
+    typer.echo(_render_items(found, ids=ids) if found else _NO_ITEMS)
 
 
 @items_app.command("search")
@@ -508,11 +513,12 @@ def items_search(
         ),
     ],
     limit: ItemLimit = DEFAULT_LIST_LIMIT,
+    ids: ShowIds = False,
 ) -> None:
     """Search collected items by words, newest first."""
     with _guard(), closing(build_container()) as services:
         found = services.items.search(query, limit=limit)
-    typer.echo(_render_items(found) if found else "No items found.")
+    typer.echo(_render_items(found, ids=ids) if found else "No items found.")
 
 
 # ---- classification ----

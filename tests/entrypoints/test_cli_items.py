@@ -185,3 +185,24 @@ def test_items_commands_work_on_a_fresh_database_path(cli: Cli, tmp_path: Path):
         "items", "search", "x", env={"SOCIAL_TRACKER_DB_PATH": str(tmp_path / "n" / "new.db")}
     )
     assert result.stdout == "No items found.\n"
+
+
+# ---- ids (what `classify show` takes) ----
+
+
+def test_ids_puts_each_items_id_first_and_changes_nothing_else(cli: Cli):
+    seed(cli, *sample())
+    plain = cli.ok("items", "list").stdout.splitlines()
+    with_ids = cli.ok("items", "list", "--ids").stdout.splitlines()
+    assert with_ids[0].split() == ["ID", "PUBLISHED", "SOURCE", "TITLE"]
+    newest = sample()[1]
+    assert with_ids[1].split()[0] == newest.id
+    assert [line.split(None, 1)[1] for line in with_ids[1:]] == [line for line in plain[1:]]
+    assert plain[0].split() == ["PUBLISHED", "SOURCE", "TITLE"]
+
+
+def test_ids_also_works_for_a_search(cli: Cli):
+    seed(cli, *sample())
+    lines = cli.ok("items", "search", "Bogotá", "--ids").stdout.splitlines()
+    assert lines[0].split()[0] == "ID"
+    assert lines[1].split()[0] == sample()[1].id
