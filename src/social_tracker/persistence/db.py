@@ -39,6 +39,7 @@ from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ConflictError, DomainError, StorageError
 
 DEFAULT_BUSY_TIMEOUT_MS = 5000
+_CLOSE_CHECKPOINT_WAIT_MS = 100
 _MIGRATION_FILE_RE = re.compile(r"([0-9]{4})_([a-z0-9_]+)\.sql")
 _ERROR_NAME_RE = re.compile(r"[A-Z_]{1,40}")
 _UNIQUE_ERRORS = frozenset({"SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_PRIMARYKEY"})
@@ -352,6 +353,8 @@ class Database:
                 if isinstance(exc, sqlite3.Error):
                     raise map_sqlite_error(exc) from None
                 raise
+            if self._conn is None:
+                raise StorageError("database was closed during the transaction")
             try:
                 conn.execute("COMMIT")
             except sqlite3.Error as exc:
@@ -387,10 +390,25 @@ class Database:
             self._tx_depth -= 1
 
     def close(self) -> None:
+        """Release the file. Never raises.
+
+        The WAL is checkpointed and truncated first (best effort) so a `-wal` file does not
+        linger while other connections keep the database open. A process that stays up for
+        days needs the same housekeeping while running: SQLite checkpoints automatically at
+        ~1000 pages, but a long-lived reader can stall that, so 24/7 workers should
+        `PRAGMA wal_checkpoint(TRUNCATE)` periodically (e.g. between collection cycles).
+        """
         with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
+            conn, self._conn = self._conn, None
+            if conn is None:
+                return
+            try:
+                with suppress(sqlite3.Error):
+                    # Do not sit out the full busy timeout behind a reader: give up quickly.
+                    conn.execute(f"PRAGMA busy_timeout={_CLOSE_CHECKPOINT_WAIT_MS}")
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
 
     def __enter__(self) -> "Database":
         return self

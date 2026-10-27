@@ -356,6 +356,68 @@ def test_closing_releases_the_file(tmp_path):
     assert not path.exists()
 
 
+def _wal_size(path: Path) -> int:
+    wal = Path(str(path) + "-wal")
+    return wal.stat().st_size if wal.exists() else 0
+
+
+def test_close_truncates_the_wal_even_when_another_connection_is_still_open(tmp_path):
+    path = tmp_path / "w.db"
+    db = Database(path, migrations=[LOG])
+    with db.transaction() as conn:
+        for n in range(50):
+            conn.execute("INSERT INTO log (msg) VALUES (?)", (f"row {n}",))
+    bystander = sqlite3.connect(path)  # keeps the WAL alive: SQLite only cleans up on last close
+    try:
+        bystander.execute("SELECT count(*) FROM log").fetchone()
+        assert _wal_size(path) > 0
+        db.close()
+        assert _wal_size(path) == 0
+        assert bystander.execute("SELECT count(*) FROM log").fetchone()[0] == 50
+    finally:
+        bystander.close()
+
+
+def test_close_does_not_fail_when_the_checkpoint_cannot_run(tmp_path):
+    db = Database(tmp_path / "w.db", migrations=[LOG])
+    faulty = _FaultyConnection(db._conn, "wal_checkpoint", sqlite3.OperationalError("locked"))
+    db._conn = faulty  # type: ignore[assignment]
+    db.close()
+    assert faulty.closed
+    with pytest.raises(StorageError):
+        db.query("SELECT 1")
+    db.close()  # still idempotent
+
+
+def test_close_does_not_fail_while_another_connection_blocks_the_checkpoint(tmp_path):
+    path = tmp_path / "w.db"
+    db = Database(path, migrations=[LOG])
+    with db.transaction() as conn:
+        conn.execute("INSERT INTO log (msg) VALUES ('a')")
+    reader = sqlite3.connect(path, isolation_level=None)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM log").fetchone()  # holds a read snapshot
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO log (msg) VALUES ('b')")
+        db.close()  # TRUNCATE cannot finish: it must give up quietly
+    finally:
+        reader.close()
+    with Database(path, migrations=[LOG]) as again:
+        assert logged(again) == ["a", "b"]
+
+
+def test_closing_inside_an_open_transaction_rolls_it_back_and_reports_it(tmp_path):
+    path = tmp_path / "w.db"
+    db = Database(path, migrations=[LOG])
+    with pytest.raises(StorageError) as info, db.transaction() as conn:  # noqa: PT012 - the body is the scenario
+        conn.execute("INSERT INTO log (msg) VALUES ('lost')")
+        db.close()
+    assert "closed" in str(info.value)
+    with Database(path, migrations=[LOG]) as again:
+        assert logged(again) == []
+
+
 def test_two_instances_on_one_file_see_each_others_writes(tmp_path, opened):
     first = opened(tmp_path / "w.db", migrations=[COUNTER])
     second = opened(tmp_path / "w.db", migrations=[COUNTER])
