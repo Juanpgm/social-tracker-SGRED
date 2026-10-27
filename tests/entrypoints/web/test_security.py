@@ -108,3 +108,21 @@ def test_no_page_loads_an_asset_from_the_network(web: Web, path: str):
 def test_static_assets_are_served_locally(web: Web):
     assert web.client.get("/static/htmx.min.js").text.startswith("var htmx=")
     assert web.client.get("/static/app.css").status_code == 200
+
+
+def test_the_framework_documentation_pages_are_not_served(web: Web):
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert web.client.get(path).status_code == 404, path
+
+
+def test_the_htmx_configuration_swaps_error_answers_and_forbids_script_evaluation(web: Web):
+    import json
+
+    page = web.client.get("/").text
+    found = re.search(r"<meta name=\"htmx-config\" content='([^']+)'>", page)
+    assert found
+    config = json.loads(found.group(1))
+    assert config["responseHandling"] == [{"code": ".*", "swap": True}]  # 4xx and 5xx show too
+    assert config["allowEval"] is False
+    assert config["allowScriptTags"] is False
+    assert config["includeIndicatorStyles"] is False  # no injected <style>: CSP forbids it

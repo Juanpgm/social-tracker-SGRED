@@ -258,3 +258,12 @@ def test_the_per_source_analysis_flag_can_be_turned_off_again(web: Web):
     with closing(web.services()) as services:
         assert services.control.overview().sources[0].analysis is False
     assert [d["to"] for d in details(web, "source_analysis_changed")] == ["on", "off"]
+
+
+def test_an_htmx_answer_is_the_row_of_the_source_that_was_toggled(web: Web):
+    web.seed("src_a", name="Alpha")
+    web.seed("src_b", name="Bravo")
+    response = web.post_htmx("/sources/src_b/enable")
+    assert 'id="row-src_b"' in response.text
+    assert 'id="row-src_a"' not in response.text
+    assert "Bravo is enabled" in visible_text(response.text)

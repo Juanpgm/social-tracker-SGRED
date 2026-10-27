@@ -230,3 +230,14 @@ def test_a_garbled_content_length_is_a_400(web: Web, length: str):
     )
     assert response.status_code in (400, 413)
     assert web.events() == []
+
+
+def test_the_content_type_is_matched_ignoring_case(web: Web):
+    token = web.csrf()
+    response = web.client.post(
+        "/analysis",
+        content=f"{CSRF_FIELD}={token}&on=1",
+        headers={"content-type": "Application/X-WWW-Form-Urlencoded"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303

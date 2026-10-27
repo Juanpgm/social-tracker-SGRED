@@ -407,3 +407,12 @@ def _with_failing_add(web: Web, error: Exception) -> Any:
     assert found
     form = {**BASE_FORM, **VALID["news_rss"], "csrf_token": found.group(1)}
     return client.post("/sources/new/news_rss", data=form)
+
+
+def test_a_conflict_that_names_no_field_is_shown_for_the_whole_form(web: Web):
+    from social_tracker.shared.errors import ConflictError
+
+    response = _with_failing_add(web, ConflictError("the registry is being rebuilt"))
+    assert response.status_code == 409
+    assert "the registry is being rebuilt" in visible_text(response.text)
+    assert "could not be saved" in visible_text(response.text)
