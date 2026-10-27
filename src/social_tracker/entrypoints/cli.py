@@ -386,6 +386,16 @@ def serve(
             "login: anyone who can connect can change your sources.",
         ),
     ] = False,
+    allowed_host: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allowed-host",
+            help="A name clients use to reach the UI besides localhost and --host (repeatable), "
+            "for example the name behind a wildcard --host 0.0.0.0. The UI speaks plain HTTP: "
+            "traffic is not encrypted and its cookie has no Secure flag, so use it only on a "
+            "network you trust or behind a TLS proxy you control.",
+        ),
+    ] = None,
 ) -> None:
     """Run the local web UI to manage sources (it never publishes or sends anything)."""
     # Imported here so the other commands do not load the web stack.
@@ -395,8 +405,13 @@ def serve(
     with _guard():
         if allow_non_loopback and not is_loopback(host):
             typer.echo(
-                "warning: the UI has no login; every machine that can reach this address can "
-                "change your sources",
+                "warning: the UI has no login and its traffic is not encrypted; every machine "
+                "that can reach this address can change your sources",
                 err=True,
             )
-        run_server(host, port, allow_non_loopback=allow_non_loopback)
+        run_server(
+            host,
+            port,
+            allow_non_loopback=allow_non_loopback,
+            allowed_hosts=tuple(allowed_host or ()),
+        )

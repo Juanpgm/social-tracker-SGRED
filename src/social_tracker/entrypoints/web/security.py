@@ -12,6 +12,7 @@ import hmac
 import ipaddress
 import re
 import secrets
+from collections.abc import Iterable
 from hashlib import sha256
 
 from social_tracker.shared.errors import ValidationError
@@ -25,12 +26,41 @@ CSP = (
     "default-src 'self'; base-uri 'none'; object-src 'none'; "
     "frame-ancestors 'none'; form-action 'self'"
 )
+# Every browser feature the page could ask for is switched off: it needs none of them.
+PERMISSIONS_POLICY = ", ".join(
+    f"{feature}=()"
+    for feature in (
+        "accelerometer",
+        "autoplay",
+        "camera",
+        "clipboard-read",
+        "display-capture",
+        "encrypted-media",
+        "fullscreen",
+        "geolocation",
+        "gyroscope",
+        "hid",
+        "magnetometer",
+        "microphone",
+        "midi",
+        "payment",
+        "picture-in-picture",
+        "publickey-credentials-get",
+        "screen-wake-lock",
+        "serial",
+        "usb",
+        "xr-spatial-tracking",
+    )
+)
 SECURITY_HEADERS = {
     "Content-Security-Policy": CSP,
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
     "Cache-Control": "no-store",
+    "Permissions-Policy": PERMISSIONS_POLICY,
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
 }
 
 
@@ -54,20 +84,83 @@ def check_bind_host(host: str, *, allow_non_loopback: bool) -> None:
         )
 
 
-def host_name(header: str) -> str:
-    """The host part of a `Host` header: lower-cased, without port or IPv6 brackets."""
-    value = header.strip().lower()
-    if value.startswith("["):
-        return value[1:].partition("]")[0]
-    return value.partition(":")[0]
+# A Host header is `name[:port]` or `[ipv6][:port]`, nothing else: no spaces, no `@`, no path.
+# `fullmatch` and `[0-9]` on purpose: `$` accepts a trailing newline and `\d` accepts any script.
+_HOST_HEADER = re.compile(
+    r"(?:\[(?P<v6>[0-9a-f:]+)\]|(?P<name>[a-z0-9.-]+))(?::(?P<port>[0-9]{1,5}))?", re.ASCII
+)
+_HOST_NAME = re.compile(r"[a-z0-9.-]+", re.ASCII)
+_MAX_PORT = 65535
 
 
-def allowed_hosts(bound_host: str) -> frozenset[str]:
-    return LOOPBACK_NAMES | {host_name(bound_host)}
+def _canonical(name: str) -> str:
+    """An IP literal in its one canonical text form (`0:0::1` is `::1`); any other name as is."""
+    try:
+        return str(ipaddress.ip_address(name))
+    except ValueError:
+        return name
+
+
+def host_name(header: str) -> str | None:
+    """The canonical host of a `Host` header, or None when the header is not well formed.
+
+    Strict on purpose: the value is lower-cased but never stripped, so ` localhost` and
+    `localhost:80@evil.com` are not `localhost`. One trailing dot (`localhost.`) is the same name.
+    """
+    if not header.isascii():  # some non-ASCII characters lower-case to ASCII letters
+        return None
+    found = _HOST_HEADER.fullmatch(header.lower())
+    if found is None:
+        return None
+    if found["port"] and int(found["port"]) > _MAX_PORT:
+        return None
+    if found["v6"]:
+        try:
+            address = ipaddress.IPv6Address(found["v6"])
+        except ValueError:
+            return None
+        return str(address)
+    name = found["name"].removesuffix(".")
+    return _canonical(name) if name else None
+
+
+def _configured_host(raw: str) -> str | None:
+    """A host the operator names (`--host`, `--allowed-host`), in canonical form.
+
+    Brackets around an IPv6 address are optional here (`::1` is what `--host` takes). Returns
+    None for a wildcard address: `0.0.0.0` and `::` say "listen everywhere", they are not a name
+    anybody should be served under (a page may send `Host: 0.0.0.0` to reach a local server).
+    """
+    value = raw.lower()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    value = value.removesuffix(".")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        if value and _HOST_NAME.fullmatch(value):
+            return value
+        raise ValidationError("a host must be a name or an IP address, without port") from None
+    return None if address.is_unspecified else str(address)
+
+
+def allowed_hosts(bound_host: str, extra: Iterable[str] = ()) -> frozenset[str]:
+    """The names pages are served under: loopback, the bound host and the extra names given.
+
+    A wildcard bind adds no name of its own; an extra name must be a real one.
+    """
+    names = {_configured_host(bound_host)}
+    for host in extra:
+        name = _configured_host(host)
+        if name is None:
+            raise ValidationError("a wildcard address is not a host name to allow")
+        names.add(name)
+    return LOOPBACK_NAMES | {name for name in names if name is not None}
 
 
 def host_allowed(header: str | None, allowed: frozenset[str]) -> bool:
-    return bool(header) and host_name(header or "") in allowed
+    name = host_name(header) if header else None
+    return name is not None and name in allowed
 
 
 class CsrfTokens:

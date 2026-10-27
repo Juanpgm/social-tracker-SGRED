@@ -143,3 +143,65 @@ def test_check_bind_host_only_lets_a_foreign_host_through_with_the_flag():
     check_bind_host("127.0.0.1", allow_non_loopback=False)
     with pytest.raises(ValidationError):
         check_bind_host("10.0.0.1", allow_non_loopback=False)
+
+
+# ---- --allowed-host: names clients use to reach the server (S-S1) ----
+
+
+def served_hosts(call: dict[str, Any]) -> frozenset[str]:
+    return call["app"].state.ctx.hosts
+
+
+def test_allowed_host_can_be_repeated_and_each_name_is_served(
+    cli: Cli, launched: list[dict[str, Any]]
+):
+    result = cli(
+        "serve",
+        "--host",
+        "0.0.0.0",
+        "--allow-non-loopback",
+        "--allowed-host",
+        "Radio.Local",
+        "--allowed-host",
+        "10.0.0.7",
+    )
+    assert result.exit_code == 0, result.stderr
+    hosts = served_hosts(launched[0])
+    assert {"radio.local", "10.0.0.7", "localhost"} <= hosts
+    assert "0.0.0.0" not in hosts
+
+
+def test_without_the_option_only_loopback_and_the_bound_host_are_served(
+    cli: Cli, launched: list[dict[str, Any]]
+):
+    cli("serve", "--host", "192.168.1.20", "--allow-non-loopback")
+    assert served_hosts(launched[0]) == {"localhost", "127.0.0.1", "::1", "192.168.1.20"}
+
+
+@pytest.mark.parametrize("bad", ["a b", "user@host", "host:80", "0.0.0.0", "", "http://host"])
+def test_an_invalid_allowed_host_is_a_clean_error_and_nothing_starts(
+    cli: Cli, launched: list[dict[str, Any]], bad: str
+):
+    result = cli("serve", "--allowed-host", bad)
+    assert result.exit_code == 1
+    assert result.stderr.startswith("error:")
+    assert "Traceback" not in result.stderr
+    assert launched == []
+
+
+def test_the_app_is_validated_before_the_database_is_touched(
+    cli: Cli, launched: list[dict[str, Any]]
+):
+    cli("serve", "--allowed-host", "a b")
+    assert not cli.db_path.exists()
+
+
+def test_the_warning_and_the_help_say_that_traffic_is_not_encrypted(
+    cli: Cli, launched: list[dict[str, Any]]
+):
+    result = cli("serve", "--host", "192.168.1.20", "--allow-non-loopback")
+    assert "not encrypted" in result.stderr
+    command = get_command(app).commands["serve"]  # type: ignore[attr-defined]
+    option = next(p for p in command.params if "--allowed-host" in p.opts)
+    assert "plain HTTP" in option.help
+    assert "Secure" in option.help

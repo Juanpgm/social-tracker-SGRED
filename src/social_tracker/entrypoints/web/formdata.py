@@ -5,6 +5,7 @@ after its declared size and content type pass, at most `MAX_BODY_BYTES` of it ar
 and the CSRF token is verified before any route code sees a field.
 """
 
+import asyncio
 from urllib.parse import parse_qsl
 
 from fastapi import Request
@@ -15,6 +16,7 @@ from social_tracker.entrypoints.web.security import CSRF_COOKIE_NAME, CSRF_FIELD
 
 MAX_BODY_BYTES = 16 * 1024
 MAX_FIELDS = 100
+BODY_TIMEOUT_S = 10  # the whole body, not each chunk: a trickle cannot keep a request open
 FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -27,10 +29,14 @@ async def _body(request: Request) -> bytes:
         if int(declared) > MAX_BODY_BYTES:
             raise HTTPException(413)
     body = bytearray()
-    async for chunk in request.stream():
-        body += chunk
-        if len(body) > MAX_BODY_BYTES:
-            raise HTTPException(413)
+    try:
+        async with asyncio.timeout(BODY_TIMEOUT_S):
+            async for chunk in request.stream():
+                body += chunk
+                if len(body) > MAX_BODY_BYTES:
+                    raise HTTPException(413)
+    except TimeoutError:
+        raise HTTPException(408) from None
     return bytes(body)
 
 

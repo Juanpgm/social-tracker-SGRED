@@ -14,6 +14,8 @@ HEADERS = {
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
     "cache-control": "no-store",
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-origin",
 }
 ASSET_URL = re.compile(
     r"""(?:src|href|action|data|poster|srcset)\s*=\s*["']\s*(?:https?:)?//""", re.I
@@ -29,6 +31,27 @@ def test_every_response_carries_the_security_headers(web: Web, path: str):
     assert "default-src 'self'" in csp
     assert "frame-ancestors 'none'" in csp
     assert "form-action 'self'" in csp
+
+
+@pytest.mark.parametrize("path", ["/", "/nope", "/static/app.css"])
+def test_every_browser_feature_is_denied_by_the_permissions_policy(web: Web, path: str):
+    policy = web.client.get(path).headers["permissions-policy"]
+    features = dict(item.split("=", 1) for item in policy.split(", "))
+    assert features, policy
+    assert set(features.values()) == {"()"}  # no feature is granted, not even to this origin
+    for feature in ("camera", "microphone", "geolocation", "payment", "usb", "fullscreen"):
+        assert feature in features, feature
+
+
+def test_the_error_pages_and_the_bad_host_answer_carry_the_new_headers_too(web: Web):
+    for response in (
+        web.client.get("/nope"),
+        web.client.get("/", headers={"host": "evil.example"}),
+        web.client.post("/analysis", data={"on": "1"}),
+    ):
+        assert response.headers["cross-origin-opener-policy"] == "same-origin"
+        assert response.headers["cross-origin-resource-policy"] == "same-origin"
+        assert "camera=()" in response.headers["permissions-policy"]
 
 
 def test_a_json_error_response_is_html_not_the_framework_default(web: Web):

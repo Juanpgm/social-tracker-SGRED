@@ -6,7 +6,7 @@ traceback: a refused operation is a short page, an unexpected one is logged by e
 """
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
@@ -61,12 +61,17 @@ def _http_error(request: Request, exc: Exception) -> Response:
 
 
 def create_app(
-    container_factory: ContainerFactory, *, host: str, secret: bytes | None = None
+    container_factory: ContainerFactory,
+    *,
+    host: str,
+    secret: bytes | None = None,
+    extra_hosts: Iterable[str] = (),
 ) -> FastAPI:
-    """Build the UI. `host` is the address the server binds to; it is served besides loopback."""
+    """Build the UI. `host` is the address the server binds to; it is served besides loopback,
+    and so is every name in `extra_hosts` (the names clients use to reach a wildcard bind)."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.ctx = WebContext(
-        container_factory, CsrfTokens(secret), allowed_hosts(host), build_environment()
+        container_factory, CsrfTokens(secret), allowed_hosts(host, extra_hosts), build_environment()
     )
     app.mount("/static", StaticFiles(packages=[("social_tracker.entrypoints.web", "static")]))
     app.include_router(routes.router)
