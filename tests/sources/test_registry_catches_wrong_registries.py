@@ -5,43 +5,31 @@ an in-memory environment built around the wrong class. `parametrize` marks are e
 tiny cross-product helper (ids and `pytest.param` are not used by the contract).
 """
 
-import itertools
-from collections.abc import Callable, Iterator
-from typing import Any
-
 import pytest
 
 from social_tracker.sources.service import SourceRegistry
+from tests.replay import cases
 from tests.sources import test_registry as registry_suites
 from tests.sources.registry_contract import RegistryContract
 from tests.sources.wrong_registries import WRONG_REGISTRIES
 
 
-def _cases(method: Callable[..., Any]) -> Iterator[dict[str, Any]]:
-    axes: list[list[dict[str, Any]]] = []
-    for mark in getattr(method, "pytestmark", []):
-        if mark.name != "parametrize":
-            continue
-        spec = mark.args[0]
-        names = [n.strip() for n in spec.split(",")] if isinstance(spec, str) else list(spec)
-        values = mark.args[1]
-        axes.append([dict(zip(names, v if len(names) > 1 else (v,), strict=True)) for v in values])
-    for combo in itertools.product(*axes):
-        merged: dict[str, Any] = {}
-        for part in combo:
-            merged.update(part)
-        yield merged
-
-
 def _failing_tests(registry_cls: type[SourceRegistry]) -> set[str]:
     failed: set[str] = set()
-    harness = registry_suites.TestInMemoryRegistry()
+
+    class Harness(registry_suites.TestInMemoryRegistry):
+        """Every environment a test builds, including its own `make_env()`, uses the class."""
+
+        def make_env(self, cls: type[SourceRegistry] = registry_cls):
+            return super().make_env(cls)
+
+    harness = Harness()
     for name in sorted(vars(RegistryContract)):
         if not name.startswith("test_"):
             continue
         method = getattr(RegistryContract, name)
-        for kwargs in _cases(method) or [{}]:
-            env = harness.make_env(registry_cls)
+        for kwargs in cases(method) or [{}]:
+            env = harness.make_env()
             try:
                 method(harness, env, **kwargs)
             except BaseException:  # noqa: BLE001 - any failure counts, including leaked errors
