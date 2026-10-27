@@ -1,5 +1,7 @@
 # Runtime data and secrets
 data/
+# ...except the synthetic test data (gold examples), which is source
+!tests/data/
 .env
 *.cookies
 secrets/

@@ -829,6 +829,11 @@ def test_the_default_settings_are_the_documented_ones():
     s = ClassifierSettings()
     assert (s.recycle_days, s.near_duplicate_threshold) == (7, 0.8)
     assert (s.escalate_low, s.escalate_high) == (0.4, 0.8)
+    assert (s.min_near_tokens, s.candidate_limit) == (12, 500)
+    assert (s.signature_retention_days, s.classification_retention_days) == (730, 180)
+    assert s.max_item_failures == 3
+    assert (s.conflict_min, s.conflict_margin, s.old_year_gap) == (0.3, 0.15, 2)
+    assert s.max_text_chars == 20_000
 
 
 @pytest.mark.parametrize(

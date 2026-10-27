@@ -131,3 +131,22 @@ def test_the_address_of_the_item_counts_like_a_link_in_its_text():
     assert "official_link" in result.names
     spoof = run_rules(BASE, url="https://evil.example/official-domain.example")
     assert "official_link" not in spoof.names
+
+
+def test_the_last_link_that_is_read_is_the_fiftieth():
+    from social_tracker.classification.links import MAX_LINKS
+
+    filler = "https://a.example " * (MAX_LINKS - 1)
+    assert official(filler + "https://official-domain.example")  # the 50th is read
+    assert not official(filler + "https://b.example https://official-domain.example")  # the 51st
+
+
+def test_a_backslash_ends_the_host_as_a_browser_reads_it():
+    backslash = chr(92)
+    # the address goes to the official domain, whatever follows the backslash
+    assert official("https://official-domain.example" + backslash + "@evil.example/x")
+    found = links_in("https://official-domain.example" + backslash + "@evil.example/x")
+    assert found.spoofed is False
+    # and the official name after a backslash is only a path
+    assert not official("https://evil.example" + backslash + "@official-domain.example/")
+    assert not official("https://evil.example" + backslash + "official-domain.example")

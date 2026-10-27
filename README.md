@@ -35,8 +35,10 @@ Configuration comes from the process environment (no file is read). All variable
 | `SOCIAL_TRACKER_ACTOR` | Who the audit log attributes your changes to. `--actor` overrides it. | `cli:<OS user name>` |
 | `SOCIAL_TRACKER_BUSY_TIMEOUT_MS` | How long a write waits for another process using the database (1..600000). | `5000` |
 | `SOCIAL_TRACKER_RETENTION_DAYS` | How many days collected items are kept, counted from when they were fetched (0..3650). `0` means "purge once classified". | `30` |
-| `SOCIAL_TRACKER_RECYCLE_DAYS` | Content seen or published STRICTLY more than this many days ago is "recycled" when it comes back (1..3650). See [Classifying content](#classifying-content). | `7` |
+| `SOCIAL_TRACKER_RECYCLE_DAYS` | Content first SEEN here STRICTLY more than this many days apart is "recycled" when it comes back (1..3650). See [Classifying content](#classifying-content). | `7` |
 | `SOCIAL_TRACKER_NEAR_DUPLICATE_THRESHOLD` | Estimated similarity (above 0, up to 1, at most four decimals) from which two texts are near duplicates, inclusive. | `0.8` |
+| `SOCIAL_TRACKER_NEAR_DUPLICATE_CANDIDATES` | How many near-duplicate candidates are verified per item, the best-ranked first (1..1000). A lookup that hits the limit is counted in the report of the run. | `500` |
+| `SOCIAL_TRACKER_CLASSIFICATION_RETENTION_DAYS` | How long the verdict of an item that no longer exists is kept (1..3650); the hourly retention purge forgets the older ones. | `180` |
 | `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS` | Comma-separated host names (or IP addresses) the collector may contact although they resolve to a private address. See [Collecting content](#collecting-content). | empty (all private addresses are blocked) |
 | `SOCIAL_TRACKER_ALLOWED_PORTS` | Comma-separated destination ports the collector may contact, for feeds and every redirect hop. A value replaces the default list. | `80,443,8080,8443` |
 | `SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE` | Most items one source may hold at a time. Over it, new entries are dropped and counted as `source_quota`. | `100000` |
@@ -112,9 +114,10 @@ resets analysis and then makes its one pass.
 | `run [--once [--no-reset-analysis]] [--interval-tick SECONDS]` | Run the collection worker (see [Collecting content](#collecting-content)). |
 | `items list [--source ID] [--limit N] [--ids]` | The collected items, newest first (`--ids` shows each id, which `classify show` takes). |
 | `items search QUERY [--limit N] [--ids]` | Search titles and texts by words. |
-| `classify run [--limit N]` | Classify the pending items of the eligible sources (CPU only). The worker does it after every collection pass. |
+| `classify run [--limit N]` | Classify the pending items of the eligible sources (CPU only). The worker does it after every collection pass. Exit status `3` when no source is eligible. |
+| `classify reclassify --status S [--limit N]` | Send the items at status `out_of_scope` (after a vocabulary change) or `classification_failed` back to the queue; the next run classifies them again. |
 | `classify show ITEM_ID` | The verdict of one item: label, confidence, deciding stage, rationale, flags. |
-| `classify stats` | Verdicts by label, out of scope by reason, and the flags. |
+| `classify stats` | Verdicts by label, out of scope by reason, the flags, near copies, duplicates waiting for their original, and the items parked as failed. |
 | `topics show` | The topic vocabulary in force, as YAML. |
 | `topics set-file PATH` / `topics reset` | Install a vocabulary from a YAML file / go back to the shipped one (new audited version). |
 | `serve [--host H] [--port N] [--allow-non-loopback] [--allowed-host NAME]` | Run the local web UI (see [Web UI](#web-ui)). |
@@ -131,6 +134,7 @@ Results go to stdout. The exit status says what happened:
 | `0` | Success. |
 | `1` | The operation was refused (invalid input, conflict, unknown source, storage failure...): one `error: ...` line on stderr, nothing on stdout. |
 | `2` | Usage mistake (missing option, unknown command). |
+| `3` | `classify run` found no eligible source (global analysis off, or no enabled source with its own switch on), so it had nothing to do. It is not a failure: a run with eligible sources and nothing pending exits `0`. |
 | `70` | Unexpected failure, i.e. a bug: `error: unexpected failure (<ExceptionType>); this is a bug` and the frames where it happened on stderr, never the exception message or any variable. Please report it. |
 
 Error messages never repeat the values, keys, reasons or actors you typed, so a secret pasted into
@@ -382,11 +386,13 @@ uv run social-tracker items search "sismo cali"
   retention horizon (now minus the retention) is skipped at ingest and counted as
   `older_than_retention`, and for entries with no publication date, which are dated by when they
   were first seen, a small tombstone (the dedup key, no text) outlives the item (the oldest are
-  forgotten beyond 50,000 per source). With `0` only items the classifier has processed
-  (`classified` or `out_of_scope`) are removed, once, as soon as the next purge runs; they leave a
-  tombstone, no horizon applies, and the items still waiting for classification stay. Their
-  verdicts and near-duplicate signatures are kept (they hold no text), so a copy that shows up
-  later is still recognised. Alerts are a separate store and are not touched.
+  forgotten beyond 50,000 per source). With `0` the items the classifier has processed are
+  removed, once, as soon as the next purge runs: `classified` ones at once, `out_of_scope` ones
+  only after their first 24 hours (so a vocabulary change can bring them back, see
+  `classify reclassify`); they leave a tombstone, no horizon applies, and the items still waiting
+  for classification or parked as `classification_failed` stay. Their verdicts and near-duplicate
+  signatures are kept (they hold no text; see [what is stored](#classifying-content)), so a copy
+  that shows up later is still recognised. Alerts are a separate store and are not touched.
 - **Safety of the fetch.** Only `http` and `https` addresses without a login are fetched, and
   only on the ports 80, 443, 8080 and 8443 (`SOCIAL_TRACKER_ALLOWED_PORTS` replaces the list),
   redirects included. Every host is resolved and ALL its addresses must be public: loopback,
@@ -417,17 +423,21 @@ uv run social-tracker items search "sismo cali"
 
 This is internal observation only: a verdict is stored locally and shown to you, never published
 or sent anywhere. The cascade runs on the CPU, needs no model and no network, and is
-deterministic: the same item, history and vocabulary always give the same verdict, whatever the
-order the items arrived in. The Servicio Geológico Colombiano may be NAMED in a text, but it is
-never a data source of this application.
+deterministic: the same item, history and vocabulary always give the same verdict. Within one run
+the order the items were stored in does not matter (they are taken in the order they were first
+SEEN here); across runs the item classified first is the original of its later copies. The
+Servicio Geológico Colombiano may be NAMED in a text, but it is never a data source of this
+application.
 
 ```bash
-uv run social-tracker classify run
 uv run social-tracker classify stats
 uv run social-tracker topics show
 ```
 
-(The worker does `classify run` after every collection pass.) `classify show ITEM_ID` prints one verdict (`items list --ids` shows the ids).
+The worker does `classify run` after every collection pass; run it yourself for a one-off pass.
+Its exit status is `0` when it ran (also when nothing was pending), `1` when a storage error
+stopped it (run it again: it resumes) and `3` when no source is eligible, so there was nothing it
+could do. `classify show ITEM_ID` prints one verdict (`items list --ids` shows the ids).
 
 **What it looks at.** The primary focus is (a) earthquakes and aftershocks, damage, rumors and the
 people talking about them, and (b) what is said about the Secretaría de Gestión del Riesgo de
@@ -437,51 +447,90 @@ Other natural disasters (floods, landslides, volcano, forest fires, storms) are 
 and public order unrelated to disasters are out of scope.
 
 **The stages**, in order (the worker runs them after each collection pass, 200 items at a time,
-oldest published first; `classify run` does the same on demand):
+the one seen first first; `classify run` does the same on demand):
 
 1. **Topic filter.** An item with none of the vocabulary below is `out_of_scope` and counted by
-   reason (`no_topic_match`, `crime_public_order`); an item with no words at all is
-   `unclassified`. The title and the text are read together.
+   reason (`no_topic_match`, `crime_public_order`, `non_spanish` for English text); an item with
+   no words at all is `unclassified`. The title and the text are read together. A text longer
+   than 20,000 characters is read at both ends (the first 10,000 and the last 10,000) and flagged
+   `truncated`; a truncated text with no topic in the parts that were read is NOT called off topic:
+   it is kept as `unclassified` for review, last in the queue, so that padding cannot hide a rumor.
 2. **Rules.** Weighted heuristic signals (table below) become a preliminary label and a
    confidence.
 3. **Recycled and near-duplicate check.** See below.
 4. The official-catalog cross-check and the language-model judgment are later units. The verdict
-   already records `catalog: unavailable` for earthquake items, and marks what the LLM will have
-   to settle (`needs_llm`, with a `priority`).
+   already records `catalog: unavailable` for earthquake items (the check runs before the item's
+   write transaction opens, so a slow catalog never holds the database), and marks what the LLM
+   will have to settle (`needs_llm`, with a `priority`).
 
 **Labels:** `unintentional_rumor`, `deliberate_disinformation`, `recycled_content`, `no_risk`,
 `unclassified`, `out_of_scope`. A verdict has a label, a confidence from 0 to 1, the stage that
 decided, a rationale of at most 300 characters (signal names, topics and matched vocabulary
 terms; item text is never quoted), the evidence (`signals`), and the flags `low_confidence`,
-`needs_llm`, `truncated`, `duplicate_of` and `recycled_of`.
+`needs_llm`, `truncated`, `duplicate_of`, `near_of`, `recycled_of` and `awaiting_original`.
+
+**Hostile spelling.** Before anything is matched the text is folded: case, accents, punctuation,
+full-width forms and invisible characters are removed, and Cyrillic and Greek letters that look
+like Latin ones are replaced by them (`tеmblor` with a Cyrillic `е` is `temblor`), as are the
+blank "letters" (Hangul filler, Braille blank). A second, decoded view joins a word spelled letter
+by letter (`t.e.m.b.l.o.r`, `t e m b l o r`, up to 15 letters) and reads a single digit inside a
+word as a letter (`t3mblor`, `sism0`); the stages look at both views. The trick itself is a signal
+(`obfuscated_text`): it raises suspicion and the queue priority, can keep an otherwise clean report
+from settling, and never decides a label alone. Several spelled-out words in a row are joined into
+one blob and are not recognised (the signal still fires).
 
 **How the rules decide.** Each signal argues for one label with a weight; the evidence for a label
 is `1 - product(1 - weight)` over its signals, so clues add up but never pass 1. The label with the
-most evidence wins (a tie goes to the more serious one). No signal, or evidence under 0.2, leaves
-the item `unclassified` with that confidence (0.0 for no signal at all; gibberish with a topic word
-ends up here). Two labels that are both at least 0.3 and closer than 0.15 are *conflicting*.
+most evidence wins (a tie goes to the more serious one). Evidence under 0.4 decides nothing: the
+item is `unclassified` and goes to the LLM. Two labels that are both at least 0.3 and closer than
+0.15 are *conflicting*; the time of a prediction restates the prediction and is not counted as a
+second opinion for that.
 
 | Signal | Argues for | Weight | Fires when |
 | --- | --- | --- | --- |
-| `prediction_claim` | unintentional_rumor | 0.45 | a future quake is announced ("mañana habrá un temblor", "va a temblar", "pronostican un terremoto"), unless negated shortly before ("no habrá", "es falso") |
+| `prediction_claim` | unintentional_rumor | 0.45 | a future quake is announced ("mañana habrá un temblor", "va a temblar", "pronostican un terremoto", "un sismo de magnitud 7 sacudirá Cali", "el temblor que se viene"), unless negated shortly before ("no habrá", "es falso") |
 | `prediction_specific_time` | deliberate_disinformation | 0.35 | the prediction comes with a date, a weekday, an hour or "mañana"/"hoy"/"esta noche" |
 | `pseudo_authority` | unintentional_rumor | 0.30 | "lo dijo la NASA", "según un científico" (anonymous authorities) |
-| `virality_phrases` | unintentional_rumor | 0.20 | "compartan", "reenvía", "pásalo", "urgente" |
+| `virality_phrases` | unintentional_rumor | 0.20 | "compartan", "reenvía", "pásalo", "urgente", unless negated right before ("no compartan") |
 | `censorship_bait` | deliberate_disinformation | 0.30 | "antes de que lo borren", "no quieren que sepas" |
 | `all_caps` | unintentional_rumor | 0.15 | at least 20 letters, 70 % or more uppercase |
 | `repeated_exclamation` | unintentional_rumor | 0.10 | `!!`, `¡¡` or three `!` |
 | `unverifiable_sources` | unintentional_rumor | 0.25 | "fuentes confiables", "dicen que", "me dijo un amigo" |
-| `official_attribution_unlinked` | deliberate_disinformation | 0.45 | an official body (the secretariat, UNGRD, ...) is named as the speaker, an order or alarm word ("evacuen", "salgan", "peligro") is present and there is no link to a configured official domain |
-| `official_link` | no_risk | 0.35 | a link to (or an item served from) a configured official domain |
+| `official_attribution_unlinked` | deliberate_disinformation | 0.45 | an official body (the secretariat, UNGRD, ...) is named as the speaker of ANY claim and there is no link to a configured official domain: the full weight with an order or alarm word ("evacuen", "salgan", "peligro"), 55 % of it (0.25) without one. Never when the source itself, or the address of the item, is on an official domain |
+| `official_link` | no_risk | 0.50 | a link to (or an item served from) a configured official domain |
 | `evacuation_claim` | unintentional_rumor | 0.20 | evacuation, shelter and closure claims ("evacuen", "salgan de", "habilitan albergues", "cierre de vías", "suspendidas las clases") |
-| `casualty_claim` | unintentional_rumor | 0.25 | casualty counts or collapse claims ("300 muertos", "el edificio colapsó") |
-| `recycled_marker` | recycled_content | 0.50 | "video de 2016", "video viejo", "hace años", "imágenes de archivo" |
-| `old_year_reference` | recycled_content | 0.25 | a year at least two years before the item's own |
-| `news_report` | no_risk | 0.50 | a report verb with a quake and a magnitude ("el SGC reportó un sismo de magnitud 4.2") |
+| `casualty_claim` | unintentional_rumor | 0.25 | casualty counts or collapse claims ("300 muertos", "el edificio colapsó"); 60 % of that next to a report or an official link |
+| `recycled_marker` | recycled_content | 0.50 | "video de 2016", "video viejo", "hace años", "de hace 10 años", "fotos del archivo", "imágenes de archivo" |
+| `old_year_reference` | recycled_content | 0.25 | a year at least two years before the year the item was first seen |
+| `news_report` | no_risk | 0.60 | a report verb with a quake and a magnitude ("el SGC reportó un sismo de magnitud 4.2", "un temblor de 4.5 grados") or an agency wording ("el Servicio Geológico Colombiano informó un temblor", "la Red Sismológica Nacional registró un sismo") |
+| `obfuscated_text` | unclassified | 0.30 | mixed scripts in one word, invisible filler characters, a word spelled letter by letter or a digit inside a word: suspicion only, no label |
+
+A link counts only if it is a real one: it must start with `http://`, `https://` or `www.` and its
+host (up to the first `/`, `?`, `#` or `:`) must be the configured domain or a subdomain of it, on a
+label boundary. A login in the address (`https://official-domain.example@evil.example/`), the
+domain only in a path or query string, a look-alike (`evil-official-domain.example`,
+`official-domain.example.evil.com`), a punycode or non-Latin look-alike and a bare mention of the
+domain are not official links. Case and a trailing dot do not matter.
 
 Reporting a real quake is not predicting one: "el SGC reportó un sismo de magnitud 4.2" gets
 `news_report` and none of the prediction signals. The weights are starting points chosen by hand,
 not measured values (see Calibrating).
+
+**What can settle as harmless.** `no_risk` is settled (never queued) when nothing argues for risk:
+- an on-topic Spanish text of at least 6 words with no signal at all (chatter, a complaint about
+  the secretariat, a news item about a landslide) is `no_risk` at 0.6; a shorter text, or a pile
+  of tokens without a Spanish function word, is inconclusive instead;
+- strong benign evidence can reach 0.8 and more: a report with an official link
+  (`news_report` 0.60 and `official_link` 0.50 give 0.80 at neutral credibility);
+- benign evidence alone under 0.5 (a lone link) is not enough and is inconclusive.
+
+**Benign evidence cannot launder a risk signal.** If a risk signal (anything but the stylistic
+`all_caps`, `repeated_exclamation` and `old_year_reference`) or an obfuscation is present next to
+benign evidence, `no_risk` cannot win however strong that evidence is: "temblor: 300 muertos,
+edificios colapsaron, evacuen se registro un sismo de magnitud 5" stays a suspected rumor, is marked
+conflicting and goes to the LLM with a raised priority. The price is that a real report that cites
+an official body WITHOUT a link (`official_attribution_unlinked` fires) is queued too, until the
+catalog cross-check of a later unit can confirm it.
 
 **Credibility is a prior, never a label.** The source's credibility (1 to 5, 3 by default) moves
 the confidence of a label the evidence already chose by 0.03 per step away from 3: a more credible
@@ -490,55 +539,113 @@ at any credibility.
 
 **Low confidence and the LLM queue.** A confidence strictly under the alert threshold (`status`
 shows it; 0.5 by default) sets `low_confidence`. An in-scope item is marked `needs_llm` when it is
-inconclusive, has conflicting signals, or its confidence is in [0.4, 0.8) (0.8 is settled, 0.79
-is not; 0.4 is queued, 0.39 is not), unless it duplicates an item that was already judged. The
-`priority` ranks the queue (strong evidence first, then how clearly on topic, with a bump for the
-secretariat). The hourly cap on LLM judgments is applied by the stage that consumes the queue.
+inconclusive, has conflicting signals, or has a risk label with a confidence under 0.8 (0.8 is
+settled, 0.79 is not), unless it duplicates an item that was already judged. There is no dead zone
+under 0.4: weak evidence is "inconclusive" and queued too, so the queue only ever shrinks as
+evidence grows. The credibility prior can move a confidence a little under 0.4 without changing
+that. The `priority` ranks the queue (strong evidence first, then how clearly on topic, with a bump
+for the secretariat and for a laundering attempt). The hourly cap on LLM judgments is applied by
+the stage that consumes the queue.
 
-**Recycled and near-duplicate content.** Each in-scope item leaves a signature (a content hash and
-a MinHash of its word triples, 80 values, no text) that is looked up through an index, so the cost
-of a lookup does not grow with the number of stored items. A new item that matches content first
-seen or published STRICTLY more than `SOCIAL_TRACKER_RECYCLE_DAYS` days earlier (7 days exactly is
-still a duplicate) is `recycled_content` and references the original (`classify show` prints
-`recycled of`); its confidence is 0.9 for identical content and 0.9 times the estimated similarity
-for a near copy, moved by the credibility prior. A match inside the window is a duplicate: it
-reuses the earlier verdict (`duplicate of`) and is not escalated again. A near copy is a text whose
-estimated word-triple similarity is at least `SOCIAL_TRACKER_NEAR_DUPLICATE_THRESHOLD` (0.8). Text
-longer than 20,000 characters is cut before analysis and flagged `truncated`.
+**Recycled and near-duplicate content.** Time is measured from when THIS application first saw
+each item (`fetched_at`), never from the publication date, which the feed writes and can forge
+(a backdated or future date changes nothing, and a forged "original" cannot make the real report
+look recycled). Each in-scope item that is not itself an exact copy or recycled leaves a signature:
+the content hash, a hash of the folded text, a hash of the numbers in it, its word count and a
+MinHash of its 4-character shingles (80 values, no text). Lookups use indexes and never scan the
+table; the cost of one grows with the number of stored signatures that share a band with the item,
+and at most `SOCIAL_TRACKER_NEAR_DUPLICATE_CANDIDATES` (500) of them are verified, the ones
+sharing the most bands first (a lookup that hits the limit is counted in the report).
+- **Identical content** (same content hash or same folded text, looked up on its own and never
+  limited by the candidate cap) within `SOCIAL_TRACKER_RECYCLE_DAYS` (7 days exactly is still
+  inside) is a *duplicate*: it reuses the label and evidence of the earlier verdict with the
+  credibility prior of its OWN source, `classify show` prints `duplicate of`, and it is not queued
+  again. If the original is itself still waiting for the LLM the duplicate is flagged
+  `awaiting_original` (a provisional verdict; the link is what the LLM stage follows to settle both).
+  Further apart than that, in either direction (an old item arriving after a new one counts the
+  same), it is `recycled_content` and references the other (`recycled of`) at 0.9, moved by the
+  credibility prior.
+- **A near copy** (estimated similarity at least `SOCIAL_TRACKER_NEAR_DUPLICATE_THRESHOLD`, 0.8,
+  and BOTH texts of at least 12 words and with exactly the same numbers) never inherits a verdict:
+  a magnitude, an hour or one digit changed makes it a different report. Within the window its
+  rules run on its own text and it only links to the original (`near copy of`); beyond it it is
+  `recycled_content` at 0.9 times the similarity.
+- **Short texts** (fewer than 12 words) match only identical content inside the window: "Temblor en
+  Cali" from a second source weeks later is not recycled, and a series of templated bulletins
+  ("Sismo de magnitud X con epicentro en Y a las HH:MM") is not mistaken for copies.
+- The similarity is an estimate with a standard error of `sqrt(J (1 - J) / 80)` (0.045 at 0.8).
+  Measured on 3,000 random pairs of texts with 1 to 25 % of their words replaced, by TRUE
+  similarity J: at about 0.7 the pair is a candidate 93 % of the time and accepted 5 % of the
+  time; at about 0.8 it is a candidate 99.8 % of the time and accepted 58 % of the time (the
+  threshold itself, so the noise decides); at about 0.9 it is accepted 98.5 % of the time. A
+  one-word edit of a 20-word caption keeps about 0.87 and is caught in more than 95 % of the
+  cases. `tests/classification/test_similarity.py` pins bounds around these numbers.
 
 **The vocabulary** is editable data. `topics show` prints it; edit a copy and install it with
 `topics set-file FILE -r "why"` (a new audited version; the same vocabulary again changes nothing)
 or return to the shipped one with `topics reset -r "why"`. Matching is by whole words and phrases,
 ignoring case, accents, punctuation, full-width forms and hidden characters, so `¡SÍSMO!` is
-`sismo`, while `sismógrafo` is NOT `sismo` (list every form you want: singular, plural,
-adjective). The file is UTF-8, at most 64 KiB, and refused when it has an unknown key, a duplicate
-(also across accents and case), a term in two groups, a list over 500 terms, a term over 80
-characters or 12 words, or an unknown or out-of-range weight. Groups: `earthquake`, `secretariat`
-(the official name and its variants), `other_disaster`, `places` (context only: a place alone
-never puts an item in scope), `exclude` (crime terms: out of scope unless a disaster term is
-present), `official_bodies`, `official_domains`, `official_channel_hints` and `weights` (per-signal
-overrides; 0 switches a signal off). Terms are stored folded (lowercase, no accents).
+`sismo`, while `sismógrafo` is NOT `sismo` (list every form you want: singular, plural, verb
+forms such as `tiembla`, `temblaba`, `está temblando`, adjective). Two ambiguous earthquake words
+count only with context: `magnitud` needs a number within 3 words after it or an earthquake term
+fewer than 8 words away, and `réplica`/`réplicas` an earthquake term fewer than 8 words away ("el alcalde replica a las
+críticas" and "la magnitud del problema" are not quakes). The file is UTF-8, at most 64 KiB, and
+refused when it has an unknown key, a duplicate (also across accents and case), a term in two
+groups, a list over 500 terms, a term over 80 characters or 12 words, or an unknown or
+out-of-range weight. Groups: `earthquake`, `secretariat` (the official name and its variants),
+`other_disaster`, `places` (context only: a place alone never puts an item in scope), `exclude`
+(crime terms: out of scope unless a disaster term is present), `official_bodies` (a bare "la
+secretaría" counts, but "la secretaría de Hacienda" is another body), `official_domains`,
+`official_channel_hints` and `weights` (per-signal overrides; 0 switches a signal off). Terms are
+stored folded (lowercase, no accents).
+
+Items already classified are not redone when the vocabulary changes. To judge again what the old
+vocabulary called off topic, send it back: `classify reclassify --status out_of_scope [--limit N]`
+forgets those verdicts and puts the items in the queue; the next `classify run` (or worker pass)
+classifies them with the vocabulary in force. `--status classification_failed` retries items that
+were parked (below). With a retention of 0 days an out-of-scope item is kept for its first 24 hours
+so that this is possible.
 
 **`official_domains` and `official_channel_hints` are placeholders: verify before relying on
 them.** The shipped values (`official-domain.example`, `@official_channel_placeholder`) are not
 real addresses and nobody has checked them. Put the domains you have verified yourself in
-`official_domains`; a link to one of them lowers the suspicion of an unverified attribution. The
-channel hints are informational only in this version and drive no decision.
+`official_domains`: each needs at least two labels and must not be a public suffix (`com`,
+`gov.co`, `com.co`... are refused: a link "to" them proves nothing). A link to one of them lowers
+the suspicion of an unverified attribution. The channel hints are informational only in this
+version and drive no decision.
 
 **Safety and behavior.** An item is classified only while global analysis is on, its source is
 enabled and the source's analysis switch is on; this is checked again for every item, so a source
 disabled in the middle of a run stops at the next item and its pending items stay untouched. Each
 item is classified atomically and at most once (two runs racing over the same items never store
-two verdicts); a storage error ends a run and the next one resumes. Changing the vocabulary or the
-thresholds affects the items classified afterwards; stored verdicts are not redone. Item text is
-untrusted data: an instruction written inside an item is just text.
+two verdicts); a storage error ends a run and the next one resumes. Any other error belongs to one
+item: it is counted and the run goes on, and after three consecutive errors the item is parked as
+`classification_failed` (it is skipped, `classify stats` counts it and the item is never purged by
+a retention of 0) until `classify reclassify --status classification_failed` retries it. Changing
+the vocabulary or the thresholds affects the items classified afterwards. Item text is untrusted
+data: an instruction written inside an item is just text.
 
-**Calibrating.** Nothing here has been measured against real data yet. To tune it: run the worker
-on your sources, read `classify stats` and a sample of `classify show` for the labels you care
-about, then adjust `weights` (and the term lists) with `topics set-file`, and the two thresholds
-with their environment variables. A hand-labelled gold set and a tool to measure precision and
-recall against it come in a later slice; until then treat the confidences as relative, not as
-probabilities.
+**What is stored, and for how long.** A verdict holds the label, the confidence, the signal names
+and weights, the topics and a rationale made of signal names and vocabulary terms: never the text of
+the item. A signature holds a SHA-256 of the title and text, a SHA-256 of the folded text, a
+SHA-256 of its numbers, the word count and the MinHash: no text either, but a hash lets anyone who
+has a candidate text confirm that it was seen here, and a MinHash reveals which texts are similar,
+so treat the database as sensitive as the items. Signatures are forgotten 730 days after the item
+was first seen; the verdict of an item that no longer exists is forgotten after
+`SOCIAL_TRACKER_CLASSIFICATION_RETENTION_DAYS` (180) days, by the hourly retention purge; the
+verdict of an item still stored is kept as long as the item.
+
+**Calibrating.** The thresholds and weights are starting points, not measurements on real feeds.
+What exists so far, all of it synthetic: a seeded corpus of 2,000 items whose mix is an assumption
+(`tests/classification/corpus.py`), in which 13.0 % of the items (21.9 % of the in-scope ones) are
+queued for the LLM, a corpus of 2,000 templated bulletins over 83 days in which no item is flagged
+as a copy, and 65 labeled Spanish examples (`tests/data/gold_examples.yaml`, one of them recorded as a known
+gap) that state what the cascade should do and are the seed of the gold set. The escalation rate depends on the real mix
+(texts that cite an official body without a link are always queued for now), so read `classify
+stats` and a sample of `classify show` on your sources, then adjust `weights` (and the term lists)
+with `topics set-file`, and the thresholds with their environment variables. A hand-labelled gold
+set and a tool to measure precision and recall against it come in a later slice; until then treat
+the confidences as relative, not as probabilities.
 
 ## Audit log
 
@@ -582,8 +689,15 @@ uv export --frozen --no-hashes -o requirements-audit.txt
 uvx pip-audit -r requirements-audit.txt --no-deps --disable-pip
 ```
 
-(The exported file is a throwaway: do not commit it.) The last run, on the locked versions, found
-no known vulnerabilities.
+(The exported file is a throwaway: do not commit it.) Last run: 2026-10-27, on the locked
+versions, `No known vulnerabilities found`; the lock file it audited:
+
+```text
+uv.lock sha256 96c8234a77c9da7b4771ad43d2e414edd861e37e205103d71b8955fed3d5c059
+```
+
+The line is informational: it says which dependency set the result belongs to. After any change
+to `uv.lock` run the audit again and update the date and the hash (a test fails while they differ).
 
 The architecture is hexagonal. Domain modules are pure, services depend on ports only, and
 `social_tracker.bootstrap` is the composition root that wires the SQLite adapters into the
@@ -591,5 +705,6 @@ services. Entrypoints such as the CLI never import persistence; `lint-imports` e
 The collector follows the same rules, and its fetcher adapter (`collector/http_fetcher.py`) is the
 only module allowed to import an HTTP client or sockets: the web UI has no outbound path at all
 and reaches the worker side only through the composition root. The classification core
-(`classification/domain`, `text`, `topics`, `rules`, `similarity`) is pure and deterministic: an
-import contract forbids it storage, file and network libraries, YAML, randomness and the clock.
+(every module of `classification/` except `service`, `ports` and `yaml_io`, whichever is added
+later) is pure and deterministic: an import contract forbids it storage, file, logging, thread and
+network libraries, YAML and randomness, and a source check forbids calls to the current time.

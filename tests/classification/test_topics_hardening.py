@@ -232,3 +232,49 @@ def test_the_suffix_list_is_lowercase_and_has_the_colombian_ones():
 
 def test_the_shipped_defaults_still_load():
     assert default_topic_config().official_domains == ("official-domain.example",)
+
+
+# ---- the exact edges ----
+
+
+@pytest.mark.parametrize(
+    ("between", "counts"), [(CONTEXT_WINDOW - 1, True), (CONTEXT_WINDOW, False)]
+)
+def test_a_replica_is_near_a_quake_term_by_fewer_than_the_window_words_after_it(between, counts):
+    filler = " ".join(["palabra"] * between)
+    terms = verdict(f"el sismo {filler} replica").matched_terms
+    assert ("replica" in terms) is counts
+
+
+@pytest.mark.parametrize(
+    ("between", "counts"), [(CONTEXT_WINDOW - 1, True), (CONTEXT_WINDOW, False)]
+)
+def test_a_replica_is_near_a_quake_term_by_fewer_than_the_window_words_before_it(between, counts):
+    filler = " ".join(["palabra"] * between)
+    terms = verdict(f"replica {filler} sismo").matched_terms
+    assert ("replica" in terms) is counts
+
+
+@pytest.mark.parametrize(
+    ("text", "english"),
+    [
+        ("the people and the mayor la casa de", False),  # 3 English words against 2 Spanish
+        ("the people and the mayor la casa", True),  # 3 against 1
+        ("the mayor la casa de", False),  # one English word is never a language
+        ("the and mayor", True),  # two English, no Spanish
+    ],
+)
+def test_a_text_reads_as_english_when_it_has_two_english_words_and_over_twice_the_spanish(
+    text, english
+):
+    reason = verdict(text).reason
+    assert (reason is OutOfScopeReason.NON_SPANISH) is english
+
+
+def test_a_pile_of_words_with_one_spanish_function_word_is_not_a_sentence():
+    from tests.classification.support import run_rules
+
+    pile = " ".join(["sismo", *["xkqzv"] * 18, "de"])  # 20 words, one function word
+    sentence = " ".join(["sismo", *["xkqzv"] * 8, "de", "la", "en"])  # 12 words, three of them
+    assert run_rules(pile).label.value == "unclassified"
+    assert run_rules(sentence).label.value == "no_risk"

@@ -11,6 +11,9 @@ IGNORED = [
     ".env.local",
     "data/risk.db",
     "data/raw/posts.json",
+    "tests/data/risk.db",  # the exception is the folder, not the databases inside it
+    "tests/data/local.sqlite3",
+    "tests/data/secrets/token.txt",
     "secrets/token.txt",
     "session.cookies",
     "server.pem",
@@ -53,6 +56,7 @@ NOT_IGNORED = [
     "src/social_tracker/data.py",
     "src/social_tracker/domain/keys.py",
     "tests/test_smoke.py",
+    "tests/data/gold_examples.yaml",  # synthetic test data is source, unlike runtime data/
     "docs/cookies_policy.md",
     "docs/db-wal.md",
     "notes/db-journal.txt",

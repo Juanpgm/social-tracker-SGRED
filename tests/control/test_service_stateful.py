@@ -271,8 +271,9 @@ def test_the_random_walk_really_reaches_the_paths_the_invariant_is_about():
             # Derandomized, yet the walk still shifts with what the process has imported (heap
             # layout changes hypothesis' internal ordering): 120 examples reached the rare
             # "disabled while backoff" path in one process and missed it in another. 250 reach it
-            # in every layout tried.
-            max_examples=250,
+            # in every layout tried. A larger suite (more imported modules) moved the walk again and
+            # 250 missed one path in a full run, so the budget is 600.
+            max_examples=600,
             stateful_step_count=40,
             deadline=None,
             derandomize=True,  # the same walk every time, so this guard can never flake

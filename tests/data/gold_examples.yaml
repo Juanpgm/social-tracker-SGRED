@@ -1,0 +1,309 @@
+# SYNTHETIC gold examples: the seed of the gold set of unit 3d.
+#
+# Every text below was written for this file. None is a real post, article, account or report, and
+# the official domain is the placeholder of the shipped vocabulary. The expectations are the
+# INTENT of the cascade (what a careful reader would want it to do), not a record of what it did:
+# an example the cascade gets wrong is listed under `known_gaps` with the reason, and the test
+# pins that it is still wrong, so that fixing it is noticed.
+#
+# expect:
+#   in_scope   whether the topic filter keeps it (false: `reason` says why it is out of scope)
+#   label      the label, or a list of acceptable labels (rules stage only; the LLM decides later)
+#   escalate   whether the cascade sends it to the LLM
+#   min_confidence / max_confidence   optional bounds on the confidence
+# `credibility` (1..5, default 3) and `url` (the address of the item) are optional.
+
+version: 1
+
+examples:
+  # ---- official-style quake reports ----
+  - id: official-linked-1
+    kind: official_report
+    text: "El Servicio Geológico Colombiano informó un sismo de magnitud 4.2 con epicentro en Cali a las 10:30. Más información en https://official-domain.example/sismos/1"
+    expect: {in_scope: true, label: no_risk, escalate: false, min_confidence: 0.8}
+  - id: official-linked-2
+    kind: official_report
+    text: "La Red Sismológica Nacional registró un temblor de 3.8 grados en el Valle del Cauca sin reportes de daños. Detalles en www.official-domain.example/boletin"
+    expect: {in_scope: true, label: no_risk, escalate: false, min_confidence: 0.8}
+  - id: official-served-from-official-address
+    kind: official_report
+    text: "Un sismo de magnitud 5.1 se registró esta madrugada en el Pacífico colombiano; la Secretaría de Gestión del Riesgo pide calma."
+    url: "https://news.official-domain.example/avisos/77"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: report-no-attribution-1
+    kind: news_report
+    text: "Un sismo de magnitud 4.5 se registró anoche en Jamundí sin reportes de daños ni heridos"
+    expect: {in_scope: true, label: no_risk, escalate: false, min_confidence: 0.6}
+  - id: report-no-attribution-2
+    kind: news_report
+    text: "Un temblor de 4.9 grados se sintió esta mañana en Palmira y la gente salió a la calle"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: report-with-unlinked-attribution
+    kind: news_report
+    text: "El Servicio Geológico Colombiano informó un sismo de magnitud 4.2 en Cali a las 10:30 sin reportes de daños"
+    expect: {in_scope: true, label: [unclassified, deliberate_disinformation], escalate: true}
+  - id: report-unlinked-defensa-civil
+    kind: news_report
+    text: "La Defensa Civil informó que el sismo de las 9:15 dejó daños menores en viviendas de Yumbo"
+    expect: {in_scope: true, label: [unclassified, deliberate_disinformation], escalate: true}
+  - id: report-from-the-official-source-itself
+    kind: official_report
+    text: "La Secretaría de Gestión del Riesgo informó que se registró un sismo de magnitud 3.9 en Cali"
+    url: "https://www.official-domain.example/noticias/12"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+
+  # ---- prediction rumors ----
+  - id: prediction-tomorrow
+    kind: prediction
+    text: "Mañana habrá un temblor fuerte en Cali, compartan este mensaje"
+    expect: {in_scope: true, label: unintentional_rumor, escalate: true, min_confidence: 0.4}
+  - id: prediction-weekend
+    kind: prediction
+    text: "Se viene un terremoto en Cali este fin de semana, avisen a todos sus conocidos"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation], escalate: true}
+  - id: prediction-scientist
+    kind: prediction
+    text: "Un científico predijo un sismo grande para el sábado en el suroccidente colombiano"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation], escalate: true}
+  - id: prediction-verb-sacudira
+    kind: prediction
+    text: "El SGC confirma que un sismo de magnitud 7 sacudirá Cali mañana a las 5 am. Compartan"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation], escalate: true, min_confidence: 0.4}
+  - id: prediction-verb-sacudira-2
+    kind: prediction
+    text: "Un sismo de magnitud 8 sacudirá Cali el sábado a las 3 pm, compártelo"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation], escalate: true, min_confidence: 0.4}
+  - id: prediction-va-a-temblar
+    kind: prediction
+    text: "Va a temblar muy fuerte esta noche en toda la ciudad, no salgan de sus casas sin linterna"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation], escalate: true}
+  - id: prediction-nasa
+    kind: prediction
+    text: "Lo dijo la NASA: pronostican un terremoto para el próximo lunes en el Valle del Cauca"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation], escalate: true}
+  - id: prediction-debunk
+    kind: debunk
+    text: "Es falso que habrá un terremoto mañana en Cali, el Servicio Geológico explicó que los sismos no se pueden predecir"
+    expect: {in_scope: true, label: no_risk, escalate: false}  # a debunk is harmless
+
+  # ---- chain messages ----
+  - id: chain-urgent
+    kind: chain
+    text: "URGENTE!!! Dicen que va a temblar en Cali, fuentes confiables lo confirman. Compartan y reenvíen a todos sus contactos"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation], escalate: true}
+  - id: chain-censorship
+    kind: chain
+    text: "Pasen este video del temblor antes de que lo borren, los medios no dicen la verdad sobre los muertos en Cali"
+    expect: {in_scope: true, label: [unclassified, unintentional_rumor, deliberate_disinformation], escalate: true}
+  - id: chain-friend
+    kind: chain
+    text: "Me dijo un amigo que trabaja en la alcaldía que esta noche se viene un sismo grande, reenvía a tu familia"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation], escalate: true}
+  - id: chain-casualties
+    kind: chain
+    text: "Temblor en Cali: 300 muertos y edificios colapsaron, evacuen la zona centro ya!!! Corre la voz"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation, unclassified], escalate: true}
+  - id: chain-shouting
+    kind: chain
+    text: "ATENCION CALI: SE SINTIO UN TEMBLOR MUY FUERTE Y DICEN QUE VIENE OTRO MAS GRANDE, COMPARTAN"
+    expect: {in_scope: true, label: [unintentional_rumor, unclassified], escalate: true}
+  - id: chain-negated-share
+    kind: neutral
+    text: "No compartan rumores sobre el temblor de anoche, esperen la información de las autoridades de Cali"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+
+  # ---- false attribution to the secretariat and other bodies ----
+  - id: attribution-evacuate
+    kind: false_attribution
+    text: "La Secretaría de Gestión del Riesgo ordena evacuar el oriente de Cali de inmediato por un sismo que viene, evacuen ya"
+    expect: {in_scope: true, label: [deliberate_disinformation, unintentional_rumor], escalate: true}
+  - id: attribution-ungrd-prediction
+    kind: false_attribution
+    text: "Según la UNGRD el sábado habrá un terremoto en Cali, salgan de sus casas"
+    expect: {in_scope: true, label: [deliberate_disinformation, unintentional_rumor], escalate: true}
+  - id: attribution-secretary-announces
+    kind: false_attribution
+    text: "La Secretaria anunció que el sábado habrá un terremoto"
+    expect: {in_scope: true, label: deliberate_disinformation, escalate: true, min_confidence: 0.5}
+  - id: attribution-closures
+    kind: false_attribution
+    text: "Alcaldía de Cali informa: suspendidas las clases mañana en todos los colegios por el temblor que se viene"
+    expect: {in_scope: true, label: [deliberate_disinformation, unintentional_rumor], escalate: true}
+  - id: attribution-spoofed-link
+    kind: false_attribution
+    text: "La Secretaría de Gestión del Riesgo ordena evacuar Cali ya. Confirmado en https://official-domain.example@alertas-falsas.example/aviso"
+    expect: {in_scope: true, label: [deliberate_disinformation, unintentional_rumor], escalate: true}
+  - id: attribution-lookalike-domain
+    kind: false_attribution
+    text: "Según la Secretaría de Gestión del Riesgo evacuen la zona. Fuente: https://evil-official-domain.example/alerta"
+    expect: {in_scope: true, label: [deliberate_disinformation, unintentional_rumor], escalate: true}
+
+  # ---- recycled captions ----
+  - id: recycled-video-year
+    kind: recycled
+    text: "Video de 2016 del terremoto, ahora en Cali: miren cómo se cae el edificio, esto es de hoy y nadie lo dice"
+    expect: {in_scope: true, label: [recycled_content, unintentional_rumor], escalate: true}
+  - id: recycled-archive-photos
+    kind: recycled
+    text: "Imágenes de archivo del terremoto de Armenia circulan hoy como si fueran del temblor de esta mañana en Cali"
+    expect: {in_scope: true, label: [recycled_content, unintentional_rumor], escalate: true}
+  - id: recycled-years-ago
+    kind: recycled
+    text: "Este video es de hace 10 años y lo comparten como si fuera del sismo de ayer"
+    expect: {in_scope: true, label: [recycled_content, unintentional_rumor], escalate: true}
+  - id: recycled-not-from-today
+    kind: recycled
+    text: "Ojo con las fotos del sismo que circulan, no es de hoy, es de otro temblor de hace años"
+    expect: {in_scope: true, label: [recycled_content, unintentional_rumor], escalate: true}
+
+  # ---- neutral chatter ----
+  - id: chatter-felt-it
+    kind: neutral
+    text: "Ayer sentimos el temblor en el barrio y todos los vecinos salieron a la calle a conversar un rato"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: chatter-dogs
+    kind: neutral
+    text: "Qué susto el sismo de anoche, se movió todo el edificio y los perros no paraban de ladrar"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: chatter-asking
+    kind: neutral
+    text: "Alguien sabe si el temblor de hoy alcanzó a dañar las casas del barrio donde vive mi mamá"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: chatter-temblando
+    kind: neutral
+    text: "Esta temblando muy fuerte en Cali ahora mismo"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: chatter-replica
+    kind: neutral
+    text: "Después del temblor sentimos una réplica pequeña y ya todo volvió a la calma en la casa"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: chatter-preparedness
+    kind: neutral
+    text: "Me parece que el DAGRD debería explicar mejor cómo se prepara la ciudad para un sismo grande"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: chatter-kids
+    kind: neutral
+    text: "Mi hija se asustó mucho con el sismo de ayer y hoy no quiso ir al colegio por el miedo"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: chatter-emoji
+    kind: neutral
+    text: "🌋🌋 Vaya temblor el de anoche en Cali, todavía me late el corazón a mil por hora 😅"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+
+  # ---- complaints and comments about the secretariat ----
+  - id: complaint-drains
+    kind: complaint
+    text: "Otra vez la Secretaría de Gestión del Riesgo sin limpiar los caños de mi barrio, cuando llueve se inunda todo"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: complaint-phone
+    kind: complaint
+    text: "El DAGRD nunca contesta las llamadas de los vecinos cuando hay una emergencia en el barrio"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: complaint-praise
+    kind: complaint
+    text: "Gracias a la Secretaría de Gestión del Riesgo por llegar rápido cuando se desbordó la quebrada de mi sector"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: complaint-budget
+    kind: complaint
+    text: "Quisiera saber en qué se gastó el presupuesto la Secretaría de Gestión del Riesgo este año en Cali"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: complaint-short
+    kind: complaint
+    text: "Pésima la Secretaría de Gestión del Riesgo"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: complaint-alarm-claim
+    kind: complaint
+    text: "La Secretaría de Gestión del Riesgo avisó que hay peligro de derrumbe en la ladera y que salgan de las casas"
+    expect: {in_scope: true, label: [deliberate_disinformation, unclassified, unintentional_rumor], escalate: true}
+
+  # ---- other natural disasters ----
+  - id: other-landslide
+    kind: other_disaster
+    text: "Las lluvias de esta semana provocaron un deslizamiento en la vía hacia Dagua y el tránsito sigue lento"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: other-flood
+    kind: other_disaster
+    text: "Una creciente súbita del río dejó varias familias esperando que baje el agua para volver a sus casas"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: other-forest-fire
+    kind: other_disaster
+    text: "Los bomberos controlaron un incendio forestal en los cerros de la ciudad después de seis horas de trabajo"
+    expect: {in_scope: true, label: no_risk, escalate: false}
+  - id: other-tsunami-rumor
+    kind: other_disaster
+    text: "Dicen que habrá un tsunami en Buenaventura esta noche, compartan para que se salven todos"
+    expect: {in_scope: true, escalate: true}
+  - id: other-shelters
+    kind: other_disaster
+    text: "Habilitan albergues temporales en Cali para las familias damnificadas por las lluvias del fin de semana"
+    expect: {in_scope: true, escalate: true}
+  - id: other-evacuation-order
+    kind: other_disaster
+    text: "Ordenan la evacuación inmediata de las casas junto al río por la creciente, salgan de ahí ya"
+    expect: {in_scope: true, escalate: true}
+
+  # ---- English ----
+  - id: english-news
+    kind: english
+    text: "The mayor said that the new bridge will be open for the people of the city next month"
+    expect: {in_scope: false, reason: non_spanish}
+  - id: english-chat
+    kind: english
+    text: "We had a great time at the concert and the people were singing all the songs"
+    expect: {in_scope: false, reason: non_spanish}
+  - id: english-with-a-topic-term
+    kind: english
+    text: "The temblor was strong and the people ran out of the building into the street"
+    expect: {in_scope: true, label: unclassified, escalate: true}  # not Spanish: left to the LLM
+
+  # ---- off topic and crime ----
+  - id: off-football
+    kind: off_topic
+    text: "El equipo ganó el partido de anoche con un gol en el último minuto y la gente salió a celebrar"
+    expect: {in_scope: false, reason: no_topic_match}
+  - id: off-restaurant
+    kind: off_topic
+    text: "Abrieron un restaurante nuevo con comida típica y precios razonables para las familias del barrio"
+    expect: {in_scope: false, reason: no_topic_match}
+  - id: off-politics-replica
+    kind: off_topic
+    text: "El alcalde replica a las críticas de la oposición sobre el nuevo plan de movilidad"
+    expect: {in_scope: false, reason: no_topic_match}
+  - id: off-magnitude
+    kind: off_topic
+    text: "La magnitud del problema de movilidad en la ciudad es enorme según los expertos del sector"
+    expect: {in_scope: false, reason: no_topic_match}
+  - id: crime-robbery
+    kind: crime
+    text: "Hubo un robo a mano armada en un local del centro y la policía capturó a dos sospechosos"
+    expect: {in_scope: false, reason: crime_public_order}
+
+  # ---- evasion and laundering ----
+  - id: evasion-cyrillic
+    kind: evasion
+    text: "Mañana habrá un tеmblor fuerte en Cali, compartan este mensaje con todos"
+    expect: {in_scope: true, label: [unintentional_rumor, deliberate_disinformation], escalate: true}
+  - id: evasion-spaced
+    kind: evasion
+    text: "Mañana habrá un t e m b l o r muy fuerte en Cali, avisen a la familia"
+    expect: {in_scope: true, escalate: true}
+  - id: evasion-leet
+    kind: evasion
+    text: "Mañana habrá un t3mblor muy fuerte en Cali, avisen a la familia"
+    expect: {in_scope: true, escalate: true}
+  - id: laundering-benign-appended
+    kind: laundering
+    text: "temblor: 300 muertos, edificios colapsaron, evacuen se registro un sismo de magnitud 5"
+    expect: {in_scope: true, escalate: true}
+  - id: laundering-report-appended
+    kind: laundering
+    text: "Evacuen la zona de inmediato, hay 200 muertos. El Servicio Geológico Colombiano informó un sismo de magnitud 4.0 en Cali"
+    expect: {in_scope: true, escalate: true}
+
+# Examples the cascade still gets wrong, with the reason. The test pins the current (wrong) answer
+# so that a fix is noticed and the example moved above.
+known_gaps:
+  - id: gap-paraphrased-prediction
+    text: "Mi tía asegura que viene un terremoto devastador a Cali pronto, ya están cavando refugios en su barrio"
+    reason: "a prediction phrased with a verb the patterns do not list ('viene un terremoto') and no other clue reads as harmless chatter; the LLM stage and a longer verb list are the way out"
+    expect: {in_scope: true, label: [unintentional_rumor, unclassified], escalate: true}

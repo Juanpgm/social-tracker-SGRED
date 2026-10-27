@@ -31,14 +31,14 @@ def test_lookalike_letters_fold_to_the_latin_word(text):
     assert fold(text) in {"sismo", "temblor"}
 
 
-@pytest.mark.parametrize("filler", ["ㅤ", "⠀", "ᅟ", "ᅠ", "ﾠ", "឴"])
+@pytest.mark.parametrize("filler", ["\u3164", "\u2800", "\u115f", "\u1160", "\uffa0", "\u17b4"])
 def test_blank_letters_inside_a_word_do_not_split_it(filler):
     assert fold(f"tem{filler}blor") == "temblor"
     assert fold(f"{filler}sismo{filler}") == "sismo"
 
 
 def test_fold_stays_idempotent_with_the_skeleton():
-    for text in ("ѕіѕmо ΤΕΜΒLΟR", "tㅤe⠀mblor", "SÍSMO ｓｉｓｍｏ"):
+    for text in ("ѕіѕmо ΤΕΜΒLΟR", "t\u3164e\u2800mblor", "SÍSMO ｓｉｓｍｏ"):
         assert fold(fold(text)) == fold(text)
 
 
@@ -89,7 +89,7 @@ def test_short_spelled_runs_and_initials_are_not_joined():
     ("text", "kind"),
     [
         ("tеmblor", "mixed_script"),
-        ("sismoㅤ fuerte", "invisible"),
+        ("sismo\u3164 fuerte", "invisible"),
         ("t.e.m.b.l.o.r", "separators"),
         ("t3mblor", "leet"),
         ("ѕеѕо", "mixed_script"),  # a whole word made only of lookalikes
@@ -169,9 +169,52 @@ def test_the_seam_is_deterministic_and_keeps_characters_whole():
 
 
 def test_a_megabyte_of_adversarial_text_is_prepared_quickly():
-    chunk = "t.e.m.b.l.o.r ѕіѕmо t3mblor ㅤ⠀ " + "x " * 200 + "!" * 50 + " "
+    chunk = "t.e.m.b.l.o.r ѕіѕmо t3mblor \u3164\u2800 " + "x " * 200 + "!" * 50 + " "
     hostile = chunk * (1_000_000 // len(chunk) + 1)
     started = time.perf_counter()
     prepared = prepare("", hostile, max_chars=20_000)
     assert time.perf_counter() - started < 0.5
     assert prepared.truncated is True
+
+
+# ---- the edges of the decoding ----
+
+
+def test_a_word_spelled_with_exactly_the_longest_joinable_run_is_joined_and_one_more_is_not():
+    longest = "a b c d e f g h i j k l m n o"  # 15 letters
+    joined = prepare("", longest, max_chars=1000)
+    assert joined.decoded_tokens == ("abcdefghijklmno",)
+    too_long = prepare("", longest + " p", max_chars=1000)
+    assert too_long.decoded_tokens == tuple("abcdefghijklmnop")  # left as it is...
+    assert "separators" in too_long.obfuscation  # ...but still reported
+
+
+def test_a_run_of_exactly_the_minimum_length_is_joined_and_one_fewer_is_not():
+    assert prepare("", "s i s m", max_chars=100).decoded_tokens == ("sism",)
+    assert prepare("", "s i s", max_chars=100).decoded_tokens == ("s", "i", "s")
+
+
+@pytest.mark.parametrize(
+    ("word", "decoded"),
+    [("m4s", "m4s"), ("m4sa", "masa"), ("a1", "a1"), ("t3mb", "temb"), ("abc11d", "abc11d")],
+)
+def test_digits_are_read_as_letters_only_in_a_word_with_at_least_three_letters(word, decoded):
+    assert prepare("", word, max_chars=100).decoded_tokens == (decoded,)
+
+
+def test_only_a_digit_between_two_letters_is_reported_as_obfuscation():
+    assert "leet" in prepare("", "t3mblor", max_chars=100).obfuscation
+    ending = prepare("", "sism0", max_chars=100)
+    assert ending.decoded_tokens == ("sismo",)  # still decoded for matching...
+    assert "leet" not in ending.obfuscation  # ...but a digit at the end is not a disguise
+
+
+def test_separate_digits_are_not_a_spelled_word():
+    prepared = prepare("", "magnitud 4 5 6 7 8", max_chars=100)
+    assert prepared.decoded_tokens == prepared.tokens
+    assert prepared.obfuscation == ()
+
+
+def test_a_short_word_made_only_of_lookalikes_is_not_reported_but_a_longer_one_is():
+    assert prepare("", "\u0441\u043e\u0440", max_chars=100).obfuscation == ()  # 3 letters
+    assert "mixed_script" in prepare("", "\u0441\u043e\u0440\u0441", max_chars=100).obfuscation

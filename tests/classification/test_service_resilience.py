@@ -411,3 +411,18 @@ def test_pruning_forgets_the_error_counters_of_the_forgotten_verdicts():
     world.classifications.note_failure("itm_vanished", START)
     world.service.prune_history()
     assert world.classifications.note_failure("itm_vanished", START) == 1
+
+
+def test_a_near_copy_inside_the_window_asks_the_catalog_like_any_other_item():
+    from tests.classification.test_service_dedup import changed
+
+    catalog = HoldsNothing(lambda: True)
+    world = memory_world(catalog=catalog)
+    world.ready("src_a")
+    world.add_source("src_b")
+    base = "Sismo " + long_text(60)
+    world.add("a", base, source_id="src_a")
+    near = world.add("b", changed(base, 2), source_id="src_b", published_at=START + days(1))
+    run(world)
+    assert world.verdict(near).near_of is not None
+    assert len(catalog.results) == 2  # only an exact copy inherits the answer

@@ -32,9 +32,10 @@ _WORD_RE = re.compile(r"[^\W_]+")
 _FORMAT = "Cf"
 _MARK = "Mn"
 
-# Characters that render as blank but are letters or symbols to Unicode: Hangul fillers (also what
-# U+3164 and U+FFA0 turn into under NFKC), the Braille blank, the Khmer inherent vowels.
-_BLANK_LETTERS = frozenset("ᅟᅠㅤﾠ⠀឴឵")
+# Characters that render as blank but are letters or symbols to Unicode: the Hangul fillers, the
+# Braille blank, the Khmer inherent vowels. The wide Hangul fillers U+3164 and U+FFA0 are not
+# listed: NFKC, which runs first, turns them into U+1160.
+_BLANK_LETTERS = frozenset("\u115f\u1160\u2800\u17b4\u17b5")
 
 # Cyrillic and Greek letters that look like Latin ones (lowercase: applied after case folding).
 _CONFUSABLES = {

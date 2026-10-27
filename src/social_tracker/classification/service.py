@@ -744,7 +744,7 @@ class ClassifierService:
         """The outcome of the catalog cross-check; only in-scope earthquake items are checked
         (RC-6). It runs before the write transaction, and a catalog that fails or answers badly
         is `unavailable`."""
-        if not topic.in_scope or Topic.EARTHQUAKE not in topic.topics:
+        if Topic.EARTHQUAKE not in topic.topics:  # an item out of scope has no topics
             return NOT_CHECKED
         try:
             status = self._catalog.check(prepared.raw, item.published_at).status

@@ -253,3 +253,9 @@ def test_a_one_word_edit_of_a_twenty_word_caption_is_still_a_near_duplicate():
         changed[rng.randrange(20)] = rng.choice(VOCABULARY)
         caught += is_near_duplicate(sig_of(base), sig_of(changed), 0.8)
     assert caught >= 190  # at least 95 %: the estimator's noise (0.04) is the only way out
+
+
+def test_a_word_that_mixes_letters_and_digits_counts_as_a_number():
+    assert numbers_digest(("sismo", "p3")) != numbers_digest(("sismo", "p4"))
+    assert numbers_digest(("sismo", "p3")) != numbers_digest(("sismo", "p"))
+    assert numbers_digest(("sismo", "m4")) == numbers_digest(("temblor", "m4"))

@@ -16,11 +16,13 @@ from social_tracker.bootstrap import (
     ALLOW_PRIVATE_HOSTS_ENV,
     ALLOWED_PORTS_ENV,
     BUSY_TIMEOUT_ENV,
+    CLASSIFICATION_RETENTION_DAYS_ENV,
     DB_PATH_ENV,
     DEFAULT_DB_PATH,
     MAX_BYTES_PER_FETCH_ENV,
     MAX_BYTES_PER_SOURCE_ENV,
     MAX_ITEMS_PER_SOURCE_ENV,
+    NEAR_DUPLICATE_CANDIDATES_ENV,
     NEAR_DUPLICATE_THRESHOLD_ENV,
     RECYCLE_DAYS_ENV,
     RETENTION_DAYS_ENV,
@@ -82,6 +84,8 @@ def test_every_environment_variable_and_default_is_documented(readme: str):
         MAX_BYTES_PER_FETCH_ENV,
         RECYCLE_DAYS_ENV,
         NEAR_DUPLICATE_THRESHOLD_ENV,
+        NEAR_DUPLICATE_CANDIDATES_ENV,
+        CLASSIFICATION_RETENTION_DAYS_ENV,
     ):
         assert f"`{name}`" in readme
     assert DEFAULT_DB_PATH in readme
@@ -89,7 +93,7 @@ def test_every_environment_variable_and_default_is_documented(readme: str):
 
 
 def test_the_exit_codes_and_the_working_directory_warning_are_documented(readme: str):
-    for code in ("`0`", "`1`", "`2`", "`70`"):
+    for code in ("`0`", "`1`", "`2`", "`3`", "`70`"):
         assert f"| {code} |" in readme
     assert "depends on the working directory" in readme
     assert "database: ..." in readme
@@ -346,33 +350,89 @@ def test_the_signal_table_lists_every_signal_with_its_label_and_default_weight(r
 
 
 def test_the_classification_numbers_in_the_readme_are_the_enforced_ones(readme: str):
-    from social_tracker.classification.domain import ClassifierSettings
-    from social_tracker.classification.rules import PRIOR_STEP
+    from social_tracker.classification.domain import (
+        PLAIN_ATTRIBUTION_FACTOR,
+        ClassifierSettings,
+    )
+    from social_tracker.classification.rules import CORROBORATED_CASUALTY_FACTOR, PRIOR_STEP
     from social_tracker.classification.service import DEFAULT_BATCH
+    from social_tracker.classification.text import _MAX_SPELLED_RUN
     from social_tracker.classification.topics import (
+        CONTEXT_WINDOW,
+        MAGNITUDE_REACH,
         MAX_TERM_CHARS,
         MAX_TERM_WORDS,
         MAX_TERMS_PER_GROUP,
     )
     from social_tracker.classification.yaml_io import MAX_CONFIG_BYTES
+    from social_tracker.items.service import OUT_OF_SCOPE_GRACE
 
     s, text = ClassifierSettings(), classifying(readme)
     for fragment in (
-        f"[{s.escalate_low}, {s.escalate_high})",
         f"under {s.inconclusive_below}",
         f"at least {s.conflict_min}",
         f"closer than {s.conflict_margin}",
         f"{s.max_text_chars:,} characters",
+        f"the first {s.max_text_chars // 2:,} and the last {s.max_text_chars // 2:,}",
         f"{DEFAULT_BATCH} items at a time",
         f"{PRIOR_STEP} per step",
         f"at most {MAX_CONFIG_BYTES // 1024} KiB",
         f"over {MAX_TERMS_PER_GROUP} terms",
         f"over {MAX_TERM_CHARS} characters or {MAX_TERM_WORDS} words",
         f"{s.recycle_days} days exactly",
-        f"({s.near_duplicate_threshold})",
-        "0.8 is settled, 0.79 is not; 0.4 is queued, 0.39 is not",
+        "0.8 is settled, 0.79 is not",
+        f"`no_risk` at {s.neutral_confidence}",
+        f"at least {s.neutral_min_tokens} words with no signal",
+        f"under {s.no_risk_settled_min} (a lone link)",
+        f"up to {_MAX_SPELLED_RUN} letters",
+        f"fewer than {CONTEXT_WINDOW} words away",
+        f"within {MAGNITUDE_REACH} words after it",
+        f"{PLAIN_ATTRIBUTION_FACTOR:.0%}".replace("%", " %"),
+        f"{CORROBORATED_CASUALTY_FACTOR:.0%}".replace("%", " %"),
+        f"at most `SOCIAL_TRACKER_NEAR_DUPLICATE_CANDIDATES` ({s.candidate_limit})",
+        f"both texts of at least {s.min_near_tokens} words".replace("both", "BOTH"),
+        f"(fewer than {s.min_near_tokens} words)",
+        f"THRESHOLD`, {s.near_duplicate_threshold},",
+        f"forgotten {s.signature_retention_days} days after",
+        f"({s.classification_retention_days}) days",
+        f"after {_word(s.max_item_failures)} consecutive errors",
+        f"first {int(OUT_OF_SCOPE_GRACE.total_seconds() // 3600)} hours",
     ):
         assert fragment in text, fragment
+
+
+def _word(number: int) -> str:
+    return {1: "one", 2: "two", 3: "three"}[number]
+
+
+def test_the_readme_example_count_is_the_real_number_of_gold_examples(readme: str):
+    import yaml
+
+    gold = yaml.safe_load(
+        (README.parent / "tests" / "data" / "gold_examples.yaml").read_text("utf-8")
+    )
+    assert f"and {len(gold['examples'])} labeled Spanish examples" in classifying(readme)
+    assert len(gold["known_gaps"]) == 1  # "one of them recorded as a known gap"
+
+
+def test_the_dependency_audit_note_names_the_lock_file_it_audited(readme: str):
+    import hashlib
+
+    lock = hashlib.sha256((README.parent / "uv.lock").read_bytes()).hexdigest()
+    assert f"uv.lock sha256 {lock}" in readme
+    assert "No known vulnerabilities found" in readme
+    assert "Last run: 2026-" in readme
+
+
+def test_the_documented_lookup_and_duplicate_claims_match_the_code(readme: str):
+    text = classifying(readme)
+    # a duplicate stores no signature, a near copy does: the claim about what is stored
+    assert "that is not itself an exact copy or recycled leaves a signature" in text
+    assert "never scan the table" in text
+    assert "never inherits a verdict" in text
+    assert "`awaiting_original`" in text
+    assert "(`fetched_at`), never from the publication date" in text
+    assert "4-character shingles (80 values, no text)" in text
 
 
 def test_the_placeholders_are_declared_unverified_and_the_catalog_is_not_a_source(readme: str):

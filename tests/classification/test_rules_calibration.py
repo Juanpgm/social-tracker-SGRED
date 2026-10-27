@@ -208,7 +208,7 @@ def test_an_obfuscated_report_cannot_be_settled_either():
         "Mañana habrá un t.e.m.b.l.o.r fuerte en Cali",
         "Mañana habrá un t e m b l o r fuerte en Cali",
         "Mañana habrá un t3mblor fuerte en Cali",
-        "Mañana habrá un temㅤblor fuerte en Cali",  # Hangul filler
+        "Mañana habrá un tem\u3164blor fuerte en Cali",  # Hangul filler
         "ΜΑÑΑΝΑ HABRÁ UN TΕΜBLΟR",  # Greek capitals
     ],
 )
@@ -243,7 +243,7 @@ def test_obfuscation_signal_can_be_switched_off_by_weight():
 def test_a_megabyte_of_adversarial_text_is_classified_quickly():
     import time
 
-    chunk = "Mañana habrá un t.e.m.b.l.o.r ѕіѕmо t3mblor ㅤ http://a@b.c " + "x " * 200
+    chunk = "Mañana habrá un t.e.m.b.l.o.r ѕіѕmо t3mblor \u3164 http://a@b.c " + "x " * 200
     hostile = "sismo " + chunk * (1_000_000 // len(chunk) + 1)
     started = time.perf_counter()
     result = run_rules(hostile)
@@ -485,3 +485,41 @@ def test_a_negated_viral_word_asks_for_the_opposite_and_is_not_a_signal(text, vi
 )
 def test_more_recycled_markers(text):
     assert "recycled_marker" in run_rules(text).names
+
+
+# ---- the exact edges of the calibration ----
+
+
+@pytest.mark.parametrize(
+    ("top", "rival", "conflicting"),
+    [(0.40, 0.30, True), (0.40, 0.29, False), (0.50, 0.30, False), (0.44, 0.30, True)],
+)
+def test_two_labels_conflict_from_the_minimum_strength_of_the_rival(top, rival, conflicting):
+    outcome = combine(
+        [sig("prediction_claim", top), sig("censorship_bait", rival)],
+        credibility=3,
+        settings=SETTINGS,
+    )
+    assert outcome.conflicting is conflicting
+
+
+@pytest.mark.parametrize(
+    ("benign", "label"),
+    [(0.5, Label.NO_RISK), (0.49, Label.UNCLASSIFIED), (0.51, Label.NO_RISK)],
+)
+def test_benign_evidence_alone_settles_from_the_minimum_confidence(benign, label):
+    outcome = combine([sig("news_report", benign)], credibility=3, settings=SETTINGS)
+    assert outcome.label is label
+
+
+def casualty_weight(text: str, **options) -> float:
+    found = run_rules(text, **options).outcome.signals
+    return {s.name: s.weight for s in found}["casualty_claim"]
+
+
+def test_a_casualty_claim_argues_less_next_to_a_report_alone_and_next_to_a_link_alone():
+    claim = "hay 300 muertos por el temblor en Cali"
+    assert casualty_weight(claim) == 0.25
+    assert casualty_weight("Se registró un sismo de magnitud 5 y " + claim) == 0.15  # a report
+    assert casualty_weight(claim + " " + LINK) == 0.15  # a link
+    assert casualty_weight(claim, url="https://official-domain.example/x") == 0.15

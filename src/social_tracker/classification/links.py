@@ -23,7 +23,8 @@ _START = re.compile(
     r"(?<![\w@./:%=&?#+~-])(?:https?://|www\.)",
     re.IGNORECASE,
 )
-_AUTHORITY_END = re.compile(r"""[\s/\?#<>"'`,;()\[\]{}!|*^]""")
+# \x5c is a backslash: a browser reads it as a slash in the address of a web page
+_AUTHORITY_END = re.compile(r"""[\s/\x5c?#<>"'`,;()\[\]{}!|*^]""")
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*")
 MAX_LINKS = 50  # a text with more links than this is not read further for links
 

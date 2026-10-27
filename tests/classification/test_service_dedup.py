@@ -1,5 +1,6 @@
 """Recycled and near-duplicate content (RC-5, RC-7): stage three of the cascade."""
 
+import hashlib
 import math
 from datetime import timedelta
 
@@ -660,7 +661,7 @@ def test_the_window_is_configurable():
     assert world.verdict(outside).recycled_of == original.id
 
 
-def judged(original, confidence: float) -> Classification:
+def judged(original, confidence: float, **changes) -> Classification:
     """What the LLM stage will leave behind: a judged verdict."""
     return Classification(
         item_id=original.id,
@@ -670,6 +671,7 @@ def judged(original, confidence: float) -> Classification:
         rationale="judged by the language model",
         classified_at=START,
         classifier_version="test",
+        **changes,
     )
 
 
@@ -810,3 +812,162 @@ def test_an_800_day_old_item_arriving_last_is_recycled_of_the_story_it_repeats()
     reversed_verdicts, reversed_items = story_outcome([5, 4, 3, 2, 1, 0])
     assert reversed_verdicts["s5"].duplicate_of is None  # it came first here: the original
     assert reversed_verdicts["s0"].recycled_of == reversed_items["s5"].id
+
+
+# ---- the edges of the near-duplicate lookup ----
+
+
+def plant(
+    world,
+    probe_text: str,
+    name: str,
+    *,
+    shared: int,
+    partial: int = 0,
+    ago: int = 2,
+    numbers: str | None = None,
+    short: bool = False,
+):
+    """A stored original with a verdict whose signature shares `shared` whole bands with the
+    probe's, then `partial` bands of which one row in five differs, and nothing else: its
+    similarity to the probe is (5 * shared + 4 * partial) / 80."""
+    words = tokens(probe_text)
+    probe = signature(words)
+    values = []
+    for band in range(16):
+        for row in range(5):
+            i = band * 5 + row
+            if band < shared:
+                values.append(probe[i])
+            elif band < shared + partial:
+                values.append(probe[i] if row < 4 else (probe[i] + 1) % 2**32)
+            else:
+                values.append((probe[i] + 7 + i) % 2**32)
+    item_id = f"itm_{name}"
+    digest = hashlib.sha256(name.encode()).hexdigest()
+    world.signatures.add(
+        ItemSignature(
+            item_id,
+            digest,
+            PUBLISHED - days(ago),
+            tuple(values),
+            None,
+            numbers if numbers is not None else numbers_digest(words),
+            3 if short else len(words),
+        )
+    )
+    world.classifications.add(
+        Classification(
+            item_id=item_id,
+            label=Label.NO_RISK,
+            confidence=0.6,
+            stage=Stage.RULES,
+            rationale="planted original",
+            classified_at=START,
+            classifier_version="test",
+        )
+    )
+    return item_id
+
+
+def test_a_lookup_that_returns_exactly_the_limit_is_no_cap_hit_and_one_more_is():
+    for count, hits in ((2, 0), (3, 1)):
+        world = three_sources(settings=ClassifierSettings(candidate_limit=2))
+        text = long_text(40)
+        colliders(world, text, count)
+        world.add("probe", text, source_id="src_a")
+        assert run(world).candidate_cap_hits == hits, count
+
+
+def test_the_most_similar_candidate_wins_even_when_it_ranks_after_a_weaker_one():
+    world = three_sources(settings=ClassifierSettings(near_duplicate_threshold=0.5))
+    text = long_text(41)
+    plant(world, text, "ranked_first_weaker", shared=10)  # 10 bands, similarity 0.625
+    best = plant(world, text, "ranked_second_stronger", shared=9, partial=7)  # 0.9125
+    probe = world.add("probe", text, source_id="src_a", published_at=PUBLISHED + days(1))
+    run(world)
+    assert world.verdict(probe).near_of == best
+
+
+def test_the_first_ranked_wins_over_a_weaker_one_ranked_after_it():
+    world = three_sources(settings=ClassifierSettings(near_duplicate_threshold=0.5))
+    text = long_text(42)
+    best = plant(world, text, "ranked_first_stronger", shared=10, partial=6)  # 0.925
+    plant(world, text, "ranked_second_weaker", shared=9, partial=0)  # 0.5625
+    probe = world.add("probe", text, source_id="src_a", published_at=PUBLISHED + days(1))
+    run(world)
+    assert world.verdict(probe).near_of == best
+
+
+def test_among_equally_similar_candidates_the_best_ranked_wins():
+    world = three_sources(settings=ClassifierSettings(near_duplicate_threshold=0.5))
+    text = long_text(43)
+    older = plant(world, text, "same_older", shared=12, partial=2, ago=5)
+    plant(world, text, "same_newer", shared=12, partial=2, ago=3)
+    probe = world.add("probe", text, source_id="src_a", published_at=PUBLISHED + days(1))
+    run(world)
+    assert world.verdict(probe).near_of == older
+
+
+def test_a_decoy_that_shares_every_band_but_has_other_numbers_cannot_hide_the_original():
+    # The decoy ranks first (all 16 bands, older) and is refused for its numbers; the original
+    # ranks second. With a candidate limit of one the original would never be examined.
+    world = three_sources()
+    text = "Sismo de magnitud 4.5 en Cali: " + long_text(44)
+    plant(world, text, "decoy", shared=16, ago=4, numbers=hashlib.sha256(b"6.1").hexdigest())
+    original = plant(world, text, "original", shared=14, partial=2, ago=3)
+    probe = world.add("probe", text, source_id="src_a", published_at=PUBLISHED + days(1))
+    run(world)
+    assert world.verdict(probe).near_of == original
+
+
+def test_a_stored_text_under_the_word_minimum_is_never_a_near_copy_of_a_longer_one():
+    world = three_sources()
+    short = " ".join(["sismo", *WORDS[:10]])  # 11 words
+    world.add("a", short, source_id="src_a")
+    longer = short + " omega"  # 12 words, the same numbers (none), nearly the same text
+    near = world.add("b", longer, source_id="src_b", published_at=PUBLISHED + days(1))
+    run(world)
+    assert (world.verdict(near).near_of, world.verdict(near).recycled_of) == (None, None)
+
+
+def test_a_short_text_does_not_match_an_identical_one_seen_much_later():
+    world = three_sources()
+    later = world.add("b", "Temblor en Cali", source_id="src_b", published_at=PUBLISHED + days(20))
+    run(world)
+    earlier = world.add("a", "Temblor en Cali", source_id="src_a", published_at=PUBLISHED)
+    run(world)
+    for item in (earlier, later):
+        assert (world.verdict(item).duplicate_of, world.verdict(item).recycled_of) == (None, None)
+
+
+def test_a_judged_original_is_never_waiting_even_if_its_queue_flag_is_set():
+    world = three_sources()
+    original = world.add("a", PREDICTION, source_id="src_a")
+    world.classifications.add(judged(original, 0.77, needs_llm=True))
+    world.signatures.add(
+        ItemSignature(
+            original.id, original.content_hash, original.fetched_at, signature(tokens(PREDICTION))
+        )
+    )
+    world.items.set_status(original.id, ItemStatus.CLASSIFIED)
+    copy = world.add("b", PREDICTION, source_id="src_b", published_at=PUBLISHED + days(1))
+    run(world)
+    assert world.verdict(copy).awaiting_original is False
+
+
+def test_a_judged_confidence_is_copied_untouched_whatever_the_two_credibilities():
+    world = memory_world()
+    world.ready("src_a", credibility=5)
+    world.add_source("src_b", credibility=1)
+    original = world.add("a", PREDICTION, source_id="src_a")
+    world.classifications.add(judged(original, 0.77, source_credibility_used=5))
+    world.signatures.add(
+        ItemSignature(
+            original.id, original.content_hash, original.fetched_at, signature(tokens(PREDICTION))
+        )
+    )
+    world.items.set_status(original.id, ItemStatus.CLASSIFIED)
+    copy = world.add("b", PREDICTION, source_id="src_b", published_at=PUBLISHED + days(1))
+    run(world)
+    assert world.verdict(copy).confidence == 0.77
