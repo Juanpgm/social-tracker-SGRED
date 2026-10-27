@@ -116,8 +116,6 @@ def system_resolver(host: str, port: int) -> list[str]:
 def _translate(exc: Exception) -> FetchError:
     if isinstance(exc, httpx2.TimeoutException):
         return FetchError(FetchErrorKind.TIMEOUT)
-    if isinstance(exc, httpx2.ConnectError):
-        return FetchError(FetchErrorKind.CONNECT)
     if isinstance(exc, httpx2.InvalidURL):
         return FetchError(FetchErrorKind.BAD_URL)
     return FetchError(FetchErrorKind.PROTOCOL)
@@ -163,14 +161,12 @@ class HttpFetcher:
             trust_env=False,
             timeout=httpx2.Timeout(self._limits.timeout_s),
         ) as client:
-            for hop in range(self._limits.max_redirects + 1):
+            for _ in range(self._limits.max_redirects + 1):
                 self._check_deadline(started)
                 target = parse_fetch_url(url)
                 outcome = self._hop(client, target, self._addresses(target), request, started)
                 if isinstance(outcome, FetchResponse):
                     return outcome
-                if hop == self._limits.max_redirects:
-                    break
                 url = outcome.url
         raise FetchError(FetchErrorKind.TOO_MANY_REDIRECTS)
 

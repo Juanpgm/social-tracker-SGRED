@@ -50,7 +50,7 @@ def _hostname(raw: str) -> str:
         return raw
     except ValueError:
         pass
-    if "%" in raw or ":" in raw or _NUMERIC_HOST_RE.fullmatch(raw):
+    if _NUMERIC_HOST_RE.fullmatch(raw):
         raise _bad()
     try:
         ascii_host = raw.encode("idna").decode("ascii")

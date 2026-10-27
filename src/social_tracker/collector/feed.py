@@ -39,10 +39,8 @@ _DC_CREATOR = "{http://purl.org/dc/elements/1.1/}creator"
 _DC_DATE = "{http://purl.org/dc/elements/1.1/}date"
 _STANDARD_NAMESPACES = frozenset({"", _RSS_10, _ATOM})
 
-_XML_FORBIDDEN_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
-_XML_DECLARATION_RE = re.compile(r"\A\s*<\?xml[^>]*\?>")
+_XML_FORBIDDEN_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f" + chr(0xFFFE) + chr(0xFFFF) + "]")
 _ENTITY_NAME_RE = re.compile(r"&([A-Za-z][A-Za-z0-9]{1,31});")
-_XML_ENTITIES = frozenset({"amp", "lt", "gt", "quot", "apos"})
 
 
 class FeedError(DomainError):
@@ -72,16 +70,13 @@ class ParsedFeed:
 
 
 def _number_html_entities(match: re.Match[str]) -> str:
-    name = match.group(1)
-    if name in _XML_ENTITIES or name not in name2codepoint:
-        return match.group(0)
-    return f"&#{name2codepoint[name]};"
+    codepoint = name2codepoint.get(match.group(1))
+    return match.group(0) if codepoint is None else f"&#{codepoint};"
 
 
 def _lenient_text(data: bytes) -> str:
-    text = data.decode("utf-8", errors="replace").lstrip("﻿")
+    text = data.decode("utf-8", errors="replace")
     text = _XML_FORBIDDEN_RE.sub("", text)
-    text = _XML_DECLARATION_RE.sub("", text, count=1)
     return _ENTITY_NAME_RE.sub(_number_html_entities, text)
 
 

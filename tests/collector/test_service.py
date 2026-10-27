@@ -18,21 +18,8 @@ from tests.collector.harness import (
     World,
     memory_world,
     rss,
-    sqlite_world,
 )
 from tests.sources.factories import payload
-
-
-@pytest.fixture(params=["memory", "sqlite"])
-def world(request, tmp_path):
-    fetcher = FakeFetcher()
-    built = (
-        memory_world(fetcher)
-        if request.param == "memory"
-        else sqlite_world(tmp_path / "w.db", fetcher)
-    )
-    yield built
-    built.close()
 
 
 def collect(world: World, source_id: str = "src_news") -> CollectResult:

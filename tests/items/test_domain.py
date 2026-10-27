@@ -86,6 +86,8 @@ def test_a_valid_item_keeps_its_fields_and_normalizes_time_to_utc():
         {"flags": ("Bad Flag",)},
         {"raw_payload": ["not", "a", "mapping"]},
         {"language": "x" * 36},
+        {"language": "en" + "-abcdefgh" * 3 + "-abcdef"},  # a well-formed tag of 36 characters
+        {"language": "en-" + "-".join(["abcdefgh"] * 5)},  # a well-formed tag, but far too long
         {"parent_id": ""},
     ],
     ids=lambda o: next(iter(o)) + "-" + str(next(iter(o.values())))[:12],
@@ -93,6 +95,12 @@ def test_a_valid_item_keeps_its_fields_and_normalizes_time_to_utc():
 def test_an_invalid_item_is_rejected(overrides):
     with pytest.raises(ValidationError):
         make(**overrides)
+
+
+def test_a_language_tag_of_exactly_the_length_limit_is_accepted():
+    tag = "en" + "-abcdefgh" * 3 + "-abcde"
+    assert len(tag) == 35
+    assert make(language=tag).language == tag
 
 
 def test_text_exactly_at_the_byte_limit_is_accepted():
@@ -116,6 +124,8 @@ def test_item_ids_are_deterministic_per_source_and_external_id():
         ("  hello   world \t again ", "hello world again"),
         ("line one\r\nline two", "line one\nline two"),
         ("a\n\n\n\n\nb", "a\n\nb"),
+        ("a\n\n\nb", "a\n\nb"),
+        ("a\n\nb", "a\n\nb"),
         ("nul\x00and\x07bell", "nul and bell"),
         ("café", "café"),
         ("tab\tseparated nbsp", "tab separated nbsp"),
@@ -190,6 +200,18 @@ def test_an_oversize_payload_is_shrunk_deterministically_to_fit():
     assert shrunk["title"] == "t" * 10
     assert shrunk["description"].startswith("xxx")
     assert bounded_raw_payload(payload) == (shrunk, True)
+
+
+def test_a_payload_of_exactly_the_size_limit_is_left_alone():
+    filler = MAX_RAW_PAYLOAD_BYTES - len(b'{"d":""}')
+    payload = {"d": "x" * filler}
+    assert len(json.dumps(payload, separators=(",", ":")).encode()) == MAX_RAW_PAYLOAD_BYTES
+    assert bounded_raw_payload(payload) == (payload, False)
+    assert make(raw_payload=payload).raw_payload == payload
+    longer = {"d": "x" * (filler + 1)}
+    assert bounded_raw_payload(longer)[1] is True
+    with pytest.raises(ValidationError):
+        make(raw_payload=longer)
 
 
 def test_multibyte_payloads_are_measured_in_bytes():

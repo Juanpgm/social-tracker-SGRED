@@ -19,7 +19,7 @@ from social_tracker.sources.domain import NewsRssSource, Source
 
 MAX_RETRY_AFTER_S = 7 * 24 * 3600  # a larger wait is clamped; the scheduler caps it further
 _MAX_RETRY_AFTER_TEXT = 100
-_SECONDS_RE = re.compile(r"[0-9]+", re.ASCII)
+_SECONDS_RE = re.compile(r"[0-9]+")
 _DEGRADED_STATUSES = frozenset({401, 403, 429})
 
 

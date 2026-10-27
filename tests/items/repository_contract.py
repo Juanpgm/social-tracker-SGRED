@@ -269,6 +269,12 @@ class ItemRepositoryContract:
         repo.add_new(items)
         assert [i.external_id for i in repo.search("quake", limit=2)] == ["g4", "g3"]
 
+    def test_search_results_with_the_same_date_come_in_descending_id_order(self, repo):
+        twins = [make_item(f"twin{i}", title="quake", text=f"same {i}") for i in range(4)]
+        repo.add_new(twins)
+        found = repo.search("quake")
+        assert [i.id for i in found] == sorted((i.id for i in twins), reverse=True)
+
     def test_search_rejects_non_text(self, repo):
         with pytest.raises(ValidationError):
             repo.search(None)  # type: ignore[arg-type]

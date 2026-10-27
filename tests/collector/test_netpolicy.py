@@ -117,6 +117,16 @@ def test_a_non_string_address_is_refused(bad):
     assert kind_of(lambda: parse_fetch_url(bad)) is FetchErrorKind.BAD_URL
 
 
+def test_a_host_name_may_be_253_characters_long_but_not_254():
+    label = "a" * 63
+    longest = ".".join([label, label, label, "a" * 61])
+    assert len(longest) == 253
+    assert parse_fetch_url(f"http://{longest}/").host == longest
+    with pytest.raises(FetchError) as caught:
+        parse_fetch_url(f"http://{longest}a/")
+    assert caught.value.kind is FetchErrorKind.BAD_URL
+
+
 def test_host_names_that_only_look_numeric_in_hex_letters_are_fine():
     assert parse_fetch_url("http://decade.bee.example/").host == "decade.bee.example"
 
@@ -270,6 +280,8 @@ def test_a_missing_or_malformed_location_is_refused(location):
         ("Sun, 01 Mar 2026 12:00:00 GMT", 0.0),
         ("Sun, 01 Mar 2026 11:00:00 GMT", 0.0),  # already past
         ("Sun, 01 Mar 2026 12:00:30 +0000", 30.0),
+        ("Sun, 01 Mar 2026 12:05:00 -0000", 300.0),  # "-0000" is a date without a zone
+        ("Sun, 01 Mar 2026 12:05:00", 300.0),
         ("99999999999999999999", float(MAX_RETRY_AFTER_S)),
         ("604801", float(MAX_RETRY_AFTER_S)),
         ("604800", 604800.0),

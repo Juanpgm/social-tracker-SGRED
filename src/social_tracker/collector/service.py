@@ -167,9 +167,7 @@ class CollectorService:
                 if current.next_run_at is None or self._clock.now() < current.next_run_at:
                     return self._skipped(source_id, CollectOutcome.SKIPPED_NOT_ELIGIBLE)
                 self._control.retry_collection(source_id, actor=ACTOR, reason="retry time reached")
-            elif current.state is not CollectionState.IDLE:
-                return self._skipped(source_id, CollectOutcome.SKIPPED_NOT_ELIGIBLE)
-            try:
+            try:  # a collecting, failed or disabled source refuses to start
                 self._control.start_collection(source_id, actor=ACTOR, reason="collection started")
             except InvalidTransition:
                 return self._skipped(source_id, CollectOutcome.SKIPPED_NOT_ELIGIBLE)
@@ -217,9 +215,8 @@ class CollectorService:
                 added = self._items.add_new(fetched.report.items)
                 new, duplicate, discarded = added.new, added.duplicate, fetched.report.discarded
             etag, modified = fetched.response.etag, fetched.response.last_modified
-            if (
-                fetched.report is None and previous is not None
-            ):  # a 304 keeps what it did not resend
+            if fetched.report is None and previous is not None:
+                # a "not modified" answer keeps the validators it did not resend
                 etag, modified = etag or previous.etag, modified or previous.last_modified
             self._control.finish_collection(
                 source_id, actor=ACTOR, reason=f"collected {new} new, {duplicate} duplicate"

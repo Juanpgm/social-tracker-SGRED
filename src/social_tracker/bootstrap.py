@@ -55,7 +55,7 @@ ALLOW_PRIVATE_HOSTS_ENV = "SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS"
 DEFAULT_DB_PATH = "data/social_tracker.db"
 MAX_BUSY_TIMEOUT_MS = 600_000
 _DIGITS = re.compile(r"[0-9]{1,7}")
-_RETENTION_DIGITS = re.compile(r"[0-9]{1,4}", re.ASCII)
+_RETENTION_DIGITS = re.compile(r"[0-9]{1,4}")
 _HOST_NAME = re.compile(r"[a-z0-9._-]{1,253}")
 _BACKOFF_JITTER_FRACTION = 0.1
 
