@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Sources</h1>
+
+<section aria-labelledby="analysis-heading">
+<h2 id="analysis-heading">Analysis</h2>
+<p>Analysis is {{ "on" if global_on else "off" }}.</p>
+<form method="post" action="/analysis">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="on" value="{{ "0" if global_on else "1" }}">
+<button type="submit">Turn analysis {{ "off" if global_on else "on" }}</button>
+</form>
+</section>
+
+<section aria-labelledby="worker-heading">
+<h2 id="worker-heading">Workers</h2>
+<p>GPU and model: n/a - no worker running</p>
+<p>Stream lag: n/a - no worker running</p>
+</section>
+
+<section aria-labelledby="sources-heading">
+<h2 id="sources-heading">Registered sources</h2>
+<p><a class="button" href="/sources/new">Add a source</a></p>
+{% if rows %}
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Mode</th><th scope="col">Credibility</th><th scope="col">Enabled</th><th scope="col">Analysis</th><th scope="col">Collection</th><th scope="col">Last fetch</th><th scope="col">Last error</th><th scope="col">Actions</th></tr>
+</thead>
+<tbody>
+{% for row in rows %}{% include "_row.html" %}{% endfor %}
+</tbody>
+</table>
+</div>
+{% else %}
+<p>No sources yet. Add one to start; the how-to explains what each type needs:</p>
+<ul>
+{% for type in source_types %}<li><a href="/howto#{{ type }}">{{ type }}</a></li>{% endfor %}
+</ul>
+{% endif %}
+</section>
+{% endblock %}

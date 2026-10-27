@@ -1,0 +1,11 @@
+body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 70rem; padding: 1rem; line-height: 1.5; }
+.skip { position: absolute; left: -999px; }
+.skip:focus { left: 0; background: #fff; padding: .5rem; }
+nav a { margin-right: 1rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid #ccc; padding: .4rem; text-align: left; vertical-align: top; }
+.table-wrap { overflow-x: auto; }
+.id { color: #555; font-size: .85em; }
+.notice { background: #eef6ff; border: 1px solid #99c; padding: .5rem; }
+.error { color: #900; }
+a:focus, button:focus, input:focus, select:focus, textarea:focus { outline: 3px solid #05c; outline-offset: 2px; }

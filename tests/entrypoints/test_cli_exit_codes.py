@@ -26,6 +26,10 @@ def explode(exc: BaseException):
 def commands(tmp_path: Path) -> dict[str, tuple[str, ...]]:
     source = tmp_path / "in.yaml"
     source.write_text("sources: []\n", encoding="utf-8")
+    return command_table(source)
+
+
+def command_table(source: Path) -> dict[str, tuple[str, ...]]:
     return {
         "list": ("sources", "list"),
         "status": ("status",),
@@ -41,7 +45,7 @@ def commands(tmp_path: Path) -> dict[str, tuple[str, ...]]:
     }
 
 
-COMMAND_NAMES = list(commands(Path(".")))
+COMMAND_NAMES = list(command_table(Path("in.yaml")))  # names only: nothing is written
 
 
 @pytest.mark.parametrize("name", COMMAND_NAMES)

@@ -1,0 +1,13 @@
+{% set s = row.overview.source %}
+<tr id="row-{{ s.id }}">
+<th scope="row">{{ s.name }}<br><span class="id">{{ s.id }}</span></th>
+<td>{{ s.type }}</td>
+<td>{{ s.mode }}</td>
+<td>{{ s.credibility }}</td>
+<td>{{ "yes" if s.enabled else "no" }}</td>
+<td>{{ "on" if row.overview.analysis else "off" }}</td>
+<td>{{ row.overview.state.value }}{% if row.failures %} ({{ row.failures }} failure{{ "" if row.failures == 1 else "s" }}{% if row.retry_after %}, retry after {{ row.retry_after }}{% endif %}){% endif %}</td>
+<td>n/a</td>
+<td>n/a</td>
+<td></td>
+</tr>

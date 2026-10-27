@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"responseHandling":[{"code":".*","swap":true}],"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}'>
+<title>{% block title %}Sources{% endblock %} - Social risk monitor</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header>
+<nav aria-label="Main"><a href="/">Sources</a> <a href="/howto">How-to</a></nav>
+</header>
+<div id="live-region" role="status" aria-live="polite">{% if notice %}<p class="notice">{{ notice }}</p>{% endif %}</div>
+<main id="main">
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>
