@@ -102,9 +102,9 @@ def test_refresh_raises_the_alerts_and_a_second_run_finds_nothing_new(cli: Cli):
 
 def test_rebuild_is_idempotent_and_follows_the_threshold(loaded: Cli):
     assert loaded.ok("alerts", "rebuild").stdout.startswith("0 created, 0 merged, 0 updated")
-    loaded.ok("alerts", "threshold", "set", "0.8", "--reason", WHY)
+    out = loaded.ok("alerts", "threshold", "set", "0.8", "--reason", WHY).stdout
+    assert "2 withdrawn" in out  # A6: applied by the same command, no separate rebuild
     assert loaded.ok("alerts", "refresh").stdout.startswith("0 created, 0 merged, 0 updated")
-    assert "2 withdrawn" in loaded.ok("alerts", "rebuild").stdout
     assert len(rows(loaded.ok("alerts", "list").stdout)) == 1
     assert "0 withdrawn" in loaded.ok("alerts", "rebuild").stdout
 
@@ -334,7 +334,7 @@ def test_stats_on_an_empty_database(cli: Cli):
 def test_the_threshold_starts_at_half_and_is_set_with_a_reason(cli: Cli):
     assert cli.ok("alerts", "threshold", "show").stdout.strip() == "alert threshold: 0.5"
     result = cli.ok("alerts", "threshold", "set", "0.65", "--reason", WHY, "--actor", "ana")
-    assert result.stdout.strip() == "alert threshold set to 0.65 (was 0.5)"
+    assert result.stdout.splitlines()[0] == "alert threshold set to 0.65 (was 0.5)"
     assert cli.ok("alerts", "threshold", "show").stdout.strip() == "alert threshold: 0.65"
     (event,) = cli.details("alert_threshold_changed")
     assert (event["actor"], event["reason"], event["from"], event["to"]) == (
@@ -383,6 +383,26 @@ def test_a_new_threshold_decides_what_the_next_refresh_raises(cli: Cli):
     cli.ok("alerts", "threshold", "set", "0.7", "--reason", WHY)
     cli.ok("alerts", "refresh")
     assert [r[4] for r in rows(cli.ok("alerts", "list").stdout)] == ["0.75"]
+
+
+def test_setting_the_threshold_re_evaluates_the_alerts_in_the_same_command(cli: Cli):
+    cli.add()
+    plant(cli, "a", confidence=0.55)
+    plant(cli, "b", confidence=0.75, hours=1)
+    cli.ok("alerts", "refresh")
+    assert len(rows(cli.ok("alerts", "list").stdout)) == 2
+    out = cli.ok("alerts", "threshold", "set", "0.7", "--reason", WHY).stdout
+    assert "1 withdrawn" in out
+    assert [r[4] for r in rows(cli.ok("alerts", "list").stdout)] == ["0.75"]
+    lowered = cli.ok("alerts", "threshold", "set", "0.5", "--reason", WHY).stdout
+    assert "1 brought back" in lowered
+    assert len(rows(cli.ok("alerts", "list").stdout)) == 2
+
+
+def test_an_unchanged_threshold_does_not_re_evaluate_anything(cli: Cli):
+    cli.ok("alerts", "threshold", "set", "0.7", "--reason", WHY)
+    again = cli.ok("alerts", "threshold", "set", "0.7", "--reason", WHY)
+    assert again.stdout.strip() == "alert threshold unchanged: 0.7"
 
 
 # ---- the shell ----

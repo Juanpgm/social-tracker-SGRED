@@ -154,6 +154,16 @@ class Worker:
     # ---- one pass ----
 
     def run_pass(self) -> PassSummary:
+        """One pass. When it ends, with analysis on or off, its time is left in the settings store
+        for the operator pages (A5); failing to leave it never stops the worker."""
+        summary = self._pass()
+        try:
+            self._control.record_worker_pass()
+        except DomainError as exc:
+            _LOG.warning("the pass time was not recorded: %s", exc.code)
+        return summary
+
+    def _pass(self) -> PassSummary:
         self._housekeeping()
         try:
             if not self._control.global_analysis_enabled():

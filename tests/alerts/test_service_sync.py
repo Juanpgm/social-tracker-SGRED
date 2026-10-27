@@ -405,17 +405,18 @@ def test_a_verdict_that_nobody_changed_is_left_alone_even_when_asked_twice(w):
 # ---- the threshold moves ----
 
 
-def test_a_raised_threshold_withdraws_on_a_rebuild_not_on_a_plain_refresh(w):
+def test_a_raised_threshold_withdraws_on_the_next_refresh_and_a_rebuild_finds_nothing_more(w):
+    """A6: a refresh notices that the threshold is not the one the alerts were evaluated with and
+    re-evaluates every member, so the CLI needs no separate `rebuild` after `threshold set`."""
     w.put("a", confidence=0.6)
     w.put("b", confidence=0.9)
     w.refresh()
     w.control.set_alert_min_confidence(0.8, actor="tester", reason="quieter")
-    assert w.refresh().withdrawn == 0  # a refresh follows verdicts, not the threshold
-    assert len(w.alerts()) == 2
-    report = w.service.rebuild()
-    assert report.withdrawn == 1
+    assert w.refresh().withdrawn == 1
     assert [a.confidence for a in w.alerts()] == [0.9]
     assert [a.confidence for a in w.alerts(status="withdrawn")] == [0.6]
+    report = w.service.rebuild()
+    assert (report.withdrawn, report.created, report.updated) == (0, 0, 0)
 
 
 def test_a_lowered_threshold_brings_the_withdrawn_back_and_adds_the_new_on_a_rebuild(w):

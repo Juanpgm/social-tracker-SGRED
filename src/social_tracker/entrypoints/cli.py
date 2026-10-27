@@ -1151,19 +1151,27 @@ def alerts_threshold_set(
     reason: Reason,
     actor: Actor = None,
 ) -> None:
-    """Set the alert threshold (audited with actor and reason). Never applied to alerts that
-    already exist: run `alerts rebuild` to re-evaluate them."""
+    """Set the alert threshold (audited with actor and reason) and apply it at once: every alert
+    is evaluated again with it (alerts that fall under it are withdrawn, never deleted)."""
     with _guard(), closing(build_container()) as services:
         number = parse_confidence(value)
         before = services.control.alert_min_confidence()
         change = services.control.set_alert_min_confidence(
             number, actor=resolve_actor(actor, os.environ), reason=reason
         )
+        report = services.alerts.rebuild() if change.changed else None
     now = format_confidence(change.value)
-    if change.changed:
-        typer.echo(f"alert threshold set to {now} (was {format_confidence(before)})")
-    else:
+    if report is None:
         typer.echo(f"alert threshold unchanged: {now}")
+        return
+    typer.echo(f"alert threshold set to {now} (was {format_confidence(before)})")
+    typer.echo(f"alerts re-evaluated: {_render_sync(report)}")
+    if report.errors:
+        typer.echo(
+            "error: some items could not be evaluated; run `alerts rebuild` to resume",
+            err=True,
+        )
+        raise typer.Exit(EXIT_REFUSED)
 
 
 # ---- gold set and calibration ----

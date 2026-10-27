@@ -19,8 +19,9 @@
 --   The item is not raised again while its verdict is the same; a changed or upgraded verdict
 --   clears the entry (NULL = a row from before this migration: it keeps suppressing).
 --
--- alert_overflow: the items counted in `alerts.overflow` (item, alert, verdict signature), so that
---   a repeated look at the same item does not count it twice.
+-- alert_overflow: the items counted in `alerts.overflow` (item, alert, verdict signature, content
+--   hash and time), so that a repeated look at the same item does not count it twice AND a later
+--   copy of one of them (same content, or a copy that points at it) still finds the alert.
 --
 -- alert_failures: items the alert step could not evaluate, with a backoff and a park flag, so that
 --   one poison item cannot be retried at every tick of the worker.
@@ -55,10 +56,14 @@ CREATE TABLE alert_overflow (
     alert_id   TEXT NOT NULL REFERENCES alerts (id) ON DELETE CASCADE,
     label      TEXT NOT NULL,
     confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
-    settled_at TEXT CHECK (settled_at IS NULL OR settled_at GLOB '????-??-??T??:??:??*+00:00')
+    settled_at TEXT CHECK (settled_at IS NULL OR settled_at GLOB '????-??-??T??:??:??*+00:00'),
+    content_hash TEXT NOT NULL
+        CHECK (length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+    occurred_at  TEXT NOT NULL CHECK (occurred_at GLOB '????-??-??T??:??:??*+00:00')
 );
 
 CREATE INDEX ix_alert_overflow_alert ON alert_overflow (alert_id);
+CREATE INDEX ix_alert_overflow_hash ON alert_overflow (content_hash, occurred_at);
 
 CREATE TABLE alert_failures (
     item_id        TEXT NOT NULL PRIMARY KEY

@@ -44,8 +44,11 @@ from typing import Any
 from social_tracker.control.domain import (
     DEFAULT_ALERT_MIN_CONFIDENCE,
     SETTING_ALERT_MIN_CONFIDENCE,
+    SETTING_ALERTS_LAST_REFRESH,
+    SETTING_ALERTS_SYNCED_THRESHOLD,
     SETTING_GLOBAL_ANALYSIS_ENABLED,
     SETTING_SOURCE_ANALYSIS_PREFIX,
+    SETTING_WORKER_LAST_PASS,
     CollectionState,
     ControlEvent,
     Event,
@@ -57,6 +60,7 @@ from social_tracker.control.domain import (
     event_detail_json,
     format_confidence,
     parse_confidence,
+    parse_stored_time,
     source_analysis_key,
     validate_actor,
     validate_confidence,
@@ -124,6 +128,17 @@ class SourceOverview:
     next_run_at: datetime | None = None  # set only while in backoff
     last_fetch_at: datetime | None = None  # the last successful fetch
     last_error: str | None = None  # sanitized reason of the last failure, until the next success
+
+
+@dataclass(frozen=True)
+class Liveness:
+    """What an operator page needs to tell a working system from a silent one (A5, A6)."""
+
+    global_analysis: bool
+    alert_min_confidence: float
+    synced_threshold: float | None  # the threshold the stored alerts were last evaluated with
+    last_pass_at: datetime | None  # the last pass of the worker, with analysis on or off
+    last_alert_refresh_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -457,3 +472,46 @@ class ControlService:
                 after=format_confidence(new),
             )
         return ThresholdChange(new, changed=True)
+
+    # ---- telemetry (A5, A6): settings, never audited ----
+
+    def record_worker_pass(self) -> None:
+        """The worker has just finished a pass (whether analysis is on or off)."""
+        self._control.set_setting(SETTING_WORKER_LAST_PASS, self._clock.now().isoformat())
+
+    def record_alert_refresh(self) -> None:
+        """The alert step has just looked at the verdicts."""
+        self._control.set_setting(SETTING_ALERTS_LAST_REFRESH, self._clock.now().isoformat())
+
+    def record_alerts_synced(self, threshold: float) -> None:
+        """Every stored alert has been evaluated with this threshold."""
+        self._control.set_setting(SETTING_ALERTS_SYNCED_THRESHOLD, format_confidence(threshold))
+
+    def alerts_synced_threshold(self) -> float | None:
+        stored = self._control.get_setting(SETTING_ALERTS_SYNCED_THRESHOLD)
+        if stored is None:
+            return None
+        try:
+            return parse_confidence(stored)
+        except ValidationError:
+            raise StorageError("stored synced threshold is invalid") from None
+
+    def _stored_time(self, key: str) -> datetime | None:
+        stored = self._control.get_setting(key)
+        if stored is None:
+            return None
+        try:
+            return parse_stored_time(stored)
+        except ValidationError:
+            raise StorageError("stored time is invalid") from None
+
+    def liveness(self) -> Liveness:
+        """One consistent read of the switches and the telemetry."""
+        with self._uow.snapshot():
+            return Liveness(
+                global_analysis=self._global_state() is GlobalState.ACTIVE,
+                alert_min_confidence=self.alert_min_confidence(),
+                synced_threshold=self.alerts_synced_threshold(),
+                last_pass_at=self._stored_time(SETTING_WORKER_LAST_PASS),
+                last_alert_refresh_at=self._stored_time(SETTING_ALERTS_LAST_REFRESH),
+            )

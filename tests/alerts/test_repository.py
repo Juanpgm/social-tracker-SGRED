@@ -391,9 +391,14 @@ def add_item(db, name: str):
     return item
 
 
-def sync(repo, **kw):
+def sync_refs(repo, **kw):
     args = {"min_confidence": 0.5, "full": False, "after": None, "limit": 100}
     return repo.sync_ids(**{**args, **kw})
+
+
+def sync(repo, **kw):
+    """The ids the sync lists (the listing is chronological; `sync_refs` has the cursors)."""
+    return [ref.item_id for ref in sync_refs(repo, **kw)]
 
 
 def test_a_qualifying_verdict_of_an_existing_item_without_an_alert_is_pending(repo, db):
@@ -480,11 +485,13 @@ def test_sync_ids_are_ordered_paged_and_bounded(repo, db):
     items = [add_item(db, f"n{n}") for n in range(5)]
     for item in items:
         classify(db, item.id, Label.UNINTENTIONAL_RUMOR, 0.7)
-    everything = sorted(i.id for i in items)
+    everything = sorted(i.id for i in items)  # fetched together: by id
     assert sync(repo) == everything
     assert sync(repo, limit=2) == everything[:2]
-    assert sync(repo, limit=2, after=everything[1]) == everything[2:4]
-    assert sync(repo, limit=2, after=everything[4]) == []
+    first = sync_refs(repo, limit=2)
+    assert sync(repo, limit=2, after=first[-1].cursor) == everything[2:4]
+    last = sync_refs(repo)[-1]
+    assert sync(repo, limit=2, after=last.cursor) == []
     with pytest.raises(Exception):  # noqa: B017, PT011 - any refusal of a limit out of range
         sync(repo, limit=0)
     with pytest.raises(Exception):  # noqa: B017, PT011
@@ -530,7 +537,9 @@ def test_a_purged_item_is_remembered_so_that_it_does_not_raise_the_alert_again(r
     assert sync(repo, full=True) == []
 
 
-def test_the_memory_of_a_purge_goes_when_the_verdict_does(repo, db):
+def test_the_memory_of_a_purge_goes_with_age_not_with_the_verdict(repo, db):
+    """A2: it used to go when the verdict of its item did, which let an old GUID listed again
+    resurrect the alert; now it stays a year (see test_repository_remediation)."""
     item = add_item(db, "a")
     classify(db, item.id, Label.UNINTENTIONAL_RUMOR, 0.9)
     store(repo, item.id, label=Label.UNINTENTIONAL_RUMOR, confidence=0.9, stage="rules")
@@ -539,6 +548,8 @@ def test_the_memory_of_a_purge_goes_when_the_verdict_does(repo, db):
     with db.transaction() as conn:
         conn.execute("DELETE FROM classifications WHERE item_id = ?", (item.id,))
     repo.purge(before=None, handled=False, now=T0 + timedelta(days=3))
+    assert repo.is_forgotten(item.id)
+    repo.purge(before=None, handled=False, now=T0 + timedelta(days=400))
     assert not repo.is_forgotten(item.id)
 
 

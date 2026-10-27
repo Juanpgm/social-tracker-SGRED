@@ -239,6 +239,13 @@ SETTING_GLOBAL_ANALYSIS_ENABLED = "global_analysis_enabled"
 BOOLEAN_SETTING_VALUES = frozenset({"true", "false"})  # exact, lowercase: "TRUE"/"1" are invalid
 SETTING_ALERT_MIN_CONFIDENCE = "alert_min_confidence"
 DEFAULT_ALERT_MIN_CONFIDENCE = 0.5
+# Telemetry the operator pages show (A5, A6): when the worker last passed, when the alerts were last
+# refreshed and the alert threshold the stored alerts were last evaluated with. They are settings
+# (one source of truth, no new table) but not operator actions: writing them is never audited.
+SETTING_WORKER_LAST_PASS = "worker_last_pass_at"
+SETTING_ALERTS_LAST_REFRESH = "alerts_last_refresh_at"
+SETTING_ALERTS_SYNCED_THRESHOLD = "alerts_synced_threshold"
+TIME_SETTINGS = frozenset({SETTING_WORKER_LAST_PASS, SETTING_ALERTS_LAST_REFRESH})
 DEFAULT_SETTINGS: dict[str, str] = {
     SETTING_GLOBAL_ANALYSIS_ENABLED: "false",
     SETTING_ALERT_MIN_CONFIDENCE: str(DEFAULT_ALERT_MIN_CONFIDENCE),
@@ -282,9 +289,21 @@ def validate_setting(key: Any, value: Any) -> tuple[str, str]:
         validate_slug(key.removeprefix(SETTING_SOURCE_ANALYSIS_PREFIX))  # a real source id
         if value not in BOOLEAN_SETTING_VALUES:
             raise ValidationError("a per-source analysis flag must be one of: false, true")
-    if key == SETTING_ALERT_MIN_CONFIDENCE:
+    if key in (SETTING_ALERT_MIN_CONFIDENCE, SETTING_ALERTS_SYNCED_THRESHOLD):
         parse_confidence(value)
+    if key in TIME_SETTINGS:
+        parse_stored_time(value)
     return key, value
+
+
+def parse_stored_time(text: Any) -> datetime:
+    """A time as the telemetry settings keep it: ISO 8601 in UTC with the `+00:00` suffix."""
+    try:
+        if not isinstance(text, str) or not text.endswith("+00:00"):
+            raise ValueError
+        return ensure_utc(datetime.fromisoformat(text))
+    except (ValueError, ValidationError):
+        raise ValidationError("a stored time must be ISO 8601 in UTC (+00:00)") from None
 
 
 def validate_setting_key(key: Any) -> str:

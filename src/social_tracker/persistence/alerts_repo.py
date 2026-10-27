@@ -24,6 +24,8 @@ from social_tracker.alerts.domain import (
     AlertFilter,
     AlertMember,
     Evidence,
+    ForgottenSignature,
+    SyncRef,
     validate_page,
 )
 from social_tracker.classification.domain import RISK_LABELS
@@ -58,22 +60,58 @@ _UPSERT_MEMBER = (
     )
 )
 _RISK = ", ".join(f"'{label.value}'" for label in RISK_LABELS)
-# What the alert step has to look at: a qualifying verdict of an existing item that has no alert and
-# was not forgotten by the purge, and a member whose verdict is no longer the one it was judged on.
+# A forgotten item whose verdict is still the one it was forgotten on stays forgotten; a row from
+# before the signatures (label NULL) always suppresses.
+_SAME_VERDICT = (
+    "(f.label IS NULL OR (f.label = c.label AND f.confidence = c.confidence "
+    "AND COALESCE(f.settled_at, '') = COALESCE(c.settled_at, '')))"
+)
+# What the alert step has to look at, each row with the instant it is ordered by (a chronological
+# listing lets a copy find its original whichever reached the store first):
+# - a qualifying verdict of an existing item that has no alert, was not counted as overflow of one
+#   and was not forgotten on this very verdict;
+# - a member whose verdict is no longer the one it was judged on;
+# - every member (a full sync).
 _PENDING = (
-    "SELECT c.item_id AS item_id FROM classifications c "
+    "SELECT i.fetched_at AS ts, c.item_id AS item_id FROM classifications c "
+    "JOIN items i ON i.id = c.item_id "
     f"WHERE c.label IN ({_RISK}) AND c.confidence >= ? "
     "AND NOT EXISTS (SELECT 1 FROM alert_items m WHERE m.item_id = c.item_id) "
-    "AND NOT EXISTS (SELECT 1 FROM alert_forgotten f WHERE f.item_id = c.item_id) "
-    "AND EXISTS (SELECT 1 FROM items i WHERE i.id = c.item_id)"
+    "AND NOT EXISTS (SELECT 1 FROM alert_overflow o WHERE o.item_id = c.item_id) "
+    "AND NOT EXISTS (SELECT 1 FROM alert_forgotten f WHERE f.item_id = c.item_id "
+    f"AND {_SAME_VERDICT})"
 )
 _CHANGED = (
-    "SELECT m.item_id AS item_id FROM alert_items m "
+    "SELECT m.occurred_at AS ts, m.item_id AS item_id FROM alert_items m "
     "JOIN classifications c ON c.item_id = m.item_id "
     "WHERE m.label <> c.label OR m.confidence <> c.confidence OR m.stage <> c.stage "
     "OR COALESCE(m.settled_at, '') <> COALESCE(c.settled_at, '')"
 )
-_EVERY_MEMBER = "SELECT m.item_id AS item_id FROM alert_items m"
+_EVERY_MEMBER = "SELECT m.occurred_at AS ts, m.item_id AS item_id FROM alert_items m"
+# An item the step failed on waits (backoff) or is parked until a rebuild.
+_NOT_BACKING_OFF = (
+    "AND NOT EXISTS (SELECT 1 FROM alert_failures x WHERE x.item_id = {column} "
+    "AND (x.parked = 1 OR x.next_try_at > ?))"
+)
+FORGOTTEN_KEEP = timedelta(days=365)  # how long the memory of a forgotten alert is kept
+MAX_FORGOTTEN = 200_000  # and how many of them, the oldest going first
+_SEVERITY_RANK = (
+    "CASE severity WHEN 'low' THEN 0 WHEN 'medium' THEN 1 WHEN 'high' THEN 2 ELSE 3 END"
+)
+_CURSOR_SEPARATOR = "|"
+
+
+def _cursor(ts: str, item_id: str) -> str:
+    return f"{ts}{_CURSOR_SEPARATOR}{item_id}"
+
+
+def _split_cursor(after: str | None) -> tuple[str, str]:
+    if after is None:
+        return "", ""
+    if not isinstance(after, str):
+        raise ValidationError("a sync cursor is text")
+    ts, _, item_id = after.rpartition(_CURSOR_SEPARATOR)
+    return ts, item_id
 
 
 def _alert_from_row(row: sqlite3.Row) -> Alert:
@@ -289,13 +327,19 @@ class SqliteAlertRepository:
                 ),
             )
 
-    def events(self, alert_id: str) -> list[AlertEvent]:
-        rows = self._db.query(
-            "SELECT alert_id, at, kind, actor, reason, from_value, to_value, from_absorbed "
-            "FROM alert_events "
-            "WHERE alert_id = ? ORDER BY seq",
-            (alert_id,),
-        )
+    def events(self, alert_id: str, limit: int | None = None) -> list[AlertEvent]:
+        """The trail of an alert in the order it happened; with `limit`, only the latest ones."""
+        columns = "alert_id, at, kind, actor, reason, from_value, to_value, from_absorbed"
+        if limit is None:
+            rows = self._db.query(
+                f"SELECT {columns} FROM alert_events WHERE alert_id = ? ORDER BY seq", (alert_id,)
+            )
+        else:
+            rows = self._db.query(
+                f"SELECT {columns} FROM (SELECT seq, {columns} FROM alert_events "
+                "WHERE alert_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                (alert_id, max(0, limit)),
+            )
         try:
             return [
                 AlertEvent(
@@ -322,16 +366,44 @@ class SqliteAlertRepository:
         related_items: Sequence[str],
         around: datetime,
         window: timedelta,
+        item_id: str | None = None,
     ) -> list[str]:
+        """The alerts (oldest first, each once) that hold the same content, one of the originals
+        this item points at, or (with `item_id`) a copy that points at THIS item, within the
+        window of `around`."""
+        low, high = format_utc(around - window), format_utc(around + window)
+        span = "AND m.occurred_at >= ? AND m.occurred_at <= ?"
+        parts = [f"SELECT m.alert_id FROM alert_items m WHERE m.content_hash = ? {span}"]
+        params: list[Any] = [content_hash, low, high]
+        # an item given up by a full alert is still found by its content and by its id
+        parts.append(
+            "SELECT o.alert_id FROM alert_overflow o WHERE o.content_hash = ? "
+            "AND o.occurred_at >= ? AND o.occurred_at <= ?"
+        )
+        params += [content_hash, low, high]
         related = list(related_items)
-        same = "m.content_hash = ?"
         if related:
-            same = f"({same} OR m.item_id IN ({', '.join('?' * len(related))}))"
+            marks = ", ".join("?" * len(related))
+            parts.append(
+                f"SELECT m.alert_id FROM alert_items m WHERE m.item_id IN ({marks}) {span}"
+            )
+            params += [*related, low, high]
+            parts.append(
+                f"SELECT o.alert_id FROM alert_overflow o WHERE o.item_id IN ({marks}) "
+                "AND o.occurred_at >= ? AND o.occurred_at <= ?"
+            )
+            params += [*related, low, high]
+        if item_id is not None:
+            for key in ("near_of", "duplicate_of"):
+                parts.append(
+                    "SELECT m.alert_id FROM alert_items m "
+                    f"WHERE json_extract(m.evidence, '$.{key}') = ? {span}"
+                )
+                params += [item_id, low, high]
         rows = self._db.query(
-            "SELECT DISTINCT a.id, a.created_at FROM alert_items m JOIN alerts a "
-            f"ON a.id = m.alert_id WHERE {same} AND m.occurred_at >= ? AND m.occurred_at <= ? "
+            "SELECT a.id FROM alerts a WHERE a.id IN (" + " UNION ".join(parts) + ") "
             "ORDER BY a.created_at, a.id",
-            [content_hash, *related, format_utc(around - window), format_utc(around + window)],
+            params,
         )
         return [str(r[0]) for r in rows]
 
@@ -363,6 +435,10 @@ class SqliteAlertRepository:
                     "SELECT severity, count(*) FROM alerts WHERE withdrawn_at IS NULL "
                     "GROUP BY severity ORDER BY severity"
                 ).fetchall()
+                downgraded = conn.execute(
+                    "SELECT count(*) FROM alerts WHERE withdrawn_at IS NULL "
+                    "AND downgraded_by_model = 1"
+                ).fetchone()
                 new_by_severity = conn.execute(
                     "SELECT severity, count(*) FROM alerts WHERE withdrawn_at IS NULL "
                     "AND status = 'new' GROUP BY severity ORDER BY severity"
@@ -376,51 +452,276 @@ class SqliteAlertRepository:
             by_status=tuple((str(k), int(n)) for k, n in by_status),
             by_severity=tuple((str(k), int(n)) for k, n in by_severity),
             new_by_severity=tuple((str(k), int(n)) for k, n in new_by_severity),
+            downgraded=int(downgraded[0]),
         )
 
     # ---- the sync ----
 
     def sync_ids(
-        self, *, min_confidence: float, full: bool, after: str | None, limit: int
-    ) -> list[str]:
+        self,
+        *,
+        min_confidence: float,
+        full: bool,
+        after: str | None,
+        limit: int,
+        now: datetime | None = None,
+    ) -> list[SyncRef]:
         validate_limit(limit)
         parts = [_PENDING, _EVERY_MEMBER if full else _CHANGED]
+        after_ts, after_id = _split_cursor(after)
+        params: list[Any] = [float(min_confidence), after_ts, after_id]
+        waiting = ""
+        if now is not None:
+            waiting = _NOT_BACKING_OFF.format(column="u.item_id")
+            params.append(format_utc(now))
         rows = self._db.query(
-            f"SELECT item_id FROM ({' UNION '.join(parts)}) WHERE item_id > ? "
-            "ORDER BY item_id LIMIT ?",
-            [float(min_confidence), after or "", limit],
+            f"SELECT u.item_id, u.ts FROM ({' UNION '.join(parts)}) u "
+            f"WHERE (u.ts, u.item_id) > (?, ?) {waiting} ORDER BY u.ts, u.item_id LIMIT ?",
+            [*params, limit],
         )
-        return [str(r[0]) for r in rows]
+        return [SyncRef(str(r[0]), _cursor(str(r[1]), str(r[0]))) for r in rows]
+
+    def dirty_ids(
+        self, *, after: str | None, limit: int, now: datetime | None = None
+    ) -> list[SyncRef]:
+        validate_limit(limit)
+        after_ts, after_id = _split_cursor(after)
+        params: list[Any] = [after_ts, after_id]
+        waiting = ""
+        if now is not None:
+            waiting = _NOT_BACKING_OFF.format(column="d.item_id")
+            params.append(format_utc(now))
+        rows = self._db.query(
+            "SELECT d.item_id, COALESCE(i.fetched_at, '') AS ts FROM alert_dirty d "
+            "LEFT JOIN items i ON i.id = d.item_id "
+            f"WHERE (COALESCE(i.fetched_at, ''), d.item_id) > (?, ?) {waiting} "
+            "ORDER BY ts, d.item_id LIMIT ?",
+            [*params, limit],
+        )
+        return [SyncRef(str(r[0]), _cursor(str(r[1]), str(r[0]))) for r in rows]
+
+    def clear_dirty(self, item_id: str) -> None:
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM alert_dirty WHERE item_id = ?", (item_id,))
 
     def is_forgotten(self, item_id: str) -> bool:
         return bool(self._db.query("SELECT 1 FROM alert_forgotten WHERE item_id = ?", (item_id,)))
 
+    def forgotten_signature(self, item_id: str) -> ForgottenSignature | None:
+        rows = self._db.query(
+            "SELECT label, confidence, settled_at FROM alert_forgotten WHERE item_id = ?",
+            (item_id,),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        try:
+            return ForgottenSignature(
+                row["label"], row["confidence"], _optional_time(row["settled_at"])
+            )
+        except (ValueError, TypeError):
+            raise StorageError("stored forgotten signature is invalid") from None
+
+    def clear_forgotten(self, item_id: str) -> None:
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM alert_forgotten WHERE item_id = ?", (item_id,))
+
+    # ---- items the step could not evaluate ----
+
+    def record_failure(
+        self,
+        item_id: str,
+        now: datetime,
+        *,
+        park_after: int,
+        backoff_base: timedelta,
+        backoff_cap: timedelta,
+    ) -> int:
+        with self._db.transaction() as conn:
+            row = conn.execute(
+                "SELECT failures FROM alert_failures WHERE item_id = ?", (item_id,)
+            ).fetchone()
+            failures = (int(row[0]) if row else 0) + 1
+            delay = min(backoff_base * (2 ** min(failures - 1, 30)), backoff_cap)
+            conn.execute(
+                "INSERT INTO alert_failures "
+                "(item_id, failures, last_failed_at, next_try_at, parked) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT (item_id) DO UPDATE SET "
+                "failures = excluded.failures, last_failed_at = excluded.last_failed_at, "
+                "next_try_at = excluded.next_try_at, parked = excluded.parked",
+                (
+                    item_id,
+                    failures,
+                    format_utc(now),
+                    format_utc(now + delay),
+                    int(failures >= park_after),
+                ),
+            )
+        return failures
+
+    def clear_failure(self, item_id: str) -> None:
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM alert_failures WHERE item_id = ?", (item_id,))
+
+    def failure_counts(self, now: datetime) -> tuple[int, int]:
+        """(items waiting to be tried again, items parked)."""
+        rows = self._db.query(
+            "SELECT COALESCE(SUM(parked = 0 AND next_try_at > ?), 0), "
+            "COALESCE(SUM(parked = 1), 0) FROM alert_failures",
+            (format_utc(now),),
+        )
+        return int(rows[0][0]), int(rows[0][1])
+
+    def release_parked(self) -> int:
+        with self._db.transaction() as conn:
+            return conn.execute(
+                "UPDATE alert_failures SET parked = 0, next_try_at = last_failed_at "
+                "WHERE parked = 1"
+            ).rowcount
+
+    # ---- copies counted but not stored ----
+
+    def overflow_of(self, item_id: str) -> str | None:
+        rows = self._db.query("SELECT alert_id FROM alert_overflow WHERE item_id = ?", (item_id,))
+        return str(rows[0][0]) if rows else None
+
+    def add_overflow(self, alert_id: str, member: AlertMember) -> None:
+        """Count a member without storing it: the item, its verdict signature, its content and
+        its time stay, so that it is not counted twice and its copies still find the alert."""
+        if not isinstance(member, AlertMember):
+            raise ValidationError("an alert member is required")
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO alert_overflow (item_id, alert_id, label, confidence, settled_at, "
+                "content_hash, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (item_id) DO UPDATE SET alert_id = excluded.alert_id, "
+                "label = excluded.label, confidence = excluded.confidence, "
+                "settled_at = excluded.settled_at, content_hash = excluded.content_hash, "
+                "occurred_at = excluded.occurred_at",
+                (
+                    member.item_id,
+                    alert_id,
+                    member.label.value,
+                    member.confidence,
+                    _text_or_none(member.settled_at),
+                    member.content_hash,
+                    format_utc(member.occurred_at),
+                ),
+            )
+
+    def move_overflow(self, from_id: str, to_id: str) -> None:
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE alert_overflow SET alert_id = ? WHERE alert_id = ?", (to_id, from_id)
+            )
+
+    # ---- the cap on members and on the trail ----
+
+    def count_members(self, alert_id: str) -> int:
+        rows = self._db.query("SELECT count(*) FROM alert_items WHERE alert_id = ?", (alert_id,))
+        return int(rows[0][0])
+
+    def delete_member(self, item_id: str) -> None:
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM alert_items WHERE item_id = ?", (item_id,))
+
+    def weakest_member(self, alert_id: str, *, protect: str | None) -> AlertMember | None:
+        """The member to give up first when the alert is full: an inactive one, then the least
+        severe, least confident, newest. Never the earliest member nor `protect` (the lead)."""
+        rows = self._db.query(
+            f"SELECT {_MEMBER_COLUMNS} FROM alert_items WHERE alert_id = ? AND item_id <> ? "
+            "AND item_id <> (SELECT item_id FROM alert_items WHERE alert_id = ? "
+            "ORDER BY occurred_at, item_id LIMIT 1) "
+            f"ORDER BY active, {_SEVERITY_RANK}, confidence, occurred_at DESC, item_id LIMIT 1",
+            (alert_id, protect or "", alert_id),
+        )
+        return _member_from_row(rows[0]) if rows else None
+
+    def count_events(self, alert_id: str) -> int:
+        rows = self._db.query("SELECT count(*) FROM alert_events WHERE alert_id = ?", (alert_id,))
+        return int(rows[0][0])
+
+    def copy_events(self, from_id: str, to_id: str, *, limit: int) -> int:
+        """Copy the trail of `from_id` under `to_id`, marked as absorbed and with its original
+        times, at most `limit` entries (the entries that matter, status changes and withdrawals,
+        before the routine ones). Returns how many were left out."""
+        with self._db.transaction() as conn:
+            total = int(
+                conn.execute(
+                    "SELECT count(*) FROM alert_events WHERE alert_id = ?", (from_id,)
+                ).fetchone()[0]
+            )
+            take = max(0, min(total, limit))
+            if take:
+                conn.execute(
+                    "INSERT INTO alert_events "
+                    "(alert_id, at, kind, actor, reason, from_value, to_value, from_absorbed) "
+                    "SELECT ?, at, kind, actor, reason, from_value, to_value, 1 FROM alert_events "
+                    "WHERE seq IN (SELECT seq FROM alert_events WHERE alert_id = ? "
+                    "ORDER BY (kind IN ('merged', 'updated')), seq LIMIT ?) ORDER BY seq",
+                    (to_id, from_id, take),
+                )
+        return total - take
+
+    def drop_events(self, alert_id: str, count: int) -> None:
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE alerts SET events_dropped = events_dropped + ? WHERE id = ?",
+                (count, alert_id),
+            )
+
     # ---- retention ----
 
     def purge(self, *, before: datetime | None, handled: bool, now: datetime) -> int:
+        """Remove the alerts whose latest occurrence is strictly before `before` and, with
+        `handled`, those looked at (seen, dismissed) or withdrawn, EXCEPT while an active member
+        still waits for the language model (its verdict may yet change what the alert means).
+        Every item behind a removed alert is remembered with the verdict it had, so that it is
+        raised again only when its verdict changes. The memory is dropped a year later."""
         conditions: list[str] = []
         params: list[Any] = []
         if before is not None:
-            conditions.append("last_seen_at < ?")
+            conditions.append("alerts.last_seen_at < ?")
             params.append(format_utc(before))
         if handled:
-            conditions.append("(status <> 'new' OR withdrawn_at IS NOT NULL)")
+            conditions.append(
+                "((alerts.status <> 'new' OR alerts.withdrawn_at IS NOT NULL) AND NOT EXISTS "
+                "(SELECT 1 FROM alert_items w WHERE w.alert_id = alerts.id AND w.active = 1 "
+                "AND json_extract(w.evidence, '$.provisional') = 1))"
+            )
         removed = 0
+        stamp = format_utc(now)
         with self._db.transaction() as conn:
             if conditions:
                 where = " OR ".join(conditions)
+                doomed = f"SELECT alerts.id FROM alerts WHERE {where}"
                 conn.execute(
-                    "INSERT INTO alert_forgotten (item_id, forgotten_at) "
-                    "SELECT item_id, ? FROM alert_items "
-                    f"WHERE alert_id IN (SELECT id FROM alerts WHERE {where}) "
-                    "ON CONFLICT (item_id) DO NOTHING",
-                    [format_utc(now), *params],
+                    "INSERT INTO alert_forgotten (item_id, forgotten_at, label, confidence, "
+                    "settled_at) SELECT item_id, ?, label, confidence, settled_at FROM ("
+                    f"SELECT item_id, label, confidence, settled_at FROM alert_items "
+                    f"WHERE alert_id IN ({doomed}) UNION ALL "
+                    f"SELECT item_id, label, confidence, settled_at FROM alert_overflow "
+                    f"WHERE alert_id IN ({doomed})) WHERE true "
+                    "ON CONFLICT (item_id) DO UPDATE SET forgotten_at = excluded.forgotten_at, "
+                    "label = excluded.label, confidence = excluded.confidence, "
+                    "settled_at = excluded.settled_at",
+                    [stamp, *params, *params],
                 )
                 removed = conn.execute(f"DELETE FROM alerts WHERE {where}", params).rowcount
             conn.execute(
-                "DELETE FROM alert_forgotten "
-                "WHERE item_id NOT IN (SELECT item_id FROM classifications)"
+                "DELETE FROM alert_forgotten WHERE forgotten_at < ?",
+                (format_utc(now - FORGOTTEN_KEEP),),
             )
+            conn.execute(
+                "DELETE FROM alert_forgotten WHERE item_id IN (SELECT item_id FROM alert_forgotten "
+                "ORDER BY forgotten_at DESC, item_id DESC LIMIT -1 OFFSET ?)",
+                (MAX_FORGOTTEN,),
+            )
+            for table in ("alert_failures", "alert_dirty"):
+                conn.execute(
+                    f"DELETE FROM {table} "
+                    "WHERE item_id NOT IN (SELECT item_id FROM classifications)"
+                )
         return removed
 
     # Defined last: the name shadows the builtin inside the class body.

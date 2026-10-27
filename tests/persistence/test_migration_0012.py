@@ -116,9 +116,7 @@ def test_opening_twice_applies_it_once(tmp_path: Path):
     Database(path).close()
     again = Database(path)
     try:
-        assert again.query("SELECT count(*) FROM schema_migrations")[0][0] == len(
-            load_migrations()
-        )
+        assert again.query("SELECT count(*) FROM schema_migrations")[0][0] == len(load_migrations())
     finally:
         again.close()
 

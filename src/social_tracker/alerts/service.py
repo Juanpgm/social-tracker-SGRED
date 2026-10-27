@@ -51,6 +51,8 @@ from social_tracker.alerts.domain import (
     apply_status,
     assess,
     event_age,
+    lead_key,
+    merge_member,
     project,
     severity_rank,
     tags_for,
@@ -78,6 +80,10 @@ from social_tracker.shared.uow import UnitOfWork
 from social_tracker.sources.ports import SourceRepository
 
 DEFAULT_BATCH = 200
+PARK_AFTER = 5  # failures of one item after which the step stops trying it by itself
+BACKOFF_BASE = timedelta(seconds=30)  # doubled after every failure of the same item...
+BACKOFF_CAP = timedelta(hours=1)  # ...up to this
+_ROUTINE = frozenset({AlertEventKind.MERGED, AlertEventKind.UPDATED})
 _LOG = logging.getLogger("social_tracker.alerts")
 _MAX_REASON = 480
 
@@ -104,12 +110,14 @@ class StatusResult:
 
 @dataclass(frozen=True)
 class AlertDetail:
-    """An alert with the items behind it, its trail, and the sources that no longer exist."""
+    """An alert with the items behind it, its trail (the latest `max_events` entries), how many
+    entries are not in it, and the sources that no longer exist."""
 
     alert: Alert
     members: tuple[AlertMember, ...]
     events: tuple[AlertEvent, ...]
     removed_sources: frozenset[str]
+    events_hidden: int = 0  # trail entries not shown or not stored (the trail is capped)
 
 
 def _withdrawal_reason(label: Label) -> str:
@@ -149,20 +157,29 @@ class AlertService:
     # ---- the step ----
 
     def refresh(self, *, full: bool = False, batch: int = DEFAULT_BATCH) -> SyncReport:
-        """Look at the verdicts that are new or changed since their alert was last evaluated and
-        update the alerts. With `full`, at every member too (the threshold may have moved): that
-        is `rebuild`. Idempotent: a second run finds nothing to do."""
+        """Look at the verdicts that changed since the step last looked and update the alerts.
+
+        A normal pass reads the small set of items whose verdict was written since (a dirty mark
+        kept by the store), so a quiet tick costs one query however many alerts exist. A full pass
+        looks at every member too: it runs for `rebuild`, and by itself when the alert threshold is
+        not the one the alerts were last evaluated with (A6), so a changed threshold needs no
+        separate command. Idempotent: a second run finds nothing to do."""
         validate_limit(batch)
         threshold = self._control.alert_min_confidence()
+        sweep = full or self._control.alerts_synced_threshold() != threshold
         tally: Counter[str] = Counter()
         after: str | None = None
         while True:
-            ids = self._alerts.sync_ids(
-                min_confidence=threshold, full=full, after=after, limit=batch
-            )
-            for item_id in ids:
+            now = self._clock.now()
+            if sweep:
+                refs = self._alerts.sync_ids(
+                    min_confidence=threshold, full=True, after=after, limit=batch, now=now
+                )
+            else:
+                refs = self._alerts.dirty_ids(after=after, limit=batch, now=now)
+            for ref in refs:
                 try:
-                    tally[self._sync(item_id, threshold).value] += 1
+                    tally[self._sync(ref.item_id, threshold).value] += 1
                 except StorageError as exc:
                     _LOG.warning("the alert step was stopped by a storage error: %s", exc.code)
                     tally["errors"] += 1
@@ -170,12 +187,20 @@ class AlertService:
                 except Exception as exc:  # noqa: BLE001 - one poison item must not stall the step
                     _LOG.warning("an item could not be evaluated for alerts: %s", _reason(exc))
                     tally["errors"] += 1
-            if len(ids) < batch:
-                return self._report(tally)
-            after = ids[-1]
+                    self._fail(ref.item_id)
+            if len(refs) < batch:
+                break
+            after = refs[-1].cursor
+        self._remember(threshold if sweep and not tally["errors"] else None)
+        return self._report(tally)
 
     def rebuild(self) -> SyncReport:
-        """Evaluate every verdict again with the threshold in force. Idempotent."""
+        """Evaluate every verdict again with the threshold in force, the items the step had given
+        up on included. Idempotent."""
+        try:
+            self._alerts.release_parked()
+        except StorageError as exc:
+            _LOG.warning("parked items were not released: %s", exc.code)
         return self.refresh(full=True)
 
     def sync_item(self, item_id: str, min_confidence: float | None = None) -> Outcome:
@@ -198,21 +223,70 @@ class AlertService:
             errors=tally["errors"],
         )
 
+    def _remember(self, synced: float | None) -> None:
+        """Leave the time of this pass (and, after a complete full pass, the threshold it applied)
+        for the operator pages. Telemetry: a failure to write it never fails the step."""
+        try:
+            self._control.record_alert_refresh()
+            if synced is not None:
+                self._control.record_alerts_synced(synced)
+        except DomainError as exc:
+            _LOG.warning("the alert refresh was not recorded: %s", exc.code)
+
+    def _fail(self, item_id: str) -> None:
+        """The step could not evaluate this item: back off, and park it after a few failures."""
+        try:
+            failures = self._alerts.record_failure(
+                item_id,
+                self._clock.now(),
+                park_after=PARK_AFTER,
+                backoff_base=BACKOFF_BASE,
+                backoff_cap=BACKOFF_CAP,
+            )
+        except StorageError as exc:
+            _LOG.warning("a failure of the alert step was not recorded: %s", exc.code)
+            return
+        if failures >= PARK_AFTER:
+            _LOG.warning(
+                "an item was parked after %d failures; `alerts rebuild` retries it", failures
+            )
+
     def _sync(self, item_id: str, threshold: float) -> Outcome:
         with self._uow.transaction():
             verdict = self._classifications.get(item_id)
             if verdict is None:
-                return Outcome.SKIPPED
-            existing = self._alerts.member(item_id)
-            if existing is None:
-                return self._raise(verdict, threshold)
-            return self._update(existing, verdict, threshold)
+                outcome = Outcome.SKIPPED
+            else:
+                existing = self._alerts.member(item_id)
+                outcome = (
+                    self._raise(verdict, threshold)
+                    if existing is None
+                    else self._update(existing, verdict, threshold)
+                )
+            self._alerts.clear_dirty(item_id)
+            self._alerts.clear_failure(item_id)
+            return outcome
 
     # ---- a new member ----
 
+    def _remembered(self, verdict: Classification) -> bool:
+        """True when this item must not raise an alert now: its alert was forgotten on this very
+        verdict (a changed or upgraded verdict clears that memory), or it was already counted as
+        a copy of an alert that is full."""
+        item_id = verdict.item_id
+        if self._alerts.overflow_of(item_id) is not None:
+            return True
+        sig = self._alerts.forgotten_signature(item_id)
+        if sig is None:
+            return False
+        if sig.matches(verdict.label, verdict.confidence, verdict.settled_at):
+            return True
+        self._alerts.clear_forgotten(item_id)
+        return False
+
     def _raise(self, verdict: Classification, threshold: float) -> Outcome:
         item = self._items.get(verdict.item_id)
-        if item is None or self._alerts.is_forgotten(verdict.item_id):
+        if item is None:
             return Outcome.SKIPPED
         age = event_age(item.published_at, item.fetched_at)
         severity = assess(
@@ -223,7 +297,7 @@ class AlertService:
             event_age=age,
             settings=self._settings,
         )
-        if severity is None:
+        if severity is None or self._remembered(verdict):
             return Outcome.SKIPPED
         now = self._clock.now()
         targets = self._alerts.find_merge_targets(
@@ -231,43 +305,165 @@ class AlertService:
             related_items=[x for x in (verdict.duplicate_of, verdict.near_of) if x],
             around=item.fetched_at,
             window=self._settings.dedup_window,
+            item_id=item.id,
         )
         alert_id = targets[0] if targets else alert_id_for(item.id)
         member = self._member(alert_id, verdict, item, severity, age, now)
         previous = self._alerts.get(alert_id)
-        status, basis = (
-            self._decisive_status(previous, targets[1:]) if previous is not None else (None, None)
-        )
-        for other in targets[1:]:
-            self._absorb(alert_id, other, now)
-        members = [*self._alerts.members(alert_id), member]
-        alert = project(alert_id, members, previous=previous, now=now)
-        if status is not None:
-            alert = replace(alert, status=status)
-        alert = self._with_withdrawal(previous, alert, members, member)
-        if previous is not None and not any(m.active for m in members[:-1]):
-            alert = replace(alert, downgraded_by_model=False)  # a live copy: nothing to flag
+        if previous is None:
+            alert = project(alert_id, [member], previous=None, now=now)
+            self._alerts.save(alert)
+            self._alerts.save_member(member)
+            self._event(alert_id, now, AlertEventKind.CREATED, _says(verdict), "", "1")
+            return Outcome.CREATED
+        status, basis = self._decisive_status(previous, targets[1:])
+        if len(targets) > 1:
+            return self._bridge(previous, targets[1:], member, verdict, status, basis, now)
+        return self._join(previous, member, verdict, status, basis, now)
+
+    def _join(
+        self,
+        previous: Alert,
+        member: AlertMember,
+        verdict: Classification,
+        status: AlertStatus,
+        basis: Severity,
+        now: datetime,
+    ) -> Outcome:
+        """One more copy for an alert, without reading its other members (A8): the projection is
+        brought up to date incrementally. A full alert gives up its weakest member for a newcomer
+        (the first one and the leading one always stay), and the one given up is only counted."""
+        lead = self._alerts.member(previous.item_id)
+        stored, gave_up = True, 0
+        if self._alerts.count_members(previous.id) >= self._settings.max_members:
+            stored, gave_up = self._make_room(previous, lead, member)
+        if stored:
+            alert = merge_member(previous, lead, member, now=now)
+            alert = replace(alert, overflow=previous.overflow + gave_up)
+            if lead is None or not lead.active:
+                alert = replace(alert, downgraded_by_model=False)  # a live copy: nothing to flag
+        else:
+            alert = replace(
+                previous,
+                occurrences=previous.occurrences + 1,
+                overflow=previous.overflow + 1,
+                first_seen_at=min(previous.first_seen_at, member.occurred_at),
+                last_seen_at=max(previous.last_seen_at, member.occurred_at),
+                updated_at=now,
+            )
+        alert = replace(alert, withdrawn_at=None, withdrawn_reason=None)
         rise = self._rise(alert, basis)
         if rise is not None:
             alert = replace(alert, status=AlertStatus.NEW, status_changed_at=now)
         self._alerts.save(alert)
-        self._alerts.save_member(member)
-        if previous is None:
-            self._event(alert_id, now, AlertEventKind.CREATED, _says(verdict), "", "1")
-            return Outcome.CREATED
+        if stored:
+            self._alerts.save_member(member)
+        else:
+            self._count_only(previous.id, member)
+        return self._joined(previous, alert, verdict, rise, status, now)
+
+    def _make_room(
+        self, previous: Alert, lead: AlertMember | None, newcomer: AlertMember
+    ) -> tuple[bool, int]:
+        """The alert is full. Returns (the newcomer is stored, active members given up). The weakest
+        member goes (only counted from now on); with nothing that can go, the newcomer replaces
+        the lead if it outranks it, else it is only counted."""
+        victim = self._alerts.weakest_member(previous.id, protect=previous.item_id)
+        if victim is None:
+            if lead is not None and lead.active and lead_key(newcomer) >= lead_key(lead):
+                return False, 0
+            victim = lead
+        if victim is None:
+            return True, 0
+        self._alerts.delete_member(victim.item_id)
+        self._count_only(previous.id, victim)
+        return True, int(victim.active)
+
+    def _count_only(self, alert_id: str, member: AlertMember) -> None:
+        self._alerts.add_overflow(alert_id, member)
+
+    def _joined(
+        self,
+        previous: Alert,
+        alert: Alert,
+        verdict: Classification,
+        rise: str | None,
+        was: AlertStatus,
+        now: datetime,
+    ) -> Outcome:
         self._event(
-            alert_id,
+            alert.id,
             now,
             AlertEventKind.MERGED,
             f"a copy joined: {_says(verdict)}",
             str(previous.occurrences),
             str(alert.occurrences),
         )
-        self._write_rise(alert_id, rise, status, now)
+        self._write_rise(alert.id, rise, was, now)
         if previous.withdrawn and not alert.withdrawn:
-            self._event(alert_id, now, AlertEventKind.REACTIVATED, "a new occurrence qualifies")
+            self._event(alert.id, now, AlertEventKind.REACTIVATED, "a new occurrence qualifies")
             return Outcome.REACTIVATED
         return Outcome.MERGED
+
+    def _bridge(
+        self,
+        previous: Alert,
+        others: list[str],
+        member: AlertMember,
+        verdict: Classification,
+        status: AlertStatus,
+        basis: Severity,
+        now: datetime,
+    ) -> Outcome:
+        """An item that belongs to several alerts makes them one: the oldest stays, the others
+        are absorbed with their members, their overflow and their trail (copied under the kept
+        alert with its original times, marked as absorbed)."""
+        keep = previous.id
+        overflow, dropped = previous.overflow, previous.events_dropped
+        for other_id in others:
+            absorbed = self._alerts.get(other_id)
+            if absorbed is None:
+                continue
+            for moved in self._alerts.members(other_id):
+                self._alerts.save_member(replace(moved, alert_id=keep))
+            self._alerts.move_overflow(other_id, keep)
+            room = max(0, 2 * self._settings.max_events - self._alerts.count_events(keep))
+            left_out = self._alerts.copy_events(other_id, keep, limit=room)
+            overflow += absorbed.overflow
+            dropped += absorbed.events_dropped + left_out
+            self._alerts.delete(other_id)
+            self._event(keep, now, AlertEventKind.MERGED, f"absorbed alert {other_id}")
+        members = [*self._alerts.members(keep), member]
+        alert = project(keep, members, previous=previous, now=now, overflow=overflow)
+        alert = replace(alert, status=status, events_dropped=dropped)
+        alert = self._with_withdrawal(previous, alert, members, member)
+        if not any(m.active for m in members[:-1]):
+            alert = replace(alert, downgraded_by_model=False)  # a live copy: nothing to flag
+        rise = self._rise(alert, basis)
+        if rise is not None:
+            alert = replace(alert, status=AlertStatus.NEW, status_changed_at=now)
+        self._alerts.save(alert)
+        self._alerts.save_member(member)
+        gave_up = self._trim(alert)
+        if gave_up:
+            alert = replace(alert, overflow=alert.overflow + gave_up)
+            self._alerts.save(alert)
+        return self._joined(previous, alert, verdict, rise, status, now)
+
+    def _trim(self, alert: Alert) -> int:
+        """Bring an alert that grew by absorbing others back to the cap. Returns how many ACTIVE
+        members went (they are counted in `overflow` from now on)."""
+        excess = self._alerts.count_members(alert.id) - self._settings.max_members
+        gave_up = 0
+        while excess > 0:
+            victim = self._alerts.weakest_member(alert.id, protect=alert.item_id)
+            if victim is None:
+                break
+            self._alerts.delete_member(victim.item_id)
+            self._count_only(alert.id, victim)
+            gave_up += int(victim.active)
+            excess -= 1
+        return gave_up
 
     @staticmethod
     def _rise(alert: Alert, basis: Severity | None, why: str = "") -> str | None:
@@ -293,13 +489,6 @@ class AlertService:
                 was.value,
                 AlertStatus.NEW.value,
             )
-
-    def _absorb(self, keep_id: str, other_id: str, now: datetime) -> None:
-        """Move the members of `other_id` under `keep_id` and forget the empty alert."""
-        for member in self._alerts.members(other_id):
-            self._alerts.save_member(replace(member, alert_id=keep_id))
-        self._alerts.delete(other_id)
-        self._event(keep_id, now, AlertEventKind.MERGED, f"absorbed alert {other_id}")
 
     def _decisive_status(self, kept: Alert, others: list[str]) -> tuple[AlertStatus, Severity]:
         """The status of alerts that become one: what needs attention most decides (new, then
@@ -407,7 +596,9 @@ class AlertService:
         members = [
             fresh if m.item_id == old.item_id else m for m in self._alerts.members(old.alert_id)
         ]
-        projected = project(previous.id, members, previous=previous, now=now)
+        projected = project(
+            previous.id, members, previous=previous, now=now, overflow=previous.overflow
+        )
         # A11: the language model made this verdict (it settled a waiting one). A verdict it
         # lowers, or one that stops qualifying, is flagged and kept in view, never silently hidden
         model_made = verdict.stage is Stage.LLM and (
@@ -494,6 +685,14 @@ class AlertService:
         before: str = "",
         after: str = "",
     ) -> None:
+        """Append to the trail of an alert, which is capped: past `max_events` the routine entries
+        (merged, updated) are only counted, past twice that nothing more is stored, and the count
+        of what was left out is kept on the alert."""
+        stored = self._alerts.count_events(alert_id)
+        cap = self._settings.max_events
+        if stored >= 2 * cap or (kind in _ROUTINE and stored >= cap):
+            self._alerts.drop_events(alert_id, 1)
+            return
         event = AlertEvent(alert_id, at, kind, ACTOR_SYSTEM, reason[:_MAX_REASON], before, after)
         self._alerts.add_event(event)
 
@@ -568,9 +767,11 @@ class AlertService:
         with self._uow.snapshot():
             alert = self._known(alert_id)
             members = tuple(self._alerts.members(alert.id))
-            events = tuple(self._alerts.events(alert.id))
+            events = tuple(self._alerts.events(alert.id, limit=self._settings.max_events))
+            stored = self._alerts.count_events(alert.id)
         ids = {m.source_id for m in members} | {alert.source_id}
-        return AlertDetail(alert, members, events, self.removed_sources(ids))
+        hidden = stored - len(events) + alert.events_dropped
+        return AlertDetail(alert, members, events, self.removed_sources(ids), hidden)
 
     def removed_sources(self, source_ids: Iterable[str]) -> frozenset[str]:
         """Which of these sources no longer exist (their alerts keep the name they had). One read
@@ -581,7 +782,10 @@ class AlertService:
         return frozenset(wanted - {source.id for source in self._sources.list()})
 
     def counts(self) -> AlertCounts:
-        return self._alerts.counts()
+        with self._uow.snapshot():
+            counts = self._alerts.counts()
+            retrying, parked = self._alerts.failure_counts(self._clock.now())
+        return replace(counts, retrying=retrying, parked=parked)
 
     # ---- retention (AL-8) ----
 

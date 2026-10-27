@@ -35,7 +35,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import Any, NamedTuple
 
 from social_tracker.classification.domain import RISK_LABELS, Label, Topic
 from social_tracker.shared.clock import ensure_utc
@@ -779,6 +779,37 @@ class AlertCounts:
     by_status: tuple[tuple[str, int], ...] = ()
     by_severity: tuple[tuple[str, int], ...] = ()
     new_by_severity: tuple[tuple[str, int], ...] = ()
+    downgraded: int = 0  # visible alerts the language model lowered or cleared (A11)
+    retrying: int = 0  # items the alert step failed on and will try again
+    parked: int = 0  # items it gave up on until the next rebuild (A14)
+
+
+class SyncRef(NamedTuple):
+    """An item the alert step has to look at, with the opaque cursor that continues the listing
+    after it (the listing is chronological: fetch time, then item id)."""
+
+    item_id: str
+    cursor: str
+
+
+@dataclass(frozen=True)
+class ForgottenSignature:
+    """The verdict an item had when its alert was forgotten by the retention purge. The item is
+    not raised again while its verdict is the same; a changed or upgraded verdict clears it.
+    An entry from before the signatures existed has none (every part None) and keeps suppressing."""
+
+    label: str | None
+    confidence: float | None
+    settled_at: datetime | None
+
+    def matches(self, label: Any, confidence: float, settled_at: datetime | None) -> bool:
+        if self.label is None:
+            return True
+        return (
+            str(getattr(label, "value", label)) == self.label
+            and confidence == self.confidence
+            and settled_at == self.settled_at
+        )
 
 
 @dataclass(frozen=True)
