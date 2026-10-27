@@ -10,8 +10,13 @@ What it guarantees, per request:
   The connection then goes to the validated IP address, with the original name in the `Host`
   header and as the TLS server name, so the name is never resolved a second time and a changing
   DNS answer (rebinding) cannot lead the request elsewhere.
+- Only the ports in `allowed_ports` (default 80, 443, 8080, 8443) are contacted, redirects
+  included; a feed has no business on a database or mail port.
 - Redirects are followed by hand, at most `max_redirects`, and each hop is validated and pinned
-  again: a redirect to a private address, another scheme or a disguised numeric host fails.
+  again: a redirect to a private address, another scheme or a disguised numeric host fails. A
+  redirect from `https` to `http` is refused (no downgrade), and the conditional-request
+  validators (`If-None-Match`, `If-Modified-Since`) are sent only to the authority the fetch
+  started at, never to a host or port a redirect led to.
 - The body is capped at `max_bytes` AFTER decompression (only `gzip` is requested; a
   decompression bomb stops at the cap) and the whole fetch has a wall-clock deadline, so a
   server that trickles bytes cannot hold the worker.
@@ -54,6 +59,7 @@ _ACCEPT = (
 )
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _MAX_ADDRESSES_TRIED = 3
+DEFAULT_ALLOWED_PORTS = frozenset({80, 443, 8080, 8443})
 _ETAG_MAX = 512
 _LAST_MODIFIED_MAX = 100
 _LOG = logging.getLogger("social_tracker.collector")
@@ -129,6 +135,11 @@ def _validator(value: str | None, max_length: int) -> str | None:
     return text
 
 
+def _bare(request: FetchRequest) -> FetchRequest:
+    """The same request without conditional-request validators."""
+    return FetchRequest(request.url)
+
+
 @dataclass(frozen=True)
 class _Redirect:
     url: str
@@ -144,6 +155,7 @@ class HttpFetcher:
         transport: httpx2.BaseTransport | None = None,
         private_hosts: Iterable[str] = (),
         monotonic: Callable[[], float] = time.monotonic,
+        allowed_ports: Iterable[int] | None = DEFAULT_ALLOWED_PORTS,
     ) -> None:
         self._clock = clock
         self._limits = limits or FetchLimits()
@@ -151,6 +163,7 @@ class HttpFetcher:
         self._transport = transport
         self._private_hosts = frozenset(host.strip().lower() for host in private_hosts)
         self._monotonic = monotonic
+        self._allowed_ports = None if allowed_ports is None else frozenset(allowed_ports)
 
     def fetch(self, request: FetchRequest) -> FetchResponse:
         started = self._monotonic()
@@ -161,14 +174,26 @@ class HttpFetcher:
             trust_env=False,
             timeout=httpx2.Timeout(self._limits.timeout_s),
         ) as client:
+            origin: FetchTarget | None = None
             for _ in range(self._limits.max_redirects + 1):
                 self._check_deadline(started)
                 target = parse_fetch_url(url)
-                outcome = self._hop(client, target, self._addresses(target), request, started)
+                self._check_port(target)
+                if origin is None:
+                    origin = target
+                elif origin.scheme == "https" and target.scheme == "http":
+                    _LOG.warning("redirect from https to http refused (downgrade)")
+                    raise FetchError(FetchErrorKind.INSECURE_REDIRECT)
+                hop_request = request if target.authority == origin.authority else _bare(request)
+                outcome = self._hop(client, target, self._addresses(target), hop_request, started)
                 if isinstance(outcome, FetchResponse):
                     return outcome
                 url = outcome.url
         raise FetchError(FetchErrorKind.TOO_MANY_REDIRECTS)
+
+    def _check_port(self, target: FetchTarget) -> None:
+        if self._allowed_ports is not None and target.port not in self._allowed_ports:
+            raise FetchError(FetchErrorKind.BLOCKED_ADDRESS)
 
     def _check_deadline(self, started: float) -> None:
         if self._monotonic() - started > self._limits.deadline_s:

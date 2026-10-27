@@ -89,10 +89,11 @@ def build(
     limits: FetchLimits | None = None,
     private_hosts: frozenset[str] = frozenset(),
     monotonic: Callable[[], float] | None = None,
+    **options: object,
 ) -> tuple[HttpFetcher, Net, FakeResolver]:
     net = Net(handler)
     resolver = resolver or FakeResolver()
-    kwargs = {"monotonic": monotonic} if monotonic else {}
+    kwargs = {"monotonic": monotonic, **options} if monotonic else dict(options)
     fetcher = HttpFetcher(
         FixedClock(NOW),
         limits=limits or FetchLimits(),
@@ -497,7 +498,9 @@ def test_every_redirect_status_is_followed(status):
 def test_a_redirect_to_an_internal_address_is_blocked(location):
     resolver = FakeResolver({"metadata.internal": ["169.254.169.254"]})
     fetcher, net, _ = build(lambda r: redirect(location), resolver)
-    assert failure(lambda: get(fetcher)).kind is FetchErrorKind.BLOCKED_ADDRESS
+    # started from plain http so the address check, not the downgrade check, is what is exercised
+    error = failure(lambda: get(fetcher, "http://feeds.example.org/rss.xml"))
+    assert error.kind is FetchErrorKind.BLOCKED_ADDRESS
     assert len(net.requests) == 1  # only the first hop was ever sent
 
 

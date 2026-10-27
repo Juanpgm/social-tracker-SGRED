@@ -6,14 +6,16 @@ import pytest
 
 from social_tracker.bootstrap import (
     ALLOW_PRIVATE_HOSTS_ENV,
+    ALLOWED_PORTS_ENV,
     DB_PATH_ENV,
     RETENTION_DAYS_ENV,
     build_container,
     build_worker,
+    parse_allowed_ports,
     parse_private_hosts,
     parse_retention_days,
 )
-from social_tracker.collector.http_fetcher import HttpFetcher
+from social_tracker.collector.http_fetcher import DEFAULT_ALLOWED_PORTS, HttpFetcher
 from social_tracker.items.domain import DEFAULT_RETENTION_DAYS
 from social_tracker.shared.errors import ValidationError
 from tests.actors import WHO
@@ -90,6 +92,48 @@ def test_a_malformed_private_host_is_refused(raw):
     with pytest.raises(ValidationError) as caught:
         parse_private_hosts(raw)
     assert ALLOW_PRIVATE_HOSTS_ENV in caught.value.message
+
+
+# ---- destination ports ----
+
+
+@pytest.mark.parametrize(
+    ("raw", "ports"),
+    [
+        ("", DEFAULT_ALLOWED_PORTS),
+        ("  ", DEFAULT_ALLOWED_PORTS),
+        (",,", DEFAULT_ALLOWED_PORTS),
+        ("80", frozenset({80})),
+        ("80, 443 ,8000", frozenset({80, 443, 8000})),
+        ("1,65535", frozenset({1, 65535})),
+        ("443,443", frozenset({443})),
+    ],
+)
+def test_allowed_ports_are_a_comma_separated_list_with_the_web_ports_as_default(raw, ports):
+    assert parse_allowed_ports(raw) == ports
+
+
+@pytest.mark.parametrize(
+    "raw", ["0", "65536", "-1", "http", "80;443", "8o80", "80 443", "1.5", "٨٠", "+80", "1" * 9]
+)
+def test_a_malformed_port_list_is_refused_with_the_variable_name(raw):
+    with pytest.raises(ValidationError) as caught:
+        parse_allowed_ports(raw)
+    assert ALLOWED_PORTS_ENV in caught.value.message
+
+
+def test_the_configured_ports_reach_the_fetcher(tmp_path):
+    built = build_worker(env(tmp_path, **{ALLOWED_PORTS_ENV: "8000, 9000"}))
+    try:
+        assert built.fetcher._allowed_ports == frozenset({8000, 9000})
+    finally:
+        built.close()
+
+
+def test_an_invalid_port_list_stops_the_start_before_the_database_is_opened(tmp_path):
+    with pytest.raises(ValidationError):
+        build_worker(env(tmp_path, **{ALLOWED_PORTS_ENV: "99999"}))
+    assert not (tmp_path / "w.db").exists()
 
 
 # ---- the worker ----

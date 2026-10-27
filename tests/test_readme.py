@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 from social_tracker.bootstrap import (
     ALLOW_PRIVATE_HOSTS_ENV,
+    ALLOWED_PORTS_ENV,
     BUSY_TIMEOUT_ENV,
     DB_PATH_ENV,
     DEFAULT_DB_PATH,
@@ -59,6 +60,7 @@ def test_every_environment_variable_and_default_is_documented(readme: str):
         ACTOR_ENV,
         RETENTION_DAYS_ENV,
         ALLOW_PRIVATE_HOSTS_ENV,
+        ALLOWED_PORTS_ENV,
     ):
         assert f"`{name}`" in readme
     assert DEFAULT_DB_PATH in readme

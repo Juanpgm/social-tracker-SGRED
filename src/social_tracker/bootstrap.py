@@ -17,6 +17,8 @@ Environment:
 - `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS`: comma-separated host names (or IP addresses) the collector
   may contact although they resolve to private addresses. Empty by default, which blocks every
   loopback, private, link-local and metadata address (SSRF protection); every use is logged.
+- `SOCIAL_TRACKER_ALLOWED_PORTS`: comma-separated destination ports the collector may contact
+  (feeds and every redirect hop). Default `80,443,8080,8443`; a value replaces the list.
 
 `build_container` is for the CLI and the web UI and never creates a network client. `build_worker`
 adds the collector and the HTTP fetcher (the application's only outbound path) for
@@ -32,7 +34,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from social_tracker.collector.http_fetcher import HttpFetcher
+from social_tracker.collector.http_fetcher import DEFAULT_ALLOWED_PORTS, HttpFetcher
 from social_tracker.collector.ports import Fetcher
 from social_tracker.collector.service import CollectorService
 from social_tracker.collector.worker import DEFAULT_TICK_S, Worker
@@ -52,11 +54,13 @@ DB_PATH_ENV = "SOCIAL_TRACKER_DB_PATH"
 BUSY_TIMEOUT_ENV = "SOCIAL_TRACKER_BUSY_TIMEOUT_MS"
 RETENTION_DAYS_ENV = "SOCIAL_TRACKER_RETENTION_DAYS"
 ALLOW_PRIVATE_HOSTS_ENV = "SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS"
+ALLOWED_PORTS_ENV = "SOCIAL_TRACKER_ALLOWED_PORTS"
 DEFAULT_DB_PATH = "data/social_tracker.db"
 MAX_BUSY_TIMEOUT_MS = 600_000
 _DIGITS = re.compile(r"[0-9]{1,7}")
 _RETENTION_DIGITS = re.compile(r"[0-9]{1,4}")
 _HOST_NAME = re.compile(r"[a-z0-9._-]{1,253}")
+_PORT_DIGITS = re.compile(r"[0-9]{1,5}")
 _BACKOFF_JITTER_FRACTION = 0.1
 
 
@@ -148,6 +152,19 @@ def parse_private_hosts(raw: str) -> frozenset[str]:
     return frozenset(hosts)
 
 
+def parse_allowed_ports(raw: str) -> frozenset[int]:
+    """Destination ports from a comma-separated list (blank: the default web ports)."""
+    ports: set[int] = set()
+    for entry in raw.split(","):
+        text = entry.strip()
+        if not text:
+            continue
+        if not _PORT_DIGITS.fullmatch(text) or not 1 <= int(text) <= 65535:
+            raise ValidationError(f"{ALLOWED_PORTS_ENV} must list port numbers (1..65535)")
+        ports.add(int(text))
+    return frozenset(ports) or DEFAULT_ALLOWED_PORTS
+
+
 def _random_jitter(base_s: float) -> float:
     return random.uniform(0.0, _BACKOFF_JITTER_FRACTION * base_s)
 
@@ -200,9 +217,12 @@ def build_worker(
     """Wire the collector and its worker. `fetcher` replaces the HTTP client (tests, tooling)."""
     env = os.environ if environ is None else environ
     private_hosts = parse_private_hosts(env.get(ALLOW_PRIVATE_HOSTS_ENV, ""))
+    allowed_ports = parse_allowed_ports(env.get(ALLOWED_PORTS_ENV, ""))
     wiring = _open(env)
     try:
-        chosen = fetcher or HttpFetcher(wiring.clock, private_hosts=private_hosts)
+        chosen = fetcher or HttpFetcher(
+            wiring.clock, private_hosts=private_hosts, allowed_ports=allowed_ports
+        )
         container = wiring.container
         collector = CollectorService(
             wiring.sources,
