@@ -71,6 +71,10 @@ def _make_package(root: Path, name: str, files: dict[str, str]) -> None:
         if not init.exists():
             init.write_text("")
         target.write_text(textwrap.dedent(body))
+    # The entrypoints contract names its source package literally (so a rename cannot silently
+    # disable it), hence every fixture package has one, empty unless a test fills it.
+    (pkg / "entrypoints").mkdir(exist_ok=True)
+    (pkg / "entrypoints" / "__init__.py").touch()
 
 
 def _retarget_config(repo_root: Path, dest: Path, root_package: str) -> Path:
@@ -176,3 +180,53 @@ def test_the_yaml_codec_may_use_yaml_but_domain_modules_may_not(repo_root: Path,
     config2 = _retarget_config(repo_root, tmp_path, "fixpkg2")
     bad = _run(["--config", str(config2)], cwd=tmp_path)
     assert bad.returncode != 0, bad.stdout
+
+
+ENTRYPOINT_MODULES = ["entrypoints/cli.py", "entrypoints/api.py", "entrypoints/sub/handlers.py"]
+
+
+@pytest.mark.parametrize("module_path", ENTRYPOINT_MODULES)
+@pytest.mark.parametrize(
+    "forbidden_import",
+    [
+        "import sqlite3",
+        "from sqlite3 import connect",
+        "from fixpkg.persistence import thing",
+        "import fixpkg.persistence.thing",
+    ],
+)
+def test_entrypoints_may_not_import_storage_directly(
+    repo_root: Path, tmp_path: Path, module_path: str, forbidden_import: str
+):
+    _make_package(
+        tmp_path,
+        "fixpkg",
+        {
+            "domain/model.py": "X = 1\n",
+            "persistence/thing.py": "Y = 2\n",
+            module_path: forbidden_import + "\n",
+        },
+    )
+    config = _retarget_config(repo_root, tmp_path, "fixpkg")
+    result = _run(["--config", str(config)], cwd=tmp_path)
+    assert result.returncode != 0, result.stdout
+    assert "Entrypoints must reach storage only through the composition root" in result.stdout
+    assert "BROKEN" in result.stdout
+
+
+def test_entrypoints_may_use_the_composition_root_that_imports_storage(
+    repo_root: Path, tmp_path: Path
+):
+    _make_package(
+        tmp_path,
+        "fixpkg",
+        {
+            "domain/model.py": "X = 1\n",
+            "persistence/thing.py": "Y = 2\n",
+            "bootstrap.py": "from fixpkg.persistence import thing\nimport sqlite3\n",
+            "entrypoints/cli.py": "from fixpkg import bootstrap\n",
+        },
+    )
+    config = _retarget_config(repo_root, tmp_path, "fixpkg")
+    result = _run(["--config", str(config)], cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
