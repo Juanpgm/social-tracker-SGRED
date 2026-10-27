@@ -1292,6 +1292,40 @@ def test_many_instances_opening_a_new_file_at_once_all_succeed(tmp_path):
             db.close()
 
 
+@pytest.mark.parametrize(
+    "bad_path",
+    ["a\x00b.db", "\x00", "dir/\x00.db", Path("x\x00.db"), None, b"x.db", 42, ["x.db"]],
+    ids=["nul-middle", "nul-only", "nul-in-name", "path-with-nul", "none", "bytes", "int", "list"],
+)
+def test_a_programmer_error_in_the_path_is_a_storage_error(tmp_path, monkeypatch, bad_path):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(StorageError) as info:
+        Database(bad_path)
+    assert info.value.code == "storage_error"
+    assert "x.db" not in str(info.value)
+    assert "\x00" not in str(info.value)
+    assert list(tmp_path.iterdir()) == []  # nothing was created
+
+
+@pytest.mark.parametrize(
+    "sql",
+    ["SELECT 1;\x00", "\x00", "CREATE TABLE a (x); \x00 CREATE TABLE b (y);", "SELECT '\ud800'"],
+    ids=["trailing-nul", "only-nul", "nul-between", "lone-surrogate"],
+)
+def test_a_migration_with_nul_or_unencodable_text_is_a_storage_error(tmp_path, sql):
+    path = tmp_path / "m.db"
+    with pytest.raises(StorageError) as info:
+        Database(path, migrations=[Migration(1, "bad", sql)])
+    assert info.value.code == "storage_error"
+    assert not path.exists()
+
+
+def test_a_migration_file_with_a_nul_byte_is_a_storage_error(tmp_path):
+    directory = _write_migrations(tmp_path / "m", {"0001_a.sql": "CREATE TABLE a (x);\x00"})
+    with pytest.raises(StorageError):
+        load_migrations(directory)
+
+
 def test_database_can_run_discovered_migrations(tmp_path, opened):
     directory = _write_migrations(
         tmp_path / "m", {"0001_a.sql": "CREATE TABLE a (x)", "0002_b.sql": "CREATE TABLE b (y)"}

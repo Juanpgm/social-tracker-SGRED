@@ -153,6 +153,12 @@ def validate_migrations(migrations: Sequence[Migration]) -> tuple[Migration, ...
             raise StorageError("migrations must be numbered 1..n without gaps or duplicates")
         if not isinstance(migration.sql, str) or not migration.sql.strip():
             raise StorageError("a migration must not be empty")
+        if "\x00" in migration.sql:
+            raise StorageError("a migration must not contain NUL characters")
+        try:
+            migration.sql.encode("utf-8")
+        except UnicodeEncodeError:
+            raise StorageError("a migration must be valid UTF-8 text") from None
         if _has_transaction_control(migration.sql):
             raise StorageError("a migration must not manage transactions itself")
     return ordered
@@ -254,6 +260,15 @@ def _enable_wal(conn: sqlite3.Connection, timeout_ms: int) -> Any:
             time.sleep(0.01)
 
 
+def _checked_path(path: object) -> Path:
+    """Turn programmer errors (None, bytes, NUL characters) into a fixed-message StorageError."""
+    if not isinstance(path, str | Path):
+        raise StorageError("database path must be a str or a Path")
+    if "\x00" in str(path):
+        raise StorageError("database path must not contain NUL characters")
+    return Path(path)
+
+
 # ---- database -------------------------------------------------------------------------
 
 
@@ -272,14 +287,14 @@ class Database:
             or busy_timeout_ms <= 0
         ):
             raise StorageError("busy_timeout_ms must be a positive integer")
-        self._path = Path(path)
+        self._path = _checked_path(path)
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
         self._tx_depth = 0  # only touched while holding `_lock`, i.e. by the owning thread
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self._path, isolation_level=None, check_same_thread=False)
-        except OSError:
+        except (OSError, ValueError):
             raise StorageError("database location is not usable") from None
         except sqlite3.Error as exc:
             raise map_sqlite_error(exc) from None
