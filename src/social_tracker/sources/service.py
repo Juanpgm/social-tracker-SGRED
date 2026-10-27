@@ -258,10 +258,15 @@ class SourceRegistry:
     ) -> ImportReport:
         """Upsert every source in `text` (keyed by id) all-or-nothing, or change nothing.
 
-        An entry REPLACES the stored source with the same id: fields it omits fall back to their
-        defaults (`enabled` becomes False). Sources missing from the file are left alone. New
-        sources keep the timestamps in the file (the clock fills in missing ones); updated ones
-        keep their `created_at` and get `updated_at` from the clock.
+        An entry REPLACES the stored source with the same id (this is deliberate and can
+        surprise an operator): every field the entry omits falls back to its default, so a
+        hand-written entry without `enabled` DISABLES a source that was enabled, and omitted
+        optional fields (keywords, poll interval...) are reset. Sources missing from the file are
+        left alone.
+
+        Timestamps in the file are never trusted: new sources get `created_at` and `updated_at`
+        from the clock, and updated ones keep the stored `created_at` and get `updated_at` from
+        the clock. Importing a file therefore does not preserve history from another registry.
         """
         who = _who(actor, reason) if not dry_run else {}
         now = self._clock.now()
@@ -314,7 +319,8 @@ class SourceRegistry:
                 continue
             if current is None:
                 owner[new_key] = entry.id
-                operations.append(_Operation(entry, None))
+                stamped_new = entry.with_changes({"created_at": now, "updated_at": now})
+                operations.append(_Operation(stamped_new, None))
                 continue
             wanted = entry.with_changes(
                 {"created_at": current.created_at, "updated_at": current.updated_at}

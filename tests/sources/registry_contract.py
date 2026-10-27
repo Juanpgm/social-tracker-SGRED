@@ -47,7 +47,7 @@ from social_tracker.sources.service import (
 from social_tracker.sources.yaml_io import SourceFileError, dump_sources
 from tests.actors import ACTOR, WHO, WHY
 from tests.fakes.flaky_control import FlakyControl
-from tests.sources.factories import CANARY, T0, payload
+from tests.sources.factories import CANARY, payload
 
 START = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
 HOUR = timedelta(hours=1)
@@ -524,7 +524,8 @@ class RegistryContract:
         b = parse_source(payload("instagram", id="src_b", name="B"))
         report = env.registry.import_sources(export_of(b, a), **WHO)
         assert report == ImportReport(("src_a", "src_b"), (), (), dry_run=False)
-        assert env.registry.list() == [a, b]
+        stamped = {"created_at": START, "updated_at": START}  # the clock, not the file
+        assert env.registry.list() == [a.with_changes(stamped), b.with_changes(stamped)]
         assert events(env) == [
             (SOURCE_ADDED, "src_a", {"type": "news_rss", "via": "import", **WHO}),
             (SOURCE_ADDED, "src_b", {"type": "instagram", "via": "import", **WHO}),
@@ -542,7 +543,7 @@ class RegistryContract:
         report = env.registry.import_sources(text, **WHO)
         assert report == ImportReport((), (), ("src_a", "src_b"), dry_run=False)
         assert len(events(env)) == count
-        assert {s.updated_at for s in env.registry.list()} == {T0}
+        assert {s.updated_at for s in env.registry.list()} == {START}
 
     def test_import_updates_an_existing_source_keeping_created_at_and_stamping_updated_at(
         self, env: Env
@@ -564,10 +565,14 @@ class RegistryContract:
             (SOURCES_IMPORTED, None, {"added": 0, "updated": 1, "unchanged": 0, **WHO}),
         ]
 
-    def test_import_replaces_the_whole_entry_so_omitted_fields_fall_back_to_defaults(
+    def test_importing_an_entry_that_omits_fields_resets_them_to_defaults_and_disables_the_source(
         self, env: Env
     ):
-        env.registry.add(data("src_a", "A"), **WHO)
+        # Operator surprise, documented in the import docstring: an entry REPLACES the stored
+        # source, so everything it leaves out goes back to its default, `enabled` included.
+        env.registry.add(
+            data("src_a", "A", credibility=5, keywords=["x"], poll_interval_s=900), **WHO
+        )
         env.registry.enable("src_a", **WHO)
         hand_written = (
             "sources:\n- id: src_a\n  type: news_rss\n  name: A\n"
@@ -575,19 +580,67 @@ class RegistryContract:
         )
         report = env.registry.import_sources(hand_written, **WHO)
         assert report.updated == ("src_a",)
-        assert env.sources.get("src_a").enabled is False
+        stored = env.sources.get("src_a")
+        assert stored.enabled is False
+        assert (stored.credibility, stored.keywords, stored.poll_interval_s) == (3, None, 600)
+        assert "enabled" in json.loads(env.control.list_control_events()[-2].detail)["changed"]
 
-    def test_import_fills_missing_timestamps_from_the_clock_and_keeps_given_ones(self, env: Env):
+    def test_import_stamps_new_sources_with_the_clock_whether_or_not_the_file_has_times(
+        self, env: Env
+    ):
         hand_written = (
             "sources:\n- id: src_new\n  type: news_rss\n  name: N\n"
             "  feed_url: https://example.org/rss.xml\n"
         )
         env.registry.import_sources(hand_written, **WHO)
         assert env.sources.get("src_new").created_at == START
-        given = parse_source(payload("news_rss", id="src_old", name="O"))
+        given = parse_source(payload("news_rss", id="src_old", name="O"))  # created at T0
         env.clock.advance(HOUR)
         env.registry.import_sources(export_of(given), **WHO)
-        assert env.sources.get("src_old").created_at == given.created_at
+        stored = env.sources.get("src_old")
+        assert (stored.created_at, stored.updated_at) == (START + HOUR, START + HOUR)
+
+    @pytest.mark.parametrize("stamp", ["2999-01-01T00:00:00+00:00", "1970-01-02T00:00:00+00:00"])
+    def test_import_ignores_timestamps_supplied_for_new_sources(self, env: Env, stamp: str):
+        text = (
+            "sources:\n- id: src_far\n  type: news_rss\n  name: Far\n"
+            "  feed_url: https://example.org/rss.xml\n"
+            f"  created_at: '{stamp}'\n  updated_at: '{stamp}'\n"
+        )
+        env.registry.import_sources(text, **WHO)
+        stored = env.sources.get("src_far")
+        assert (stored.created_at, stored.updated_at) == (START, START)
+
+    def test_import_never_takes_created_at_from_the_file_for_an_existing_source(self, env: Env):
+        added = env.registry.add(data("src_a", "A"), **WHO)
+        env.clock.advance(HOUR)
+        same_data_other_times = (
+            "sources:\n- id: src_a\n  type: news_rss\n  name: A\n"
+            "  enabled: false\n  credibility: 3\n  feed_url: https://example.org/rss.xml\n"
+            "  poll_interval_s: 600\n  mode: recorded\n"
+            "  created_at: '2020-05-05T00:00:00+00:00'\n  updated_at: '2020-05-05T00:00:00+00:00'\n"
+        )
+        report = env.registry.import_sources(same_data_other_times, **WHO)
+        assert report == ImportReport((), (), ("src_a",), dry_run=False)
+        assert env.sources.get("src_a") == added
+
+    def test_import_keeps_created_at_of_a_changed_source_and_stamps_updated_at_from_the_clock(
+        self, env: Env
+    ):
+        env.registry.add(data("src_a", "A"), **WHO)
+        env.clock.advance(HOUR)
+        changed = (
+            "sources:\n- id: src_a\n  type: news_rss\n  name: Renamed\n"
+            "  feed_url: https://example.org/rss.xml\n"
+            "  created_at: '2020-05-05T00:00:00+00:00'\n  updated_at: '2999-05-05T00:00:00+00:00'\n"
+        )
+        env.registry.import_sources(changed, **WHO)
+        stored = env.sources.get("src_a")
+        assert (stored.name, stored.created_at, stored.updated_at) == (
+            "Renamed",
+            START,
+            START + HOUR,
+        )
 
     def test_import_leaves_sources_that_are_not_in_the_file_alone(self, env: Env):
         env.registry.add(data("src_keep", "Keep"), **WHO)
