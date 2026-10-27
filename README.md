@@ -1,15 +1,18 @@
 # Social risk monitor
 
-Tracks social-media signals and surfaces risk. This release (slice 1) provides the foundation:
-a registry of **sources** (news RSS feeds, Instagram accounts, live streams, recorded audio), the
-**analysis switches** (system-wide and per source), a SQLite store and an append-only **audit
-log** in which every change records who made it and why. A local **web UI** (`serve`) manages
-the same data from a browser.
+Tracks social-media signals and surfaces risk. This release provides the foundation and the
+first collector: a registry of **sources** (news RSS feeds, Instagram accounts, live streams,
+recorded audio), the **analysis switches** (system-wide and per source), a SQLite store, an
+append-only **audit log** in which every change records who made it and why, a local **web UI**
+(`serve`) that manages the same data from a browser, and a **collection worker** (`run`) that
+reads the RSS and Atom feeds you register and stores their entries as **items**.
 
-The collection and analysis workers are not part of this slice: nothing here fetches or analyses
-anything yet, and nothing ever publishes or sends data outside the system. You manage what *will*
-be monitored and keep the switches safe: the system starts **paused**, every source starts
-**disabled** and every analysis flag starts **off**.
+Only news RSS and Atom sources are collected so far: Instagram, live stream and recorded audio
+sources can be registered, but nothing collects them yet, and nothing analyses the items yet
+(classification, alerts and the GPU workers are later slices). Nothing ever publishes or sends
+data outside the system: the only outbound traffic is a read-only `GET` to the feeds you
+registered. The system starts **paused**, every source starts **disabled** and every analysis
+flag starts **off**.
 
 ## Install
 
@@ -73,6 +76,21 @@ Analysis really runs for a source only when **all three** hold: the system switc
 source is enabled, and the source's own analysis switch is on. `status` counts those sources.
 Collecting content needs only the first two (see [Collecting content](#collecting-content)).
 
+Nothing is collected until a worker runs. Start it in its own terminal and turn the system on
+AFTER it is up:
+
+```text
+uv run social-tracker run
+uv run social-tracker analysis on -r "start the system"
+```
+
+The order matters: **starting a worker switches global analysis off** (audited as
+`system:worker`, reason `worker startup`), so an `analysis on` issued before `run` is undone by
+it. With the worker already running, `analysis on` is picked up on its next pass. For a
+diagnostic one-shot pass use `run --once --no-reset-analysis` (after `analysis on`): it skips the
+reset, collects what is due and exits. A plain `run --once` cannot collect anything, because it
+resets analysis and then makes its one pass.
+
 ### Commands
 
 | Command | What it does |
@@ -87,7 +105,7 @@ Collecting content needs only the first two (see [Collecting content](#collectin
 | `sources export [-o, --output FILE] [--force]` | Write every source as YAML to stdout or a file. |
 | `analysis on` / `analysis off` `[--source ID]` | Switch analysis for the system or for one source. |
 | `status` | Switches, alert threshold, source counts, collection states. |
-| `run [--once] [--interval-tick SECONDS]` | Run the collection worker (see [Collecting content](#collecting-content)). |
+| `run [--once [--no-reset-analysis]] [--interval-tick SECONDS]` | Run the collection worker (see [Collecting content](#collecting-content)). |
 | `items list [--source ID] [--limit N]` | The collected items, newest first. |
 | `items search QUERY [--limit N]` | Search titles and texts by words. |
 | `serve [--host H] [--port N] [--allow-non-loopback] [--allowed-host NAME]` | Run the local web UI (see [Web UI](#web-ui)). |
@@ -229,9 +247,10 @@ The list has a **Health** column read from the collection state: `ok` while a so
 collecting, `degraded` in backoff (with the failure count and the next retry time), `failed` once
 collection stopped (with the failure count), and `n/a` for a disabled source. **Last fetch** is
 the time (UTC) of the last successful fetch and **Last error** the short reason of the last
-failure (for example `http 503`, `timeout`, `invalid feed: ...`), cleared by the next success;
-both read `n/a` while there is nothing to show. The error is a fixed phrase, never a URL, a
-response body or a secret.
+failure (for example `http 503`, `timeout`, `invalid feed: ...`), cleared by the next success,
+by enabling the source and by a reset; both read `n/a` while there is nothing to show. The error
+is a fixed phrase, never a URL, a response body or a secret. A source whose collection `failed`
+shows a **Reset** button (the same as `sources reset ID`); pressing it twice is harmless.
 
 It is meant for one operator on this machine:
 
@@ -279,62 +298,104 @@ published, posted or sent, and the only outbound traffic is a `GET` to the URL o
 source. It runs on the CPU only.
 
 ```bash
-uv run social-tracker run --once
+uv run social-tracker run --once --no-reset-analysis
 uv run social-tracker items list --limit 10
 uv run social-tracker items search "sismo cali"
 ```
 
-`run` starts the collection worker. Run ONE worker per database (a second one would treat the
-first one's collection in flight as interrupted).
+`run` starts the collection worker (see the Quickstart for the order of `run` and `analysis on`).
 
+- **One worker per database.** `run`, the long-running one and `--once` alike, takes an exclusive
+  lock on a `.worker-lock` file next to the database and refuses to start, with `error: another
+  worker is already running on this database`, while another process holds it. The operating
+  system releases the lock when the process exits, crashes or is killed, so a leftover file
+  blocks nobody. A worker that has just taken the lock knows the previous one is gone, so it
+  counts every collection still marked as running as one failed attempt; while it runs, only a
+  claim older than the fetch deadline plus a minute is treated that way, so a collection that is
+  really in flight is never failed from under its owner.
 - **It starts with analysis off.** Starting a worker switches global analysis OFF, with an audit
-  event attributed to `system:worker` and the reason `worker startup`. No other command ever does
-  this. Turn it on afterwards with `analysis on`; the running worker notices on its next pass.
-  Because of this, `run --once` right after starting collects nothing and says so: it is meant
-  for diagnostics, and a real collection needs `run` left running.
+  event attributed to `system:worker` and the reason `worker startup`. No other command ever
+  does this. Turn it on afterwards with `analysis on`; the running worker notices on its next
+  pass. `run --once --no-reset-analysis` skips the reset and its audit event, for diagnostics:
+  it is accepted only with `--once` (anything else is a usage error, exit status 2), so the
+  long-running worker always keeps the safe start.
 - **What is collected.** Each pass (every `--interval-tick` seconds, default 5) collects the
   enabled RSS and Atom sources that are due: never fetched, or `poll_interval_s` seconds (600 by
-  default) after the last successful fetch. Sources are collected one at a time, in id order.
-  Nothing is fetched while a source is disabled or global analysis is off; the per-source
-  analysis switch is about analysis, not collection.
+  default) after the last successful fetch (a last fetch dated in the future, because the clock
+  moved back, counts as due). Sources are collected one at a time, in id order. Nothing is
+  fetched while a source is disabled or global analysis is off; the per-source analysis switch is
+  about analysis, not collection.
 - **What is stored.** One item per entry: title and visible text (markup is parsed and dropped,
   scripts never reach the text), author, link, time, a content hash and the entry as received
-  (`raw_payload`). Entries with no visible content are discarded and counted. Text over 100 KiB
-  is cut at that size and flagged. An entry is stored once per source: the same guid, or the same
-  title and text under another address, is a duplicate. All the items of a fetch are stored in
-  one transaction or none are.
+  (`raw_payload`). Bidi controls (such as the right-to-left override) and zero-width characters
+  are removed from the title, text and author, so a hidden character can neither reorder what a
+  reader sees nor split a word so that no search finds it; joiners that emoji sequences and some
+  scripts need are kept, and `raw_payload` keeps the original. An element that hides the rest of
+  an entry (an unclosed `<script>`) is not silent: the item gets the flag `content_dropped`,
+  and so does one whose closed scripts and styles dropped 1,000 characters or more. Entries with
+  no visible content are discarded and counted. Text over 100 KiB is cut at that size and
+  flagged. An entry is stored once per source: the same guid, or the same title and text under
+  another address, is a duplicate. All the items of a fetch are stored in one transaction or
+  none are.
+- **Item text is untrusted.** Titles, texts, authors and `raw_payload` come from the internet.
+  The CLI escapes control characters when it prints them; any other view of an item (a web page,
+  a report, an API) MUST escape all four before showing them and treat them as data, never as
+  markup.
+- **Limits on what a feed can cost.** Over a limit the extra entries are dropped and counted (the
+  fetch still succeeds, and the worker logs the count): at most 16 MiB of items from one fetch
+  (`fetch_quota`, `SOCIAL_TRACKER_MAX_BYTES_PER_FETCH`), and at most 100,000 items and 512 MiB
+  held per source (`source_quota`, `SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE` and
+  `SOCIAL_TRACKER_MAX_BYTES_PER_SOURCE`; retention frees room as items expire). A feed is also
+  parsed with a cap on its number of entries (500 are read, the rest counted as `over_limit`).
 - **Failures.** A timeout, a name lookup error, an HTTP error status, an oversize or malformed
   document are recorded on the source (see Last error in the web list) and retried with
-  exponential backoff (60 s, 120 s, 240 s, 480 s; never more than one hour). `Retry-After`
-  (seconds or an HTTP date) is honoured as a minimum wait. 401, 403 and 429 are failures with a
+  exponential backoff (60 s, 120 s, 240 s, 480 s; never more than one hour). An explicit
+  `Retry-After` (seconds or an HTTP date) is believed even beyond that hour, up to 7 days (a
+  larger value is clamped, and the worker logs the clamp). 401, 403 and 429 are failures with a
   clear reason (`http 403 (access denied)`). After 5 consecutive failures the source is `failed`
-  and is left alone until the operator disables and enables it again (`sources disable ID`, then
-  `sources enable ID`, which clears the failure count). A source disabled or deleted while it is
-  being fetched is discarded without storing anything.
+  and is left alone until the operator acts: `sources reset ID` (or the **Reset** button of the
+  web list) puts it back to work, and disabling then enabling it does the same and also clears
+  the stale error. A source disabled or deleted while it is being fetched is discarded without
+  storing anything.
 - **Stopping.** SIGINT (Ctrl+C) and SIGTERM stop the worker gracefully: the collection in flight
-  is finished and committed, no new one starts. A fetch is bounded (a response is read for at
-  most 15 s), so the stop completes well inside 30 s. A crash leaves at most a source marked as
-  collecting; the next worker start counts it as one failed attempt.
+  is finished and committed, no new one starts. A fetch cannot outlast its deadline (see the
+  safety notes below), so the stop completes well inside 30 s. A SECOND signal means "now": the
+  worker exits at once with status 130 (SIGINT) or 143 (SIGTERM) after closing the database,
+  abandoning the collection in flight; the next worker start counts it as one failed attempt. A
+  crash does the same.
 - **Retention.** Items are deleted once they are older than `SOCIAL_TRACKER_RETENTION_DAYS` (30 by
   default), counted from `fetched_at` and checked about once an hour while the worker runs. The
   boundary is strict: an item exactly 30 days old is kept, one microsecond older is removed.
-  With `0` only items that reached the `classified` stage are removed (nothing sets that stage
-  yet). Alerts are a separate store and are not touched.
-- **Safety of the fetch.** Only `http` and `https` addresses without a login are fetched. Every
-  host is resolved and ALL its addresses must be public: loopback, private, link-local (cloud
-  metadata included), carrier-grade NAT, multicast and reserved addresses are refused, for
-  redirects too (at most 5, each one checked again), and the connection goes to the address that
-  was checked (so a changing DNS answer cannot redirect it). To reach a feed on a private network,
-  list its host name in `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS`; every use is logged with the host
-  name. A response is limited to 2 MiB (after decompression too), 10 s per network operation and
-  15 s overall. Proxy settings of the environment and cookies are ignored. Feeds are parsed with
+  A purged item does not come back when the feed still lists it: an entry published before the
+  retention horizon (now minus the retention) is skipped at ingest and counted as
+  `older_than_retention`, and for entries with no publication date, which are dated by when they
+  were first seen, a small tombstone (the dedup key, no text) outlives the item (the oldest are
+  forgotten beyond 50,000 per source). With `0` only items that reached the `classified` stage
+  are removed (nothing sets that stage yet), they leave a tombstone, and no horizon applies.
+  Alerts are a separate store and are not touched.
+- **Safety of the fetch.** Only `http` and `https` addresses without a login are fetched, and
+  only on the ports 80, 443, 8080 and 8443 (`SOCIAL_TRACKER_ALLOWED_PORTS` replaces the list),
+  redirects included. Every host is resolved and ALL its addresses must be public: loopback,
+  private, link-local (cloud metadata included), carrier-grade NAT, multicast, reserved and
+  site-local addresses are refused, IPv6 forms that wrap an IPv4 address (mapped, compatible,
+  translated, NAT64, 6to4) are judged by the IPv4 address inside, and the connection goes to the
+  address that was checked (so a changing DNS answer cannot redirect it). Redirects (at most 5)
+  are followed by hand, each one checked again; a redirect from `https` to `http` is refused, and
+  the conditional-request validators (`If-None-Match`, `If-Modified-Since`) are sent only to the
+  host and port the fetch started at. To reach a feed on a private network, list its host name
+  in `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS`; every use is logged with the host name. A response
+  is limited to 2 MiB (after decompression too) and 100 KiB of headers. A fetch has 10 s per
+  network operation and 15 s overall: the 15 s is a wall-clock deadline enforced inside every
+  connect, TLS handshake, read, write and name lookup, shared by the redirects and all the
+  addresses of a host, so a server that sends one byte at a time cannot hold the worker past it
+  (a lookup the system never answers is abandoned in a helper thread; at most 8 may hang at
+  once). Proxy settings of the environment and cookies are ignored. Feeds are parsed with
   `defusedxml` and any document type declaration is refused, which rules out entity bombs and
   external entities.
 - **Searching.** `items search` splits your text into plain words (lowercase, accents ignored)
   that must all appear as whole words. Operators such as `AND`, `OR`, `NEAR`, `*`, `-`, quotes
   and `column:` are ordinary text, so no search text can raise an error or change the query.
-  Put `--` before a query that starts with `-`. Item text is untrusted: the CLI escapes control
-  characters when it prints it.
+  Put `--` before a query that starts with `-`.
 - **Logs** (on stderr) name source ids, counts and fixed reasons; never URLs, item text or
   secrets.
 
@@ -370,7 +431,18 @@ uv run playwright install chromium
 uv run pytest -m browser
 ```
 
-Without a browser installed they are skipped.
+Without a browser installed they are skipped. A test that hangs fails after 120 seconds
+(`pytest-timeout`) with a dump of the stacks instead of blocking the run.
+
+Dependencies are checked against the public advisory database with `pip-audit`:
+
+```text
+uv export --frozen --no-hashes -o requirements-audit.txt
+uvx pip-audit -r requirements-audit.txt --no-deps --disable-pip
+```
+
+(The exported file is a throwaway: do not commit it.) The last run, on the locked versions, found
+no known vulnerabilities.
 
 The architecture is hexagonal. Domain modules are pure, services depend on ports only, and
 `social_tracker.bootstrap` is the composition root that wires the SQLite adapters into the

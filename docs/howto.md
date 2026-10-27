@@ -19,8 +19,10 @@ login or a secret in the query string are refused, and so are `file:` addresses.
 
 **Collecting it.** Enabling the source only makes it eligible. Content is collected while a
 worker runs (`social-tracker run`) and global analysis is on: a starting worker always switches
-global analysis off, so turn it on afterwards with `social-tracker analysis on`. The list in the
-web UI then shows the time of the last successful fetch and the reason of the last failure. A
+global analysis off, so turn it on afterwards with `social-tracker analysis on` (one worker may
+run per database). The list in the web UI then shows the time of the last successful fetch and
+the reason of the last failure; after five failures in a row the source is marked failed and its
+row offers a Reset button (`social-tracker sources reset ID` does the same). A
 feed on a private network (an address that resolves to a private IP) is refused unless its host
 name is listed in `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS`. Collected items are read with
 `social-tracker items list` and `social-tracker items search`, and are deleted after
