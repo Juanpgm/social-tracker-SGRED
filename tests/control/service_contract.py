@@ -18,6 +18,7 @@ import pytest
 from social_tracker.control.domain import (
     DEFAULT_ALERT_MIN_CONFIDENCE,
     MAX_ACTOR,
+    MAX_CONSECUTIVE_FAILURES,
     MAX_REASON,
     SETTING_ALERT_MIN_CONFIDENCE,
     SETTING_GLOBAL_ANALYSIS_ENABLED,
@@ -1025,6 +1026,34 @@ class ControlServiceContract:
             ("src_two", CollectionState.COLLECTING, True, True),
         ]
         assert all(isinstance(o, SourceOverview) for o in overview.sources)
+
+    def test_the_overview_reports_failures_and_the_retry_time_of_each_source(self, env: Env):
+        env.add_source("src_two")
+        env.add_source("src_three")
+        for source_id in ("src_one", "src_two", "src_three"):
+            env.enable_source(source_id)
+        env.service.start_collection("src_one", **WHO)
+        env.service.fail_collection("src_one", **WHO)  # one failure: backoff with a retry time
+        for _ in range(MAX_CONSECUTIVE_FAILURES):
+            env.service.start_collection("src_two", **WHO)
+            result = env.service.fail_collection("src_two", **WHO)
+            if result.state.state is CollectionState.BACKOFF:
+                env.clock.advance(result.state.next_run_at - env.clock.now())
+                env.service.retry_collection("src_two", **WHO)
+        backoff = env.service.get_state("src_one")
+        found = {o.source.id: o for o in env.service.overview().sources}
+        assert backoff.state is CollectionState.BACKOFF
+        assert (found["src_one"].consecutive_failures, found["src_one"].next_run_at) == (
+            1,
+            backoff.next_run_at,
+        )
+        assert found["src_two"].state is CollectionState.FAILED
+        assert found["src_two"].consecutive_failures == MAX_CONSECUTIVE_FAILURES
+        assert found["src_two"].next_run_at is None
+        assert (found["src_three"].consecutive_failures, found["src_three"].next_run_at) == (
+            0,
+            None,
+        )
 
     def test_the_overview_follows_the_global_switch_and_the_threshold(self, env: Env):
         env.enable_source("src_one")

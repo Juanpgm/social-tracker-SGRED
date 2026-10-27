@@ -120,6 +120,8 @@ class SourceOverview:
     state: CollectionState
     analysis: bool
     effective: bool
+    consecutive_failures: int = 0
+    next_run_at: datetime | None = None  # set only while in backoff
 
 
 @dataclass(frozen=True)
@@ -279,7 +281,7 @@ class ControlService:
         """
         with self._uow.snapshot():
             global_state = self._global_state()
-            states = {s.source_id: s.state for s in self._control.list_source_states()}
+            states = {s.source_id: s for s in self._control.list_source_states()}
             flags = {
                 key.removeprefix(SETTING_SOURCE_ANALYSIS_PREFIX): _stored_flag(value)
                 for key, value in self._control.list_settings(
@@ -292,8 +294,11 @@ class ControlService:
         for source in sources:
             flag = flags.get(source.id, False)
             effective = analysis_effective(global_state, flag, source_enabled=source.enabled)
-            state = states.get(source.id, CollectionState.DISABLED)
-            rows.append(SourceOverview(source, state, flag, effective))
+            stored = states.get(source.id)
+            state = stored.state if stored else CollectionState.DISABLED
+            failures = stored.consecutive_failures if stored else 0
+            retry_at = stored.next_run_at if stored else None
+            rows.append(SourceOverview(source, state, flag, effective, failures, retry_at))
         return SystemOverview(global_state is GlobalState.ACTIVE, threshold, tuple(rows))
 
     # ---- collection state machine ----
