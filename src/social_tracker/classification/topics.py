@@ -12,14 +12,17 @@ scope; it only raises the score of an item that is. A crime term puts an item ou
 when no disaster term is present.
 """
 
+import json
 import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from social_tracker.classification.domain import SIGNALS, OutOfScopeReason, Topic, TopicVerdict
 from social_tracker.classification.text import fold
+from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ValidationError
 
 FORMAT_VERSION = 1
@@ -27,6 +30,9 @@ MAX_TERMS_PER_GROUP = 500
 MAX_TERM_CHARS = 80
 MAX_TERM_WORDS = 12
 MAX_TOTAL_TERMS = 3000
+MAX_STORED_BYTES = 256 * 1024
+MAX_ACTOR_CHARS = 100
+MAX_REASON_CHARS = 500
 
 TOPIC_GROUPS = ("earthquake", "secretariat", "other_disaster")
 _TERM_GROUPS = (*TOPIC_GROUPS, "places", "exclude", "official_bodies")
@@ -166,6 +172,44 @@ class TopicConfig:
             out[group] = list(getattr(self, group))
         out["weights"] = dict(self.weights)
         return out
+
+    def to_json(self) -> str:
+        """The canonical JSON stored with each version (compact, key-sorted, real characters)."""
+        text = json.dumps(
+            self.to_mapping(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        if len(text.encode("utf-8")) > MAX_STORED_BYTES:
+            raise _bad(f"the topic configuration is larger than {MAX_STORED_BYTES} bytes")
+        return text
+
+    @classmethod
+    def from_json(cls, text: str) -> "TopicConfig":
+        try:
+            return cls.from_mapping(json.loads(text))
+        except (ValueError, RecursionError):
+            raise _bad("the stored topic configuration is not valid JSON") from None
+
+
+@dataclass(frozen=True)
+class StoredTopicConfig:
+    """One version of the configuration in the history: who set it, when and why. `version` is
+    assigned by the store (0 until then)."""
+
+    config: TopicConfig
+    created_at: datetime
+    actor: str
+    reason: str
+    version: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.config, TopicConfig):
+            raise _bad("a stored configuration needs a TopicConfig")
+        object.__setattr__(self, "created_at", ensure_utc(self.created_at))
+        for value, limit in ((self.actor, MAX_ACTOR_CHARS), (self.reason, MAX_REASON_CHARS)):
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise _bad("actor and reason must be short non-blank text")
+        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 0:
+            raise _bad("version must be a whole number")
 
 
 class _PhraseIndex:

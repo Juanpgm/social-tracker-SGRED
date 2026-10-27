@@ -9,10 +9,17 @@ import pytest
 
 from social_tracker.persistence.control_repo import SqliteControlRepository
 from social_tracker.persistence.sources_repo import SqliteSourceRepository
+from tests.classification import test_fake_repositories as classification_fake
+from tests.classification.repository_contracts import (
+    ClassificationRepositoryContract,
+    SignatureRepositoryContract,
+    TopicConfigRepositoryContract,
+)
 from tests.control import test_fake_repository as control_fake
 from tests.control.repository_contract import ControlRepositoryContract
 from tests.fakes.control_repository import InMemoryControlRepository
 from tests.fakes.source_repository import InMemorySourceRepository
+from tests.persistence import test_sqlite_classification_repositories as classification_sqlite
 from tests.persistence import test_sqlite_control_repository as control_sqlite
 from tests.persistence import test_sqlite_source_repository as sources_sqlite
 from tests.sources import test_fake_repository as sources_fake
@@ -28,6 +35,21 @@ SQLITE_CONTROL = control_sqlite.TestSqliteControlRepositoryContract
 CASES = [
     (SourceRepositoryContract, FAKE_SOURCES, SQLITE_SOURCES),
     (ControlRepositoryContract, FAKE_CONTROL, SQLITE_CONTROL),
+    (
+        ClassificationRepositoryContract,
+        classification_fake.TestInMemoryClassificationRepository,
+        classification_sqlite.TestSqliteClassificationRepositoryContract,
+    ),
+    (
+        SignatureRepositoryContract,
+        classification_fake.TestInMemorySignatureRepository,
+        classification_sqlite.TestSqliteSignatureRepositoryContract,
+    ),
+    (
+        TopicConfigRepositoryContract,
+        classification_fake.TestInMemoryTopicConfigRepository,
+        classification_sqlite.TestSqliteTopicConfigRepositoryContract,
+    ),
 ]
 
 

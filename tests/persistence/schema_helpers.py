@@ -8,6 +8,7 @@ MIGRATION_FILES = (
     "0001_init.sql",
     "0002_items_and_fetch_status.sql",
     "0003_item_tombstones.sql",
+    "0004_classification.sql",
 )
 
 

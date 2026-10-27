@@ -80,6 +80,10 @@ def test_expected_tables_exist_and_nothing_else(conn):
         "item_tombstones",
         "items",
         "source_fetch_status",
+        "classifications",
+        "item_signatures",
+        "item_signature_bands",
+        "topic_config",
         "items_fts",  # the full-text index and its four shadow tables
         "items_fts_data",
         "items_fts_idx",
