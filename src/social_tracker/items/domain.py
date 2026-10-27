@@ -186,7 +186,7 @@ def _require_text(value: Any, what: str, max_chars: int, *, allow_empty: bool = 
     return value
 
 
-def _optional_url(value: Any) -> str | None:
+def optional_url(value: Any) -> str | None:
     if value is None:
         return None
     text = _require_text(value, "url", MAX_URL_CHARS)
@@ -248,7 +248,7 @@ class Item:
         _require_text(self.external_id, "external id", MAX_EXTERNAL_ID_CHARS)
         if self.parent_id is not None:
             validate_slug(self.parent_id)
-        set_(self, "url", _optional_url(self.url))
+        set_(self, "url", optional_url(self.url))
         _require_text(self.title, "title", MAX_TITLE_CHARS, allow_empty=True)
         if self.author is not None:
             _require_text(self.author, "author", MAX_AUTHOR_CHARS)
