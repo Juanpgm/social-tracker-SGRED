@@ -174,12 +174,12 @@ def _render_import(report: ImportReport) -> str:
 
 @app.callback()
 def _main() -> None:
-    # Names may hold characters the terminal cannot encode (a piped Windows console): escape
-    # them rather than die with a traceback in the middle of a listing.
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            reconfigure(errors="backslashreplace")
+    # Source names may hold characters a piped Windows console cannot encode: escape them
+    # instead of dying with a traceback in the middle of a listing. Only stdout needs it:
+    # error messages never carry user text.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="backslashreplace")
 
 
 # ---- sources ----
