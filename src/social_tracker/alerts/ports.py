@@ -55,17 +55,22 @@ class AlertRepository(Protocol):
         """The trail of an alert in the order it happened."""
         ...
 
-    def find_merge_target(
+    def find_merge_targets(
         self,
         *,
         content_hash: str,
         related_items: Sequence[str],
         around: datetime,
         window: timedelta,
-    ) -> str | None:
-        """The id of the alert (the oldest one) that has a member with this content hash, or one
-        of `related_items` (the originals a copy points to), whose occurrence is within `window`
-        of `around`, boundaries included; None if there is none."""
+    ) -> list[str]:
+        """The ids of the alerts, oldest first and each once, that have a member with this content
+        hash, or one of `related_items` (the originals a copy points to), whose occurrence is
+        within `window` of `around`, boundaries included. More than one means the item bridges
+        alerts that must become one."""
+        ...
+
+    def delete(self, alert_id: str) -> bool:
+        """Remove an alert with its members and trail; False if there is none."""
         ...
 
     def count(self, flt: AlertFilter) -> int: ...

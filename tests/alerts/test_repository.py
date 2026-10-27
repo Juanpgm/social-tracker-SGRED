@@ -146,12 +146,12 @@ def test_the_database_itself_refuses_nonsense(db):
 
 def merge(repo, **kw):
     args = {"content_hash": HASH, "related_items": (), "around": T0, "window": DAY}
-    return repo.find_merge_target(**{**args, **kw})
+    return repo.find_merge_targets(**{**args, **kw})
 
 
 def test_the_same_content_within_the_window_finds_the_alert(repo):
     alert = store(repo)
-    assert merge(repo) == alert.id
+    assert merge(repo) == [alert.id]
 
 
 @pytest.mark.parametrize(
@@ -169,30 +169,44 @@ def test_the_same_content_within_the_window_finds_the_alert(repo):
 )
 def test_the_window_is_inclusive_at_24_hours_both_ways(repo, offset, found):
     alert = store(repo)
-    assert merge(repo, around=T0 + offset) == (alert.id if found else None)
+    assert merge(repo, around=T0 + offset) == ([alert.id] if found else [])
 
 
 def test_other_content_does_not_merge(repo):
     store(repo)
-    assert merge(repo, content_hash="b" * 64) is None
+    assert merge(repo, content_hash="b" * 64) == []
 
 
 def test_a_copy_that_points_to_an_original_finds_its_alert_whatever_its_own_hash(repo):
     alert = store(repo, "itm_orig")
-    assert merge(repo, content_hash="c" * 64, related_items=("itm_orig",)) == alert.id
-    assert merge(repo, content_hash="c" * 64, related_items=("itm_other",)) is None
-    assert merge(repo, content_hash="c" * 64, related_items=()) is None
+    assert merge(repo, content_hash="c" * 64, related_items=("itm_orig",)) == [alert.id]
+    assert merge(repo, content_hash="c" * 64, related_items=("itm_other",)) == []
+    assert merge(repo, content_hash="c" * 64, related_items=()) == []
 
 
-def test_the_oldest_alert_wins_when_two_match(repo):
+def test_every_alert_that_matches_is_found_oldest_first_each_once(repo):
     older = store(repo, "itm_a", at=T0 - timedelta(hours=3))
-    store(repo, "itm_b", at=T0 - timedelta(hours=2))
-    assert merge(repo) == older.id
+    newer = store(repo, "itm_b", at=T0 - timedelta(hours=2))
+    repo.save_member(make_member("itm_c", alert_id=older.id, occurred_at=T0))
+    assert merge(repo) == [older.id, newer.id]
+    assert merge(repo, related_items=("itm_a", "itm_c")) == [older.id, newer.id]
 
 
 def test_a_withdrawn_alert_can_still_take_a_copy(repo):
     alert = store(repo, withdrawn=True, active=False)
-    assert merge(repo) == alert.id
+    assert merge(repo) == [alert.id]
+
+
+def test_an_alert_can_be_deleted_with_its_members_and_trail(repo):
+    keep = store(repo, "itm_k", content_hash="2" * 64)
+    gone = store(repo, "itm_g")
+    repo.add_event(AlertEvent(gone.id, T0, AlertEventKind.CREATED, "x", "y"))
+    assert repo.delete(gone.id) is True
+    assert repo.delete(gone.id) is False
+    assert repo.get(gone.id) is None
+    assert repo.member("itm_g") is None
+    assert repo.events(gone.id) == []
+    assert repo.get(keep.id) is not None
 
 
 # ---- the list ----

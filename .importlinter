@@ -330,3 +330,67 @@ ignore_imports =
     social_tracker.shared.iodeadline -> httpcore2
     social_tracker.shared.iodeadline -> ssl
 unmatched_ignore_imports_alerting = none
+
+# The alerts (AL-7, G-1): they are stored and shown on this machine and nothing else. The module
+# (policy, excerpt, ports and the service) opens no connection, file, process or mail client, and
+# knows neither the storage adapter nor the entrypoints nor the model server. The pure part, the
+# vocabulary and the excerpt, is also deterministic: no clock, randomness, threads or logging (the
+# service holds the clock and logs by injection and by name). The service reaches the classifier,
+# the items, the sources, the model's judgments and the control settings through their ports.
+[importlinter:contract:alerts-no-io]
+name = The alerts module must do no I/O and send nothing out
+type = forbidden
+source_modules =
+    social_tracker.alerts
+forbidden_modules =
+    social_tracker.persistence
+    social_tracker.entrypoints
+    social_tracker.bootstrap
+    social_tracker.collector
+    social_tracker.llm.ollama
+    sqlite3
+    socket
+    ssl
+    subprocess
+    smtplib
+    ftplib
+    httpx
+    httpx2
+    httpcore2
+    requests
+    aiohttp
+    websockets
+    urllib
+    http
+    os
+    pathlib
+    io
+    shutil
+    tempfile
+    glob
+    typer
+    yaml
+    asyncio
+    importlib
+    ctypes
+    multiprocessing
+
+[importlinter:contract:alerts-core-pure]
+name = The alert vocabulary and excerpt must be pure and deterministic
+type = forbidden
+source_modules =
+    social_tracker.alerts.domain
+    social_tracker.alerts.excerpt
+    social_tracker.alerts.ports
+forbidden_modules =
+    social_tracker.control
+    social_tracker.items
+    social_tracker.sources
+    social_tracker.llm
+    social_tracker.alerts.service
+    random
+    time
+    secrets
+    uuid
+    logging
+    threading

@@ -42,6 +42,7 @@ FORBIDDEN_EXTERNALS = [
 COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy", "service", "worker")
 CLASSIFICATION_CORE_MODULES = ("domain", "text", "links", "topics", "rules", "similarity")
 LLM_MODULES = ("domain", "schema", "prompt", "ports", "service", "ollama")
+ALERTS_MODULES = ("domain", "excerpt", "ports", "service")
 FORBIDDEN_LAYERS = ["adapters", "persistence", "entrypoints", "infrastructure", "storage"]
 
 
@@ -95,6 +96,11 @@ def _make_package(root: Path, name: str, files: dict[str, str]) -> None:
     (pkg / "llm" / "__init__.py").touch()
     for module in LLM_MODULES:
         (pkg / "llm" / f"{module}.py").touch()
+    # And the alerts contracts (their module and its pure part).
+    (pkg / "alerts").mkdir(exist_ok=True)
+    (pkg / "alerts" / "__init__.py").touch()
+    for module in ALERTS_MODULES:
+        (pkg / "alerts" / f"{module}.py").touch()
 
 
 def _retarget_config(repo_root: Path, dest: Path, root_package: str) -> Path:

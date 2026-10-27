@@ -305,25 +305,29 @@ class SqliteAlertRepository:
 
     # ---- finding the alert of a copy ----
 
-    def find_merge_target(
+    def find_merge_targets(
         self,
         *,
         content_hash: str,
         related_items: Sequence[str],
         around: datetime,
         window: timedelta,
-    ) -> str | None:
+    ) -> list[str]:
         related = list(related_items)
         same = "m.content_hash = ?"
         if related:
             same = f"({same} OR m.item_id IN ({', '.join('?' * len(related))}))"
         rows = self._db.query(
-            "SELECT a.id FROM alert_items m JOIN alerts a ON a.id = m.alert_id "
-            f"WHERE {same} AND m.occurred_at >= ? AND m.occurred_at <= ? "
-            "ORDER BY a.created_at, a.id LIMIT 1",
+            "SELECT DISTINCT a.id, a.created_at FROM alert_items m JOIN alerts a "
+            f"ON a.id = m.alert_id WHERE {same} AND m.occurred_at >= ? AND m.occurred_at <= ? "
+            "ORDER BY a.created_at, a.id",
             [content_hash, *related, format_utc(around - window), format_utc(around + window)],
         )
-        return str(rows[0][0]) if rows else None
+        return [str(r[0]) for r in rows]
+
+    def delete(self, alert_id: str) -> bool:
+        with self._db.transaction() as conn:
+            return conn.execute("DELETE FROM alerts WHERE id = ?", (alert_id,)).rowcount > 0
 
     # ---- reading ----
 
