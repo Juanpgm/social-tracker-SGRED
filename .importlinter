@@ -122,6 +122,7 @@ ignore_imports =
     social_tracker.collector.http_fetcher -> httpx2
     social_tracker.collector.http_fetcher -> httpcore2
     social_tracker.collector.http_fetcher -> socket
+    social_tracker.llm.ollama -> httpx2
 unmatched_ignore_imports_alerting = none
 
 # The collector's logic (parsing, normalizing, address policy, the service and the worker loop)
