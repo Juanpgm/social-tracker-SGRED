@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Add a source{% endblock %}
+{% block content %}
+<h1>Add a source</h1>
+<p>Choose what kind of source it is. Each type needs different details; the how-to explains them.</p>
+<ul class="types">
+{% for type, label in types.items() %}
+<li><a href="/sources/new/{{ type }}">{{ label }}</a> <span class="id">({{ type }})</span> - <a href="/howto#{{ type }}">how-to</a></li>
+{% endfor %}
+</ul>
+<p><a href="/">Cancel</a></p>
+{% endblock %}

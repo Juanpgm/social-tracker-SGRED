@@ -9,3 +9,9 @@ th, td { border-bottom: 1px solid #ccc; padding: .4rem; text-align: left; vertic
 .notice { background: #eef6ff; border: 1px solid #99c; padding: .5rem; }
 .error { color: #900; }
 a:focus, button:focus, input:focus, select:focus, textarea:focus { outline: 3px solid #05c; outline-offset: 2px; }
+.field { margin: 1rem 0; }
+.field label { display: block; font-weight: 600; }
+.field input[type="checkbox"] + label { display: inline; }
+.field input[type="text"], .field textarea { width: 100%; max-width: 40rem; box-sizing: border-box; }
+.hint { color: #555; margin: .2rem 0; font-size: .9em; }
+.field input[aria-invalid="true"], .field textarea[aria-invalid="true"] { border: 2px solid #900; }

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit" if editing else "Add" }} {{ type_label }}{% endblock %}
+{% block content %}
+<h1>{{ "Edit" if editing else "Add" }}: {{ type_label }}</h1>
+<p><a href="/howto#{{ source_type }}">How to fill this in</a></p>
+{% if editing %}
+<p>Source id: <strong>{{ source_id }}</strong>. Type: <strong>{{ source_type }}</strong>. Neither can be changed.</p>
+{% endif %}
+{% if form_errors %}
+<div class="error" role="alert">
+<p>The source could not be saved:</p>
+<ul>{% for message in form_errors %}<li>{{ message }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+<form method="post" action="{{ action }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+{% for f in fields %}
+{% set name = f.spec.name %}
+<div class="field">
+{% if f.spec.parse == "bool" %}
+<input type="checkbox" id="f-{{ name }}" name="{{ name }}"{% if f.checked %} checked{% endif %}>
+<label for="f-{{ name }}">{{ f.spec.label }}</label>
+{% else %}
+<label for="f-{{ name }}">{{ f.spec.label }}{% if f.spec.required %} (required){% endif %}</label>
+{% if f.spec.parse == "lines" %}
+<textarea id="f-{{ name }}" name="{{ name }}" rows="4"{% if f.error %} aria-invalid="true" aria-describedby="err-{{ name }}"{% endif %}>{{ f.value }}</textarea>
+{% else %}
+<input type="text" id="f-{{ name }}" name="{{ name }}" value="{{ f.value }}" autocomplete="off" spellcheck="false"{% if f.spec.parse == "int" %} inputmode="numeric"{% endif %}{% if f.error %} aria-invalid="true" aria-describedby="err-{{ name }}"{% endif %}>
+{% endif %}
+{% endif %}
+{% if f.spec.hint %}<p class="hint">{{ f.spec.hint }}{% if name == "secret_ref" and has_reference %} A reference is set; leave this blank to keep it.{% endif %}</p>{% endif %}
+{% if f.error %}<p class="error" id="err-{{ name }}">{{ f.error }}</p>{% endif %}
+</div>
+{% endfor %}
+<p>
+<button type="submit">{{ "Save changes" if editing else "Add source" }}</button>
+<a href="/">Cancel</a>
+</p>
+</form>
+{% endblock %}
