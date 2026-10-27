@@ -208,3 +208,30 @@ ignore_imports =
     social_tracker.classification.ports -> **
     social_tracker.classification.yaml_io -> **
 unmatched_ignore_imports_alerting = none
+
+# The catalog module (the official-catalog cache, RC-6): parsing, request building, the refresher,
+# the cached check and the status read ports only. It never opens a connection or a file itself:
+# the refresher gets the collector's Fetcher port by injection (the SSRF-safe fetcher is the only
+# outbound path) and the cache is reached through `CatalogRepository`.
+[importlinter:contract:catalog-no-io]
+name = The catalog module must do no I/O of its own
+type = forbidden
+source_modules =
+    social_tracker.catalog.*
+forbidden_modules =
+    social_tracker.persistence
+    social_tracker.entrypoints
+    social_tracker.bootstrap
+    social_tracker.collector.http_fetcher
+    sqlite3
+    socket
+    ssl
+    subprocess
+    httpx
+    httpx2
+    httpcore2
+    requests
+    aiohttp
+    os
+    pathlib
+    typer
