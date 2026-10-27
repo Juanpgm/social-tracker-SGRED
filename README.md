@@ -8,8 +8,10 @@ append-only **audit log** in which every change records who made it and why, a l
 reads the RSS and Atom feeds you register and stores their entries as **items**.
 
 Only news RSS and Atom sources are collected so far: Instagram, live stream and recorded audio
-sources can be registered, but nothing collects them yet, and nothing analyses the items yet
-(classification, alerts and the GPU workers are later slices). Nothing ever publishes or sends
+sources can be registered, but nothing collects them yet. The collected items go through a
+CPU-only **classification cascade** (topic filter, heuristic rules, recycled and near-duplicate
+check; see [Classifying content](#classifying-content)); the language-model judgment, the
+official-catalog cross-check, alerts and the GPU workers are later slices. Nothing ever publishes or sends
 data outside the system: the only outbound traffic is a read-only `GET` to the feeds you
 registered. The system starts **paused**, every source starts **disabled** and every analysis
 flag starts **off**.
@@ -33,6 +35,8 @@ Configuration comes from the process environment (no file is read). All variable
 | `SOCIAL_TRACKER_ACTOR` | Who the audit log attributes your changes to. `--actor` overrides it. | `cli:<OS user name>` |
 | `SOCIAL_TRACKER_BUSY_TIMEOUT_MS` | How long a write waits for another process using the database (1..600000). | `5000` |
 | `SOCIAL_TRACKER_RETENTION_DAYS` | How many days collected items are kept, counted from when they were fetched (0..3650). `0` means "purge once classified". | `30` |
+| `SOCIAL_TRACKER_RECYCLE_DAYS` | Content seen or published STRICTLY more than this many days ago is "recycled" when it comes back (1..3650). See [Classifying content](#classifying-content). | `7` |
+| `SOCIAL_TRACKER_NEAR_DUPLICATE_THRESHOLD` | Estimated similarity (above 0, up to 1, at most four decimals) from which two texts are near duplicates, inclusive. | `0.8` |
 | `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS` | Comma-separated host names (or IP addresses) the collector may contact although they resolve to a private address. See [Collecting content](#collecting-content). | empty (all private addresses are blocked) |
 | `SOCIAL_TRACKER_ALLOWED_PORTS` | Comma-separated destination ports the collector may contact, for feeds and every redirect hop. A value replaces the default list. | `80,443,8080,8443` |
 | `SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE` | Most items one source may hold at a time. Over it, new entries are dropped and counted as `source_quota`. | `100000` |
@@ -106,8 +110,13 @@ resets analysis and then makes its one pass.
 | `analysis on` / `analysis off` `[--source ID]` | Switch analysis for the system or for one source. |
 | `status` | Switches, alert threshold, source counts, collection states. |
 | `run [--once [--no-reset-analysis]] [--interval-tick SECONDS]` | Run the collection worker (see [Collecting content](#collecting-content)). |
-| `items list [--source ID] [--limit N]` | The collected items, newest first. |
-| `items search QUERY [--limit N]` | Search titles and texts by words. |
+| `items list [--source ID] [--limit N] [--ids]` | The collected items, newest first (`--ids` shows each id, which `classify show` takes). |
+| `items search QUERY [--limit N] [--ids]` | Search titles and texts by words. |
+| `classify run [--limit N]` | Classify the pending items of the eligible sources (CPU only). The worker does it after every collection pass. |
+| `classify show ITEM_ID` | The verdict of one item: label, confidence, deciding stage, rationale, flags. |
+| `classify stats` | Verdicts by label, out of scope by reason, and the flags. |
+| `topics show` | The topic vocabulary in force, as YAML. |
+| `topics set-file PATH` / `topics reset` | Install a vocabulary from a YAML file / go back to the shipped one (new audited version). |
 | `serve [--host H] [--port N] [--allow-non-loopback] [--allowed-host NAME]` | Run the local web UI (see [Web UI](#web-ui)). |
 
 `--set KEY=VALUE` takes a source field. The value is read as JSON when it parses (`600`, `true`,
@@ -337,6 +346,9 @@ uv run social-tracker items search "sismo cali"
   flagged. An entry is stored once per source: the same guid, or the same title and text under
   another address, is a duplicate. All the items of a fetch are stored in one transaction or
   none are.
+- **What happens next.** After the collection of each pass the worker classifies what is pending,
+  on the CPU, in batches of 200 (see [Classifying content](#classifying-content)); a failure
+  there costs that step only, and a stop request skips it.
 - **Item text is untrusted.** Titles, texts, authors and `raw_payload` come from the internet.
   The CLI escapes control characters when it prints them; any other view of an item (a web page,
   a report, an API) MUST escape all four before showing them and treat them as data, never as
@@ -370,9 +382,11 @@ uv run social-tracker items search "sismo cali"
   retention horizon (now minus the retention) is skipped at ingest and counted as
   `older_than_retention`, and for entries with no publication date, which are dated by when they
   were first seen, a small tombstone (the dedup key, no text) outlives the item (the oldest are
-  forgotten beyond 50,000 per source). With `0` only items that reached the `classified` stage
-  are removed (nothing sets that stage yet), they leave a tombstone, and no horizon applies.
-  Alerts are a separate store and are not touched.
+  forgotten beyond 50,000 per source). With `0` only items the classifier has processed
+  (`classified` or `out_of_scope`) are removed, once, as soon as the next purge runs; they leave a
+  tombstone, no horizon applies, and the items still waiting for classification stay. Their
+  verdicts and near-duplicate signatures are kept (they hold no text), so a copy that shows up
+  later is still recognised. Alerts are a separate store and are not touched.
 - **Safety of the fetch.** Only `http` and `https` addresses without a login are fetched, and
   only on the ports 80, 443, 8080 and 8443 (`SOCIAL_TRACKER_ALLOWED_PORTS` replaces the list),
   redirects included. Every host is resolved and ALL its addresses must be public: loopback,
@@ -398,6 +412,133 @@ uv run social-tracker items search "sismo cali"
   Put `--` before a query that starts with `-`.
 - **Logs** (on stderr) name source ids, counts and fixed reasons; never URLs, item text or
   secrets.
+
+## Classifying content
+
+This is internal observation only: a verdict is stored locally and shown to you, never published
+or sent anywhere. The cascade runs on the CPU, needs no model and no network, and is
+deterministic: the same item, history and vocabulary always give the same verdict, whatever the
+order the items arrived in. The Servicio Geológico Colombiano may be NAMED in a text, but it is
+never a data source of this application.
+
+```bash
+uv run social-tracker classify run
+uv run social-tracker classify stats
+uv run social-tracker topics show
+```
+
+(The worker does `classify run` after every collection pass.) `classify show ITEM_ID` prints one verdict (`items list --ids` shows the ids).
+
+**What it looks at.** The primary focus is (a) earthquakes and aftershocks, damage, rumors and the
+people talking about them, and (b) what is said about the Secretaría de Gestión del Riesgo de
+Emergencias y Desastres of Cali (formerly the DAGRD): statements attributed to it (true or false),
+rumors and complaints about its management, alerts or evacuation orders claimed to come from it.
+Other natural disasters (floods, landslides, volcano, forest fires, storms) are secondary. Crime
+and public order unrelated to disasters are out of scope.
+
+**The stages**, in order (the worker runs them after each collection pass, 200 items at a time,
+oldest published first; `classify run` does the same on demand):
+
+1. **Topic filter.** An item with none of the vocabulary below is `out_of_scope` and counted by
+   reason (`no_topic_match`, `crime_public_order`); an item with no words at all is
+   `unclassified`. The title and the text are read together.
+2. **Rules.** Weighted heuristic signals (table below) become a preliminary label and a
+   confidence.
+3. **Recycled and near-duplicate check.** See below.
+4. The official-catalog cross-check and the language-model judgment are later units. The verdict
+   already records `catalog: unavailable` for earthquake items, and marks what the LLM will have
+   to settle (`needs_llm`, with a `priority`).
+
+**Labels:** `unintentional_rumor`, `deliberate_disinformation`, `recycled_content`, `no_risk`,
+`unclassified`, `out_of_scope`. A verdict has a label, a confidence from 0 to 1, the stage that
+decided, a rationale of at most 300 characters (signal names, topics and matched vocabulary
+terms; item text is never quoted), the evidence (`signals`), and the flags `low_confidence`,
+`needs_llm`, `truncated`, `duplicate_of` and `recycled_of`.
+
+**How the rules decide.** Each signal argues for one label with a weight; the evidence for a label
+is `1 - product(1 - weight)` over its signals, so clues add up but never pass 1. The label with the
+most evidence wins (a tie goes to the more serious one). No signal, or evidence under 0.2, leaves
+the item `unclassified` with that confidence (0.0 for no signal at all; gibberish with a topic word
+ends up here). Two labels that are both at least 0.3 and closer than 0.15 are *conflicting*.
+
+| Signal | Argues for | Weight | Fires when |
+| --- | --- | --- | --- |
+| `prediction_claim` | unintentional_rumor | 0.45 | a future quake is announced ("mañana habrá un temblor", "va a temblar", "pronostican un terremoto"), unless negated shortly before ("no habrá", "es falso") |
+| `prediction_specific_time` | deliberate_disinformation | 0.35 | the prediction comes with a date, a weekday, an hour or "mañana"/"hoy"/"esta noche" |
+| `pseudo_authority` | unintentional_rumor | 0.30 | "lo dijo la NASA", "según un científico" (anonymous authorities) |
+| `virality_phrases` | unintentional_rumor | 0.20 | "compartan", "reenvía", "pásalo", "urgente" |
+| `censorship_bait` | deliberate_disinformation | 0.30 | "antes de que lo borren", "no quieren que sepas" |
+| `all_caps` | unintentional_rumor | 0.15 | at least 20 letters, 70 % or more uppercase |
+| `repeated_exclamation` | unintentional_rumor | 0.10 | `!!`, `¡¡` or three `!` |
+| `unverifiable_sources` | unintentional_rumor | 0.25 | "fuentes confiables", "dicen que", "me dijo un amigo" |
+| `official_attribution_unlinked` | deliberate_disinformation | 0.45 | an official body (the secretariat, UNGRD, ...) is named as the speaker, an order or alarm word ("evacuen", "salgan", "peligro") is present and there is no link to a configured official domain |
+| `official_link` | no_risk | 0.35 | a link to (or an item served from) a configured official domain |
+| `evacuation_claim` | unintentional_rumor | 0.20 | evacuation orders ("evacuen", "salgan de") |
+| `casualty_claim` | unintentional_rumor | 0.25 | casualty counts or collapse claims ("300 muertos", "el edificio colapsó") |
+| `recycled_marker` | recycled_content | 0.50 | "video de 2016", "video viejo", "hace años", "imágenes de archivo" |
+| `old_year_reference` | recycled_content | 0.25 | a year at least two years before the item's own |
+| `news_report` | no_risk | 0.50 | a report verb with a quake and a magnitude ("el SGC reportó un sismo de magnitud 4.2") |
+
+Reporting a real quake is not predicting one: "el SGC reportó un sismo de magnitud 4.2" gets
+`news_report` and none of the prediction signals. The weights are starting points chosen by hand,
+not measured values (see Calibrating).
+
+**Credibility is a prior, never a label.** The source's credibility (1 to 5, 3 by default) moves
+the confidence of a label the evidence already chose by 0.03 per step away from 3: a more credible
+source lowers a risk label's confidence and raises `no_risk`'s. With no evidence there is no label
+at any credibility.
+
+**Low confidence and the LLM queue.** A confidence strictly under the alert threshold (`status`
+shows it; 0.5 by default) sets `low_confidence`. An in-scope item is marked `needs_llm` when it is
+inconclusive, has conflicting signals, or its confidence is in [0.4, 0.8) (0.8 is settled, 0.79
+is not; 0.4 is queued, 0.39 is not), unless it duplicates an item that was already judged. The
+`priority` ranks the queue (strong evidence first, then how clearly on topic, with a bump for the
+secretariat). The hourly cap on LLM judgments is applied by the stage that consumes the queue.
+
+**Recycled and near-duplicate content.** Each in-scope item leaves a signature (a content hash and
+a MinHash of its word triples, 80 values, no text) that is looked up through an index, so the cost
+of a lookup does not grow with the number of stored items. A new item that matches content first
+seen or published STRICTLY more than `SOCIAL_TRACKER_RECYCLE_DAYS` days earlier (7 days exactly is
+still a duplicate) is `recycled_content` and references the original (`classify show` prints
+`recycled of`); its confidence is 0.9 for identical content and 0.9 times the estimated similarity
+for a near copy, moved by the credibility prior. A match inside the window is a duplicate: it
+reuses the earlier verdict (`duplicate of`) and is not escalated again. A near copy is a text whose
+estimated word-triple similarity is at least `SOCIAL_TRACKER_NEAR_DUPLICATE_THRESHOLD` (0.8). Text
+longer than 20,000 characters is cut before analysis and flagged `truncated`.
+
+**The vocabulary** is editable data. `topics show` prints it; edit a copy and install it with
+`topics set-file FILE -r "why"` (a new audited version; the same vocabulary again changes nothing)
+or return to the shipped one with `topics reset -r "why"`. Matching is by whole words and phrases,
+ignoring case, accents, punctuation, full-width forms and hidden characters, so `¡SÍSMO!` is
+`sismo`, while `sismógrafo` is NOT `sismo` (list every form you want: singular, plural,
+adjective). The file is UTF-8, at most 64 KiB, and refused when it has an unknown key, a duplicate
+(also across accents and case), a term in two groups, a list over 500 terms, a term over 80
+characters or 12 words, or an unknown or out-of-range weight. Groups: `earthquake`, `secretariat`
+(the official name and its variants), `other_disaster`, `places` (context only: a place alone
+never puts an item in scope), `exclude` (crime terms: out of scope unless a disaster term is
+present), `official_bodies`, `official_domains`, `official_channel_hints` and `weights` (per-signal
+overrides; 0 switches a signal off). Terms are stored folded (lowercase, no accents).
+
+**`official_domains` and `official_channel_hints` are placeholders: verify before relying on
+them.** The shipped values (`official-domain.example`, `@official_channel_placeholder`) are not
+real addresses and nobody has checked them. Put the domains you have verified yourself in
+`official_domains`; a link to one of them lowers the suspicion of an unverified attribution. The
+channel hints are informational only in this version and drive no decision.
+
+**Safety and behavior.** An item is classified only while global analysis is on, its source is
+enabled and the source's analysis switch is on; this is checked again for every item, so a source
+disabled in the middle of a run stops at the next item and its pending items stay untouched. Each
+item is classified atomically and at most once (two runs racing over the same items never store
+two verdicts); a storage error ends a run and the next one resumes. Changing the vocabulary or the
+thresholds affects the items classified afterwards; stored verdicts are not redone. Item text is
+untrusted data: an instruction written inside an item is just text.
+
+**Calibrating.** Nothing here has been measured against real data yet. To tune it: run the worker
+on your sources, read `classify stats` and a sample of `classify show` for the labels you care
+about, then adjust `weights` (and the term lists) with `topics set-file`, and the two thresholds
+with their environment variables. A hand-labelled gold set and a tool to measure precision and
+recall against it come in a later slice; until then treat the confidences as relative, not as
+probabilities.
 
 ## Audit log
 
@@ -449,4 +590,6 @@ The architecture is hexagonal. Domain modules are pure, services depend on ports
 services. Entrypoints such as the CLI never import persistence; `lint-imports` enforces it.
 The collector follows the same rules, and its fetcher adapter (`collector/http_fetcher.py`) is the
 only module allowed to import an HTTP client or sockets: the web UI has no outbound path at all
-and reaches the worker side only through the composition root.
+and reaches the worker side only through the composition root. The classification core
+(`classification/domain`, `text`, `topics`, `rules`, `similarity`) is pure and deterministic: an
+import contract forbids it storage, file and network libraries, YAML, randomness and the clock.

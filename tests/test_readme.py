@@ -21,6 +21,8 @@ from social_tracker.bootstrap import (
     MAX_BYTES_PER_FETCH_ENV,
     MAX_BYTES_PER_SOURCE_ENV,
     MAX_ITEMS_PER_SOURCE_ENV,
+    NEAR_DUPLICATE_THRESHOLD_ENV,
+    RECYCLE_DAYS_ENV,
     RETENTION_DAYS_ENV,
 )
 from social_tracker.collector.domain import MAX_RETRY_AFTER_S, IngestLimits
@@ -39,7 +41,9 @@ from social_tracker.sources.yaml_io import MAX_FILE_BYTES, load_sources
 README = Path(__file__).resolve().parent.parent / "README.md"
 FENCE = re.compile(r"```(\w+)\n(.*?)```", re.DOTALL)
 FLAG = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
-SUBCOMMAND = re.compile(r"(?<![\w-])(?:(sources|analysis|items) ([a-z]+)|(status|serve|run))\b")
+SUBCOMMAND = re.compile(
+    r"(?<![\w-])(?:(sources|analysis|items|classify|topics) ([a-z][a-z-]*)|(status|serve|run))\b"
+)
 FILE_SUFFIXES = {"-wal", "-shm"}  # SQLite sidecar files, written like flags in the prose
 CONTINUATION = "\\\n"
 EXECUTABLE = "uv run social-tracker"
@@ -76,6 +80,8 @@ def test_every_environment_variable_and_default_is_documented(readme: str):
         MAX_ITEMS_PER_SOURCE_ENV,
         MAX_BYTES_PER_SOURCE_ENV,
         MAX_BYTES_PER_FETCH_ENV,
+        RECYCLE_DAYS_ENV,
+        NEAR_DUPLICATE_THRESHOLD_ENV,
     ):
         assert f"`{name}`" in readme
     assert DEFAULT_DB_PATH in readme
@@ -231,7 +237,7 @@ def test_the_web_ui_section_documents_the_real_defaults(readme: str):
 
 def collecting(readme: str) -> str:
     """The 'Collecting content' section as one line of single-spaced text."""
-    section = readme.split("## Collecting content", 1)[1].split("## Audit log", 1)[0]
+    section = readme.split("## Collecting content", 1)[1].split("## Classifying content", 1)[0]
     return " ".join(section.split())
 
 
@@ -317,3 +323,61 @@ def test_the_stop_and_single_worker_behaviour_is_documented(readme: str):
     assert ".worker-lock" in section
     assert "another worker is already running" in section
     assert "sources reset ID" in section
+
+
+def classifying(readme: str) -> str:
+    """The 'Classifying content' section as one line of single-spaced text."""
+    section = readme.split("## Classifying content", 1)[1].split("## Audit log", 1)[0]
+    return " ".join(section.split())
+
+
+def test_the_signal_table_lists_every_signal_with_its_label_and_default_weight(readme: str):
+    from social_tracker.classification.domain import SIGNALS
+
+    section = readme.split("## Classifying content", 1)[1].split("## Audit log", 1)[0]
+    rows = {
+        cells[1].strip(" `"): [c.strip() for c in cells]
+        for cells in (line.split("|") for line in section.splitlines() if line.startswith("| `"))
+    }
+    assert set(rows) == set(SIGNALS)
+    for name, spec in SIGNALS.items():
+        assert rows[name][2] == spec.label.value, name
+        assert rows[name][3] == f"{spec.weight:.2f}", name
+
+
+def test_the_classification_numbers_in_the_readme_are_the_enforced_ones(readme: str):
+    from social_tracker.classification.domain import ClassifierSettings
+    from social_tracker.classification.rules import PRIOR_STEP
+    from social_tracker.classification.service import DEFAULT_BATCH
+    from social_tracker.classification.topics import (
+        MAX_TERM_CHARS,
+        MAX_TERM_WORDS,
+        MAX_TERMS_PER_GROUP,
+    )
+    from social_tracker.classification.yaml_io import MAX_CONFIG_BYTES
+
+    s, text = ClassifierSettings(), classifying(readme)
+    for fragment in (
+        f"[{s.escalate_low}, {s.escalate_high})",
+        f"under {s.inconclusive_below}",
+        f"at least {s.conflict_min}",
+        f"closer than {s.conflict_margin}",
+        f"{s.max_text_chars:,} characters",
+        f"{DEFAULT_BATCH} items at a time",
+        f"{PRIOR_STEP} per step",
+        f"at most {MAX_CONFIG_BYTES // 1024} KiB",
+        f"over {MAX_TERMS_PER_GROUP} terms",
+        f"over {MAX_TERM_CHARS} characters or {MAX_TERM_WORDS} words",
+        f"{s.recycle_days} days exactly",
+        f"({s.near_duplicate_threshold})",
+        "0.8 is settled, 0.79 is not; 0.4 is queued, 0.39 is not",
+    ):
+        assert fragment in text, fragment
+
+
+def test_the_placeholders_are_declared_unverified_and_the_catalog_is_not_a_source(readme: str):
+    text = classifying(readme)
+    assert "verify before relying" in text
+    assert "official-domain.example" in text
+    assert "never a data source" in text
+    assert "never published or sent" in text
