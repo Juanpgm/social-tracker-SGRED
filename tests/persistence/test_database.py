@@ -569,7 +569,7 @@ def test_database_newer_than_the_known_migrations_is_a_storage_error(tmp_path, o
     path = tmp_path / "m.db"
     opened(path, migrations=[COUNTER]).close()
     conn = sqlite3.connect(path)
-    conn.execute("INSERT INTO schema_migrations VALUES (99, '2026-01-01T00:00:00+00:00')")
+    conn.execute("INSERT INTO schema_migrations VALUES (99, '2026-01-01T00:00:00+00:00', 'x')")
     conn.commit()
     conn.close()
     with pytest.raises(StorageError) as info:
@@ -582,7 +582,7 @@ def test_database_with_a_hole_in_the_applied_versions_is_a_storage_error(tmp_pat
     path = tmp_path / "m.db"
     Database(path, migrations=[COUNTER]).close()
     conn = sqlite3.connect(path)
-    conn.execute("INSERT INTO schema_migrations VALUES (3, '2026-01-01T00:00:00+00:00')")
+    conn.execute("INSERT INTO schema_migrations VALUES (3, '2026-01-01T00:00:00+00:00', 'x')")
     conn.commit()
     conn.close()
     known = [COUNTER, Migration(2, "b", "SELECT 1"), Migration(3, "c", "SELECT 1")]
@@ -598,6 +598,107 @@ def test_a_failed_open_leaves_no_open_handle_behind(tmp_path):
     path.unlink()  # fails on Windows when the connection leaked
     for suffix in ("-wal", "-shm"):
         Path(str(path) + suffix).unlink(missing_ok=True)
+
+
+# ---- migrations: checksums ----
+
+
+def _stored_checksums(path: Path) -> dict[int, str]:
+    conn = sqlite3.connect(path)
+    try:
+        return dict(conn.execute("SELECT version, checksum FROM schema_migrations"))
+    finally:
+        conn.close()
+
+
+def test_the_checksum_is_the_sha256_of_the_sql_with_newlines_normalised():
+    assert Migration(1, "a", "SELECT 1\n").checksum == hashlib.sha256(b"SELECT 1\n").hexdigest()
+    lf = Migration(1, "a", "SELECT 1;\nSELECT 2;\n")
+    assert Migration(1, "a", "SELECT 1;\r\nSELECT 2;\r\n").checksum == lf.checksum
+    assert Migration(1, "a", "SELECT 1;\rSELECT 2;\r").checksum == lf.checksum
+    assert Migration(1, "a", "SELECT 1;\nSELECT 3;\n").checksum != lf.checksum
+    assert Migration(1, "a", "SELECT 1;\nSELECT 2; \n").checksum != lf.checksum
+
+
+def test_each_applied_migration_is_recorded_with_its_checksum(tmp_path, opened):
+    second = Migration(2, "more", "CREATE TABLE extra (id INTEGER)")
+    opened(tmp_path / "m.db", migrations=[COUNTER, second])
+    assert _stored_checksums(tmp_path / "m.db") == {
+        1: COUNTER.checksum,
+        2: second.checksum,
+    }
+
+
+def test_the_checksum_column_is_mandatory(tmp_path, opened):
+    db = opened(tmp_path / "m.db", migrations=[COUNTER])
+    columns = {r["name"]: r for r in db.query("PRAGMA table_info(schema_migrations)")}
+    assert columns["checksum"]["notnull"] == 1
+    assert columns["checksum"]["type"] == "TEXT"
+
+
+def test_editing_an_applied_migration_is_detected_on_open(tmp_path, opened):
+    path = tmp_path / "m.db"
+    opened(path, migrations=[COUNTER]).close()
+    edited = Migration(1, "counter", COUNTER.sql + "CREATE TABLE sneaky (x);")
+    with pytest.raises(StorageError) as info:
+        Database(path, migrations=[edited])
+    assert info.value.code == "migration_checksum_mismatch"
+    assert "sneaky" not in str(info.value)
+    assert "CREATE" not in str(info.value)
+
+
+def test_a_line_ending_only_change_is_not_drift(tmp_path, opened):
+    path = tmp_path / "m.db"
+    lf = Migration(1, "t", "CREATE TABLE t (a);\nCREATE TABLE u (b);\n")
+    opened(path, migrations=[lf]).close()
+    crlf = Migration(1, "t", lf.sql.replace("\n", "\r\n"))
+    assert versions(opened(path, migrations=[crlf])) == [1]
+
+
+def test_drift_in_an_old_migration_blocks_pending_ones(tmp_path):
+    path = tmp_path / "m.db"
+    Database(path, migrations=[COUNTER]).close()
+    edited = Migration(1, "counter", COUNTER.sql + " ")
+    pending = Migration(2, "more", "CREATE TABLE extra (id INTEGER)")
+    with pytest.raises(StorageError) as info:
+        Database(path, migrations=[edited, pending])
+    assert info.value.code == "migration_checksum_mismatch"
+    assert raw_versions(path) == [1]  # the pending migration was not applied
+
+
+def test_drift_in_a_later_migration_is_detected_too(tmp_path):
+    path = tmp_path / "m.db"
+    second = Migration(2, "more", "CREATE TABLE extra (id INTEGER)")
+    Database(path, migrations=[COUNTER, second]).close()
+    edited = Migration(2, "more", "CREATE TABLE extra (id INTEGER, y TEXT)")
+    with pytest.raises(StorageError) as info:
+        Database(path, migrations=[COUNTER, edited])
+    assert info.value.code == "migration_checksum_mismatch"
+
+
+def test_an_applied_version_without_a_migration_file_is_a_storage_error(tmp_path):
+    path = tmp_path / "m.db"
+    second = Migration(2, "more", "CREATE TABLE extra (id INTEGER)")
+    Database(path, migrations=[COUNTER, second]).close()
+    with pytest.raises(StorageError) as info:
+        Database(path, migrations=[COUNTER])  # the file for version 2 is gone
+    assert "newer version" in str(info.value)
+
+
+def test_a_schema_migrations_table_without_checksums_is_rejected_cleanly(tmp_path):
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE schema_migrations "
+        "(version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    conn.execute("INSERT INTO schema_migrations VALUES (1, '2026-01-01T00:00:00+00:00')")
+    conn.commit()
+    conn.close()
+    with pytest.raises(StorageError) as info:
+        Database(path, migrations=[COUNTER])
+    assert "unsupported" in str(info.value)
+    assert info.value.code == "storage_error"
 
 
 # ---- migrations: discovery ----
@@ -714,7 +815,7 @@ def test_a_loser_of_the_migration_race_leaves_no_transaction_open(tmp_path):
     holder.execute("PRAGMA journal_mode=WAL")
     holder.execute(
         "CREATE TABLE schema_migrations "
-        "(version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL)"
+        "(version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL, checksum TEXT NOT NULL)"
     )
     holder.execute("BEGIN IMMEDIATE")  # blocks the racers right where they must take the lock
     dbs: list[Database] = []
@@ -737,7 +838,10 @@ def test_a_loser_of_the_migration_race_leaves_no_transaction_open(tmp_path):
     # The winner applies the migration by hand while the racers wait.
     holder.execute("CREATE TABLE counter (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
     holder.execute("INSERT INTO counter VALUES (1, 0)")
-    holder.execute("INSERT INTO schema_migrations VALUES (1, '2026-01-01T00:00:00+00:00')")
+    holder.execute(
+        "INSERT INTO schema_migrations VALUES (1, '2026-01-01T00:00:00+00:00', ?)",
+        (COUNTER.checksum,),
+    )
     holder.execute("COMMIT")
     holder.close()
     for t in threads:

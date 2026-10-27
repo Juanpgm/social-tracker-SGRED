@@ -13,6 +13,7 @@ Design:
 - `schema_migrations` belongs to the runner (created before any migration runs), not to 0001.
 """
 
+import hashlib
 import re
 import sqlite3
 import threading
@@ -34,10 +35,13 @@ _MIGRATION_FILE_RE = re.compile(r"([0-9]{4})_([a-z0-9_]+)\.sql")
 _ERROR_NAME_RE = re.compile(r"[A-Z_]{1,40}")
 _UNIQUE_ERRORS = frozenset({"SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_PRIMARYKEY"})
 
+# The final shape of the bookkeeping table. The project has no deployed data yet, so there is
+# no upgrade path from earlier shapes: a table without `checksum` is rejected, not migrated.
 _CREATE_MIGRATIONS_TABLE = (
     "CREATE TABLE IF NOT EXISTS schema_migrations ("
     "version INTEGER NOT NULL PRIMARY KEY CHECK (version >= 1), "
-    "applied_at TEXT NOT NULL)"
+    "applied_at TEXT NOT NULL, "
+    "checksum TEXT NOT NULL)"
 )
 
 
@@ -77,11 +81,23 @@ def map_sqlite_error(exc: sqlite3.Error) -> DomainError:
 # ---- migrations -----------------------------------------------------------------------
 
 
+class MigrationChecksumError(StorageError):
+    """An applied migration no longer matches the file it was applied from."""
+
+    code = "migration_checksum_mismatch"
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
     name: str
     sql: str
+
+    @property
+    def checksum(self) -> str:
+        """SHA-256 of the SQL with line endings normalised, so CRLF checkouts do not drift."""
+        normalised = self.sql.replace("\r\n", "\n").replace("\r", "\n")
+        return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
 
 def validate_migrations(migrations: Sequence[Migration]) -> tuple[Migration, ...]:
@@ -119,18 +135,29 @@ def load_migrations(source: Traversable | None = None) -> tuple[Migration, ...]:
     return validate_migrations(sorted(found, key=lambda m: m.version))
 
 
-def _applied_versions(conn: sqlite3.Connection) -> set[int]:
-    versions = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
-    if not all(isinstance(v, int) for v in versions):
+def _ensure_migrations_table(conn: sqlite3.Connection) -> None:
+    conn.execute(_CREATE_MIGRATIONS_TABLE)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(schema_migrations)")}
+    if "checksum" not in columns:
+        raise StorageError("schema_migrations has an unsupported shape: recreate the database")
+
+
+def _applied_checksums(conn: sqlite3.Connection) -> dict[int, str]:
+    rows = conn.execute("SELECT version, checksum FROM schema_migrations").fetchall()
+    if not all(isinstance(v, int) and isinstance(c, str) for v, c in rows):
         raise StorageError("schema_migrations is corrupt")
-    return versions
+    return dict(rows)
 
 
-def _check_history(applied: set[int], known: Sequence[Migration]) -> None:
-    if applied - {m.version for m in known}:
+def _check_history(applied: dict[int, str], known: Sequence[Migration]) -> None:
+    if set(applied) - {m.version for m in known}:
         raise StorageError("database was created by a newer version of the application")
-    if applied != set(range(1, len(applied) + 1)):
+    if set(applied) != set(range(1, len(applied) + 1)):
         raise StorageError("applied migrations are not a contiguous prefix of the known ones")
+    for migration in known:
+        recorded = applied.get(migration.version)
+        if recorded is not None and recorded != migration.checksum:
+            raise MigrationChecksumError("an applied migration was modified after it was applied")
 
 
 def _rollback(conn: sqlite3.Connection) -> None:
@@ -140,8 +167,8 @@ def _rollback(conn: sqlite3.Connection) -> None:
 
 
 def _apply_pending(conn: sqlite3.Connection, migrations: Sequence[Migration]) -> None:
-    conn.execute(_CREATE_MIGRATIONS_TABLE)
-    applied = _applied_versions(conn)
+    _ensure_migrations_table(conn)
+    applied = _applied_checksums(conn)
     _check_history(applied, migrations)
     for migration in migrations:
         if migration.version in applied:
@@ -152,13 +179,13 @@ def _apply_pending(conn: sqlite3.Connection, migrations: Sequence[Migration]) ->
             if not conn.in_transaction:
                 raise StorageError("a migration must not end the transaction itself")
             conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                (migration.version, format_utc(datetime.now(UTC))),
+                "INSERT INTO schema_migrations (version, applied_at, checksum) VALUES (?, ?, ?)",
+                (migration.version, format_utc(datetime.now(UTC)), migration.checksum),
             )
             conn.execute("COMMIT")
         except sqlite3.Error as exc:
             _rollback(conn)
-            if migration.version in _applied_versions(conn):
+            if migration.version in _applied_checksums(conn):
                 continue  # another process applied it while we waited for the write lock
             raise map_sqlite_error(exc) from None
         except BaseException:
