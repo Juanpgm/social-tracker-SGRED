@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from social_tracker.persistence import db as db_module
 from social_tracker.persistence.db import (
     Database,
     Migration,
@@ -538,11 +539,76 @@ def test_a_fixed_migration_can_be_applied_after_a_failure(tmp_path, opened):
     assert versions(db) == [1, 2]
 
 
-def test_a_migration_that_ends_the_transaction_itself_is_a_storage_error(tmp_path):
-    sneaky = Migration(1, "sneaky", "CREATE TABLE t (x); COMMIT;")
+TX_CONTROL_SQL = [
+    "COMMIT",
+    "commit;",
+    "BEGIN",
+    "begin transaction;",
+    "BEGIN IMMEDIATE",
+    "END",
+    "END TRANSACTION",
+    "ROLLBACK",
+    "ROLLBACK TO sp",
+    "SAVEPOINT sp",
+    "RELEASE sp",
+    "RELEASE SAVEPOINT sp",
+    "-- a comment\nCOMMIT",
+    "/* a comment */ COMMIT",
+    "/* a ; comment */\n  begin",
+    "CREATE TABLE a (x); COMMIT; BEGIN; CREATE TABLE b (x);",
+    "CREATE TABLE a (x); COMMIT",  # no trailing semicolon
+    "CREATE TABLE a (x);\nCOMMIT;\nBEGIN;\nCREATE TABLE b (x);\nSELECT * FROM nope;",
+    ("CREATE TABLE a (x);CREATE TRIGGER trg AFTER INSERT ON a BEGIN SELECT 1; END;COMMIT;"),
+]
+
+
+@pytest.mark.parametrize("sql", TX_CONTROL_SQL)
+def test_a_migration_that_manages_transactions_is_rejected_before_anything_runs(tmp_path, sql):
+    path = tmp_path / "m.db"
+    with pytest.raises(StorageError) as info:
+        Database(path, migrations=[Migration(1, "sneaky", sql)])
+    assert info.value.code == "storage_error"
+    assert "transaction" in str(info.value)
+    assert not path.exists()  # rejected up front: the file was never opened
+
+
+TX_LOOKALIKE_SQL = {
+    "trigger body": (
+        "CREATE TABLE a (x);"
+        "CREATE TRIGGER trg AFTER INSERT ON a BEGIN SELECT 1; UPDATE a SET x = 2; END;"
+    ),
+    "string literal": "CREATE TABLE a (x); INSERT INTO a VALUES ('1; COMMIT; BEGIN; SAVEPOINT x');",
+    "line comment": "CREATE TABLE a (x); -- COMMIT;\nINSERT INTO a VALUES (1);",
+    "block comment": "CREATE TABLE a (x); /* ROLLBACK; */ INSERT INTO a VALUES (1);",
+    "quoted identifiers": 'CREATE TABLE "commit" ("begin", "end", "release");',
+    "trailing comment only": "CREATE TABLE a (x); -- done",
+}
+
+
+@pytest.mark.parametrize("sql", list(TX_LOOKALIKE_SQL.values()), ids=list(TX_LOOKALIKE_SQL))
+def test_statements_that_merely_mention_transaction_keywords_are_accepted(tmp_path, opened, sql):
+    db = opened(tmp_path / "m.db", migrations=[Migration(1, "ok", sql)])
+    assert versions(db) == [1]
+
+
+def test_a_trigger_migration_is_applied_and_the_trigger_works(tmp_path, opened):
+    sql = (
+        "CREATE TABLE a (x INTEGER); CREATE TABLE log (n INTEGER);"
+        "CREATE TRIGGER trg AFTER INSERT ON a BEGIN INSERT INTO log VALUES (NEW.x); END;"
+    )
+    db = opened(tmp_path / "m.db", migrations=[Migration(1, "trg", sql)])
+    with db.transaction() as conn:
+        conn.execute("INSERT INTO a VALUES (7)")
+    assert [r["n"] for r in db.query("SELECT n FROM log")] == [7]
+
+
+def test_the_runner_still_notices_a_migration_that_ended_the_transaction(tmp_path, monkeypatch):
+    # Defence in depth: even if static detection were fooled, a migration that left the
+    # transaction must not be recorded as applied.
+    monkeypatch.setattr(db_module, "_has_transaction_control", lambda sql: False)
     path = tmp_path / "m.db"
     with pytest.raises(StorageError):
-        Database(path, migrations=[sneaky])
+        Database(path, migrations=[Migration(1, "sneaky", "CREATE TABLE t (x); COMMIT;")])
     assert raw_versions(path) == []
 
 

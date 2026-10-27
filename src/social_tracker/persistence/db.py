@@ -11,6 +11,14 @@ Design:
 - A zero-byte file is a valid, empty SQLite database and is initialised normally. A file that
   is not a database is never modified: opening fails with `StorageError`.
 - `schema_migrations` belongs to the runner (created before any migration runs), not to 0001.
+  It records `(version, applied_at, checksum)`; on every open the checksum of each applied
+  migration is compared with the file (line endings normalised) and a mismatch is a
+  `MigrationChecksumError`. There is no upgrade path from a table without `checksum`: the
+  project had no deployed data when it was introduced, so such a database is rejected.
+- Migrations run inside the runner's own transaction and must not manage transactions
+  (BEGIN/COMMIT/END/ROLLBACK/SAVEPOINT/RELEASE are rejected up front; trigger bodies are fine).
+  `PRAGMA foreign_keys` is a no-op inside a transaction, so a future table-rebuild migration
+  must copy data inside the transaction and use `PRAGMA defer_foreign_keys = ON` instead.
 """
 
 import hashlib
@@ -100,6 +108,36 @@ class Migration:
         return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
 
+_LEADING_NOISE_RE = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?(?:\*/|$))*", re.DOTALL)
+_FIRST_WORD_RE = re.compile(r"[A-Za-z]+")
+_TRANSACTION_KEYWORDS = frozenset({"BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"})
+
+
+def _statements(sql: str) -> Iterator[str]:
+    """Split a script into statements the way SQLite does (trigger bodies stay in one piece)."""
+    start = 0
+    for index, char in enumerate(sql):
+        if char == ";" and sqlite3.complete_statement(sql[start : index + 1]):
+            yield sql[start : index + 1]
+            start = index + 1
+    if sql[start:].strip():
+        yield sql[start:]
+
+
+def _has_transaction_control(sql: str) -> bool:
+    """True if any top-level statement is BEGIN/COMMIT/END/ROLLBACK/SAVEPOINT/RELEASE.
+
+    Only the first keyword of each statement counts, so `BEGIN ... END` inside a CREATE TRIGGER
+    and keywords inside strings, comments or quoted identifiers are not mistaken for it.
+    """
+    for statement in _statements(sql):
+        body = statement[_LEADING_NOISE_RE.match(statement).end() :]
+        word = _FIRST_WORD_RE.match(body)
+        if word is not None and word.group().upper() in _TRANSACTION_KEYWORDS:
+            return True
+    return False
+
+
 def validate_migrations(migrations: Sequence[Migration]) -> tuple[Migration, ...]:
     """Versions must be exactly 1..n in order: no gaps, no duplicates, nothing at zero."""
     ordered = tuple(migrations)
@@ -114,6 +152,8 @@ def validate_migrations(migrations: Sequence[Migration]) -> tuple[Migration, ...
             raise StorageError("migrations must be numbered 1..n without gaps or duplicates")
         if not isinstance(migration.sql, str) or not migration.sql.strip():
             raise StorageError("a migration must not be empty")
+        if _has_transaction_control(migration.sql):
+            raise StorageError("a migration must not manage transactions itself")
     return ordered
 
 
@@ -175,9 +215,11 @@ def _apply_pending(conn: sqlite3.Connection, migrations: Sequence[Migration]) ->
             continue
         try:
             # executescript would COMMIT a transaction opened beforehand, so BEGIN is part of it.
+            # Migrations are screened for transaction control up front; the check below is the
+            # backstop should one slip through.
             conn.executescript("BEGIN IMMEDIATE;\n" + migration.sql)
             if not conn.in_transaction:
-                raise StorageError("a migration must not end the transaction itself")
+                raise StorageError("a migration must not manage transactions itself")
             conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at, checksum) VALUES (?, ?, ?)",
                 (migration.version, format_utc(datetime.now(UTC)), migration.checksum),
