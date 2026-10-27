@@ -4,6 +4,14 @@
 -- validated in Python first; these CHECKs are the last line of defence, so a bug or a manual
 -- edit cannot persist an incoherent row. Timestamps are ISO-8601 text in UTC ("+00:00").
 -- `schema_migrations` is created by the migration runner itself, before any migration runs.
+--
+-- SR-9 (deleting a source must not delete derived data): `source_state` and `control_events`
+-- deliberately have NO foreign key to `sources`. Future tables of collected items will carry
+-- `source_id` plus a `source_name` snapshot, also WITHOUT a cascading foreign key, so removing
+-- a source never removes what was collected from it.
+--
+-- Note for later migrations: `PRAGMA foreign_keys` is a no-op inside the runner's transaction,
+-- so a table rebuild must copy data inside the transaction and use `PRAGMA defer_foreign_keys`.
 
 CREATE TABLE sources (
     id              TEXT    NOT NULL PRIMARY KEY
@@ -58,6 +66,9 @@ CREATE TABLE control_events (
                OR (length(source_id) BETWEEN 3 AND 64 AND source_id NOT GLOB '*[^a-z0-9_]*')),
     detail    TEXT NOT NULL CHECK (length(detail) <= 2000)
 );
+
+-- Audit lookups by source (no foreign key: see the SR-9 note at the top).
+CREATE INDEX ix_control_events_source_id ON control_events (source_id);
 
 -- The event log is an audit trail: rows can be inserted, never changed or removed.
 CREATE TRIGGER control_events_no_update BEFORE UPDATE ON control_events

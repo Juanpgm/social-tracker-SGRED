@@ -5,6 +5,8 @@ Design:
   runs while holding it, so the connection is never used concurrently. Several `Database`
   instances (or processes) may open the same file: WAL plus `busy_timeout` serialise writers.
 - Writes go through `transaction()` (BEGIN IMMEDIATE ... COMMIT/ROLLBACK). Reads use `query()`.
+  A nested `transaction()` on the owning thread joins the outer one through a SAVEPOINT, so the
+  application layer can make several repository calls atomic.
 - Every `sqlite3.Error` is translated: unique violations become `ConflictError`, everything
   else `StorageError`. Messages are fixed strings plus SQLite's constant error name; they never
   carry SQL text, parameters, paths or file contents.

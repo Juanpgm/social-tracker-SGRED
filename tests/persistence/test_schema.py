@@ -84,6 +84,23 @@ def test_normalized_name_has_a_unique_index(conn):
     )
 
 
+def test_control_events_by_source_are_served_by_an_index(conn):
+    plan = " ".join(
+        str(row[3])
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM control_events WHERE source_id = 'src_one'"
+        )
+    )
+    assert "USING INDEX" in plan.upper() or "USING COVERING INDEX" in plan.upper()
+    assert "SCAN" not in plan.upper().replace("SEARCH", "")
+
+
+@pytest.mark.parametrize("table", ["source_state", "control_events"])
+def test_derived_tables_carry_no_foreign_key_to_sources(conn, table):
+    # SR-9: deleting a source must never cascade into the data derived from it.
+    assert conn.execute(f"PRAGMA foreign_key_list({table})").fetchall() == []
+
+
 def test_duplicate_id_is_rejected(conn):
     insert_source(conn)
     rejected(
