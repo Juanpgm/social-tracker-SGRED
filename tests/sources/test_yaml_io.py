@@ -112,7 +112,7 @@ def test_dump_never_emits_python_tags_even_for_tuples():
 def test_dump_emits_only_the_secret_reference_never_a_value():
     text = dump_sources([ALL_TYPES[1]])
     entry = yaml.safe_load(text)["sources"][0]
-    assert entry["secret_ref"] == "ig_main"
+    assert entry["secret_ref"] == "env:ig_main"
     forbidden = {"password", "token", "cookie", "secret", "api_key", "session"}
     assert forbidden.isdisjoint(entry)
 
@@ -418,8 +418,21 @@ def test_urls_with_embedded_credentials_are_rejected():
 
 
 def test_secret_references_are_the_only_way_to_point_at_a_secret():
-    loaded = load_sources(doc(payload("instagram", secret_ref="ig_main")))
-    assert loaded[0].secret_ref == "ig_main"
+    loaded = load_sources(doc(payload("instagram", secret_ref="env:ig_main")))
+    assert loaded[0].secret_ref == "env:ig_main"
+
+
+@pytest.mark.parametrize("scheme", ["env", "keyring", "file"])
+def test_secret_references_round_trip_through_the_file_for_every_scheme(scheme: str):
+    source = src("instagram", secret_ref=f"{scheme}:ig_main")
+    assert load_sources(dump_sources([source])) == [source]
+
+
+def test_a_raw_token_in_secret_ref_is_rejected_without_echoing_it():
+    token = "ghp_" + "a1B2c3D4" * 4 + "wxyz"
+    (problem,) = problems_of(doc(payload("instagram", secret_ref=token)))
+    assert problem.fields == ("secret_ref",)
+    assert token not in problem.message
 
 
 def test_instagram_without_a_secret_reference_is_rejected():

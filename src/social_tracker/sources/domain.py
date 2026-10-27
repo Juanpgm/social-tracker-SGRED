@@ -1,6 +1,7 @@
 """Source entity: a pydantic v2 discriminated union on `type`. Pure, no I/O.
 
-Credentials never live in a source: sources point at a secret by name (`secret_ref`).
+Credentials never live in a source: sources point at a secret by reference (`secret_ref`,
+shaped `<scheme>:<name>`).
 Every other unknown key is rejected by `extra="forbid"`; the model has no dict-typed
 fields, so there is no nested place for a credential to hide and no key blacklist to evade.
 """
@@ -39,8 +40,13 @@ KEYWORD_MAX_LENGTH = 200
 LANGUAGE_MAX_LENGTH = 35  # longest well-formed BCP-47 tag we care about
 # Simple BCP-47-like tag: language subtag then hyphen-separated alphanumeric subtags.
 LANGUAGE_PATTERN = r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
-# secret_ref names a secret held elsewhere (env var, vault key, file path-like name).
-REF_NAME_PATTERN = r"^[A-Za-z0-9_.:/-]{1,128}$"
+# secret_ref names a secret held elsewhere and must look like `<scheme>:<name>`: `env:NAME` (an
+# environment variable), `keyring:NAME` (an OS keyring entry) or `file:NAME` (a file under the
+# secrets directory). A pasted raw token (`ghp_...`, `sk-live-...`) has no scheme and is
+# refused; one pasted AFTER a valid scheme is still bounded by the charset and length below.
+REF_SCHEMES = ("env", "keyring", "file")
+REF_NAME_MAX = 64
+REF_NAME_PATTERN = rf"^({'|'.join(REF_SCHEMES)}):[A-Za-z0-9_./-]{{1,{REF_NAME_MAX}}}$"
 
 MAX_URL_LENGTH = 2048
 MAX_PATH_LENGTH = 4096

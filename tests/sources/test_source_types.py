@@ -159,7 +159,7 @@ def test_keywords_json_round_trip_uses_lists():
 def test_instagram_defaults():
     src = parse_source(payload("instagram"))
     assert (src.include_stories, src.include_posts, src.poll_interval_s) == (True, True, 1800)
-    assert src.secret_ref == "ig_main"
+    assert src.secret_ref == "env:ig_main"
 
 
 @pytest.mark.parametrize("handle", ["a", "a" * 30, "A.b_c9", "0", "._"])
@@ -197,15 +197,18 @@ def test_instagram_requires_secret_ref():
         parse_source(without(payload("instagram"), "secret_ref"))
 
 
-@pytest.mark.parametrize("ref", [None, "", "   ", "has space", "a" * 129, 5, "tab\tref", "x\n"])
+@pytest.mark.parametrize(
+    "ref", [None, "", "   ", "env:has space", "env:" + "a" * 65, 5, "env:tab\tref", "env:x\n"]
+)
 def test_instagram_secret_ref_rejects(ref):
     with pytest.raises(ValidationError, match="secret_ref"):
         parse_source(payload("instagram", secret_ref=ref))
 
 
 def test_secret_ref_accepts_bounds():
-    assert parse_source(payload("instagram", secret_ref="a")).secret_ref == "a"
-    assert parse_source(payload("instagram", secret_ref="a" * 128)).secret_ref == "a" * 128
+    assert parse_source(payload("instagram", secret_ref="env:a")).secret_ref == "env:a"
+    longest = "env:" + "a" * 64
+    assert parse_source(payload("instagram", secret_ref=longest)).secret_ref == longest
 
 
 @pytest.mark.parametrize("flag", ["include_stories", "include_posts"])
@@ -227,7 +230,10 @@ def test_instagram_has_no_lives_option(key: str, value: bool):
 
 def test_secret_ref_is_optional_for_other_types():
     assert parse_source(payload("news_rss")).secret_ref is None
-    assert parse_source(payload("news_rss", secret_ref="shared_ref")).secret_ref == "shared_ref"
+    assert (
+        parse_source(payload("news_rss", secret_ref="env:shared_ref")).secret_ref
+        == "env:shared_ref"
+    )
 
 
 # ---- live_stream ----------------------------------------------------------------------

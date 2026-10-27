@@ -9,7 +9,7 @@ _COMMON: dict[str, Any] = {"name": "Some Source", "created_at": T0, "updated_at"
 
 _PER_TYPE: dict[str, dict[str, Any]] = {
     "news_rss": {"feed_url": "https://example.org/rss.xml"},
-    "instagram": {"handle": "some.handle", "secret_ref": "ig_main"},
+    "instagram": {"handle": "some.handle", "secret_ref": "env:ig_main"},
     "live_stream": {"stream_url": "https://example.org/live.m3u8"},
     "recorded_audio": {"feed_url": "https://example.org/podcast.xml"},
 }

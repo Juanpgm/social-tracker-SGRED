@@ -705,7 +705,7 @@ class RegistryContract:
         env.registry.add(data("src_b", "B", "instagram"))
         text = env.registry.export_sources()
         assert text.index("src_b") < text.index("src_z")
-        assert "secret_ref: ig_main" in text
+        assert "secret_ref: env:ig_main" in text
 
     # ---- concurrency ----
 

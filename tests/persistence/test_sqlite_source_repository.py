@@ -217,7 +217,7 @@ def test_keywords_come_back_as_a_tuple_and_none_stays_none(repo):
     [
         {"type": "news_rss", "keywords": [], "poll_interval_s": 120},
         {"type": "instagram", "include_stories": False, "include_posts": False},
-        {"type": "instagram", "poll_interval_s": 900, "secret_ref": "ref.name:v1/x-y"},
+        {"type": "instagram", "poll_interval_s": 900, "secret_ref": "file:ref.name_v1/x-y"},
         {"type": "live_stream", "chunk_seconds": 10, "language": "pt-BR"},
         {"type": "live_stream", "stream_url": "rtmp://example.org/live", "chunk_seconds": 60},
         {"type": "recorded_audio", "feed_url": None, "watch_dir": "C:\\audio drop\\\u00e9"},
