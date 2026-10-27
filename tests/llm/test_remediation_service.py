@@ -309,7 +309,9 @@ def test_requeue_parked_refuses_a_bad_limit(limit):
 def test_a_parked_item_whose_item_is_gone_is_not_resurrected_in_the_queue():
     w = world(LlmSettings(max_failures=1))
     park(w)
-    w.items.purge_fetched_before(NOW + timedelta(days=3650))
+    w.items.purge_fetched_before(
+        NOW + timedelta(days=3650), purge_queued_fetched_before=NOW + timedelta(days=3650)
+    )
     w.service.requeue_parked()
     assert w.escalate().judged == 0
     assert w.judge.calls == 1  # the call that parked it, none since
@@ -576,7 +578,10 @@ def test_a_copy_whose_original_was_purged_is_released_and_judged_for_itself():
     w = copies_world()
     original = w.seed(1)
     copy = waiting_copy(w, 2, original)
-    w.items.purge_fetched_before(w.clock.now() + timedelta(days=3650))
+    w.items.purge_fetched_before(
+        w.clock.now() + timedelta(days=3650),
+        purge_queued_fetched_before=w.clock.now() + timedelta(days=3650),
+    )
     w.base.add(
         "guid-copy-again", w.items.get(copy.item_id).text if False else "texto", source_id=COPIES
     )
@@ -625,7 +630,10 @@ def test_pruning_the_history_releases_the_copies_of_a_forgotten_original():
     w = copies_world()
     original = w.seed(1, classified_at=NOW - timedelta(days=400))
     copy = waiting_copy(w, 2, original)
-    w.items.purge_fetched_before(w.clock.now() + timedelta(days=3650))
+    w.items.purge_fetched_before(
+        w.clock.now() + timedelta(days=3650),
+        purge_queued_fetched_before=w.clock.now() + timedelta(days=3650),
+    )
     w.base.add("guid-copy-still-here", "otro texto", source_id=COPIES)
     removed = w.base.service.prune_history()
     assert removed >= 1
@@ -872,7 +880,10 @@ def test_a_copy_whose_item_was_removed_meanwhile_is_skipped_without_a_crash():
     original = w.seed(1)
     copy = waiting_copy(w, 2, original)
     w.judge.on_call = lambda request: (
-        w.items.purge_fetched_before(w.clock.now() + timedelta(days=3650))
+        w.items.purge_fetched_before(
+            w.clock.now() + timedelta(days=3650),
+            purge_queued_fetched_before=w.clock.now() + timedelta(days=3650),
+        )
         if False
         else w.items.set_status(
             copy.item_id,

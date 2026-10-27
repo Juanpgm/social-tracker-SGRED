@@ -151,7 +151,9 @@ class EscalationRepositoryContract:
 
     def test_a_purged_item_is_not_queued(self, rig):
         stored = rig.seed(1)
-        rig.items.purge_fetched_before(NOW + timedelta(days=3650))
+        rig.items.purge_fetched_before(
+            NOW + timedelta(days=3650), purge_queued_fetched_before=NOW + timedelta(days=3650)
+        )
         assert rig.items.get(stored.item_id) is None
         assert rig.repo.queue(source_ids={"src_news"}, now=NOW, limit=9) == []
         assert rig.repo.queued_count(source_ids={"src_news"}, now=NOW) == 0
@@ -552,7 +554,9 @@ class EscalationRepositoryContract:
     def test_a_copy_whose_original_was_purged_is_orphaned(self, rig):
         original = rig.seed(1)
         copy = self._copy(rig, 2, original)
-        rig.items.purge_fetched_before(NOW + timedelta(days=3650))
+        rig.items.purge_fetched_before(
+            NOW + timedelta(days=3650), purge_queued_fetched_before=NOW + timedelta(days=3650)
+        )
         assert rig.items.get(original.item_id) is None
         rig.items.add_new([make_item("guid-2", source_id="src_news", text="text 2")])
         rig.items.set_status(copy.item_id, ItemStatus.CLASSIFIED)

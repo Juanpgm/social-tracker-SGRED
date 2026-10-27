@@ -160,7 +160,10 @@ def test_the_retention_purge_of_old_verdicts_takes_their_judgments_with_them(tmp
     try:
         (item_id,) = ids
         w.escalate()
-        w.items.purge_fetched_before(w.clock.now() + timedelta(days=3650))
+        w.items.purge_fetched_before(
+            w.clock.now() + timedelta(days=3650),
+            purge_queued_fetched_before=w.clock.now() + timedelta(days=3650),
+        )
         w.clock.advance(timedelta(days=400))
         assert w.base.service.prune_history() == 1
         assert w.escalations.get_judgment(item_id) is None

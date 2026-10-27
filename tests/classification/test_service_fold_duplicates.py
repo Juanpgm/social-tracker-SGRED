@@ -110,7 +110,10 @@ def test_a_variant_of_a_text_the_cpu_settled_still_shares_the_cpu_verdict(world)
 
 def test_an_original_that_is_gone_cannot_vouch_for_the_text(world):
     first = _judged_original(world)
-    world.items.purge_fetched_before(world.clock.now() + world.clock.now().resolution * 10**9)
+    world.items.purge_fetched_before(
+        world.clock.now() + world.clock.now().resolution * 10**9,
+        purge_queued_fetched_before=world.clock.now() + world.clock.now().resolution * 10**9,
+    )
     assert world.items.get(first.id) is None
     _, copy = _next(world, "guid-after", PREDICTION)
     assert copy.stage is not Stage.LLM

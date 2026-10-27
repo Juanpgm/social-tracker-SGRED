@@ -104,7 +104,9 @@ def test_an_item_purged_during_the_call_discards_the_answer():
     w = memory_llm()
     w.ready()
     stored = w.seed(1)
-    w.judge.on_call = lambda request: w.items.purge_fetched_before(NOW + timedelta(days=3650))
+    w.judge.on_call = lambda request: w.items.purge_fetched_before(
+        NOW + timedelta(days=3650), purge_queued_fetched_before=NOW + timedelta(days=3650)
+    )
     report = w.escalate()
     assert (report.judged, report.skipped) == (0, 1)
     assert w.escalations.get_judgment(stored.item_id) is None
