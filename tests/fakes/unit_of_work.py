@@ -38,3 +38,9 @@ class InMemoryUnitOfWork:
                     for name, value in state.items():
                         setattr(participant, name, value)
                 raise
+
+    @contextmanager
+    def snapshot(self) -> Iterator[None]:
+        """Holding the lock is a consistent view: no other thread's block can run meanwhile."""
+        with self._lock:
+            yield

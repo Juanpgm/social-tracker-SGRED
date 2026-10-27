@@ -157,3 +157,44 @@ class UnitOfWorkContract:
         t2.join(5)
         assert order == ["owner-done", "other-entered"]
         assert [e.kind for e in env.control.list_control_events()] == ["owner", "other"]
+
+    # ---- snapshot: a consistent read-only view ----
+
+    def test_a_snapshot_reads_what_was_committed(self, env: Env):
+        with env.uow.transaction():
+            env.sources.add(make_source("src_one", "One"))
+            env.control.append_control_event(ev("added"))
+        with env.uow.snapshot():
+            assert [s.id for s in env.sources.list()] == ["src_one"]
+            assert [e.kind for e in env.control.list_control_events()] == ["added"]
+
+    def test_an_error_leaving_a_snapshot_propagates_unchanged_and_the_unit_stays_usable(
+        self, env: Env
+    ):
+        error = Boom("x")
+        with pytest.raises(Boom) as caught, env.uow.snapshot():  # noqa: PT012
+            env.sources.list()
+            raise error
+        assert caught.value is error
+        with env.uow.transaction():
+            env.sources.add(make_source("src_one", "One"))
+        assert [s.id for s in env.sources.list()] == ["src_one"]
+
+    def test_base_exceptions_leave_a_snapshot_unswallowed(self, env: Env):
+        with pytest.raises(StopNow), env.uow.snapshot():  # noqa: PT012
+            raise StopNow
+
+    def test_a_snapshot_inside_a_transaction_joins_it_and_sees_its_writes(self, env: Env):
+        with env.uow.transaction():
+            env.sources.add(make_source("src_one", "One"))
+            with env.uow.snapshot():
+                assert [s.id for s in env.sources.list()] == ["src_one"]
+            env.sources.add(make_source("src_two", "Two"))
+        assert [s.id for s in env.sources.list()] == ["src_one", "src_two"]
+
+    def test_snapshots_nest(self, env: Env):
+        with env.uow.snapshot(), env.uow.snapshot():
+            assert env.sources.list() == []
+        with env.uow.transaction():
+            env.sources.add(make_source("src_one", "One"))
+        assert len(env.sources.list()) == 1

@@ -6,6 +6,8 @@ services (see the meta-test). Tests never look inside the service: they read the
 
 import json
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -109,6 +111,43 @@ class NoPerSourceLookups:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
+
+
+class JournalledUnitOfWork:
+    """Delegates to a real unit of work and notes when a snapshot starts and ends."""
+
+    def __init__(self, inner: UnitOfWork, journal: list[str]) -> None:
+        self._inner, self._journal = inner, journal
+
+    def transaction(self) -> Any:
+        return self._inner.transaction()
+
+    @contextmanager
+    def snapshot(self) -> Iterator[None]:
+        self._journal.append("snapshot-begin")
+        try:
+            with self._inner.snapshot():
+                yield
+        finally:
+            self._journal.append("snapshot-end")
+
+
+class JournalledRepository:
+    """Forwards every call to the real repository and notes its name."""
+
+    def __init__(self, inner: Any, journal: list[str], label: str) -> None:
+        self._inner, self._journal, self._label = inner, journal, label
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def journalled(*args: Any, **kwargs: Any) -> Any:
+            self._journal.append(f"{self._label}.{name}")
+            return attr(*args, **kwargs)
+
+        return journalled
 
 
 @dataclass
@@ -958,7 +997,7 @@ class ControlServiceContract:
         assert EVENT_SOURCE_ANALYSIS == "source_analysis_changed"
         assert EVENT_ALERT_THRESHOLD == "alert_threshold_changed"
 
-    # ---- overview (one consistent read model for the CLI listing and status) ----
+    # ---- overview (the read model of the CLI listing and status, read from one snapshot) ----
 
     def test_the_overview_of_a_fresh_system_is_paused_with_no_sources(self):
         env = self.make_env()
@@ -1004,6 +1043,36 @@ class ControlServiceContract:
         bulk = env.service_with(control=NoPerSourceLookups(env.control))
         assert [o.source.id for o in bulk.overview().sources] == ["src_one", "src_three", "src_two"]
         assert [o.analysis for o in bulk.overview().sources] == [False, True, True]
+
+    def test_the_overview_reads_everything_inside_one_snapshot(self, env: Env):
+        env.enable_source("src_one")
+        journal: list[str] = []
+        spy_uow = JournalledUnitOfWork(env.uow, journal)
+        control = JournalledRepository(env.control, journal, "control")
+        sources = JournalledRepository(env.sources, journal, "sources")
+        service = env.service_cls(control, sources, spy_uow, env.clock)  # type: ignore[arg-type]
+
+        service.overview()
+
+        assert journal[0] == "snapshot-begin"
+        assert journal[-1] == "snapshot-end"
+        reads = set(journal[1:-1])
+        assert reads == {
+            "control.get_setting",
+            "control.list_source_states",
+            "control.list_settings",
+            "sources.list",
+        }
+
+    def test_the_snapshot_ends_even_when_the_overview_fails(self, env: Env):
+        journal: list[str] = []
+        self.corrupt_setting(env, source_analysis_key("src_one"), "maybe")
+        service = env.service_cls(
+            env.control, env.sources, JournalledUnitOfWork(env.uow, journal), env.clock
+        )
+        with pytest.raises(StorageError):
+            service.overview()
+        assert journal == ["snapshot-begin", "snapshot-end"]
 
     def test_the_overview_of_a_corrupt_stored_flag_is_a_storage_error(self, env: Env):
         self.corrupt_setting(env, source_analysis_key("src_one"), "maybe")

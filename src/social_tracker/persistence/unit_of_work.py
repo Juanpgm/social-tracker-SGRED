@@ -19,3 +19,8 @@ class SqliteUnitOfWork:
     def transaction(self) -> Iterator[None]:
         with self._db.transaction():
             yield
+
+    @contextmanager
+    def snapshot(self) -> Iterator[None]:
+        with self._db.snapshot():
+            yield

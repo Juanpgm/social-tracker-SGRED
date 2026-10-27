@@ -15,6 +15,14 @@ class UnitOfWork(Protocol):
       nested writes (so the outer block may catch it and carry on), and an outer failure undoes
       the nested writes too;
     - other threads wait until the owning thread's outermost block ends.
+
+    `snapshot()` is the read-side twin: every read made inside the block sees one consistent
+    point in time, whatever other writers commit meanwhile, and it never takes the write lock,
+    so it works while another writer is mid-transaction. Writing inside it is a programming
+    error. A snapshot inside a transaction (or another snapshot) of the same thread joins it.
+    An exception leaving the block propagates unchanged.
     """
 
     def transaction(self) -> AbstractContextManager[None]: ...
+
+    def snapshot(self) -> AbstractContextManager[None]: ...

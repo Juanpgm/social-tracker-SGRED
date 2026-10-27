@@ -4,7 +4,9 @@ Design:
 - One connection per `Database`, shared by threads behind a re-entrant lock; every statement
   runs while holding it, so the connection is never used concurrently. Several `Database`
   instances (or processes) may open the same file: WAL plus `busy_timeout` serialise writers.
-- Writes go through `transaction()` (BEGIN IMMEDIATE ... COMMIT/ROLLBACK). Reads use `query()`.
+- Writes go through `transaction()` (BEGIN IMMEDIATE ... COMMIT/ROLLBACK). Reads use `query()`;
+  several reads that must agree run inside `snapshot()` (a deferred BEGIN: one WAL read view,
+  no write lock, so it coexists with writers of other connections or processes).
   A nested `transaction()` on the owning thread joins the outer one through a SAVEPOINT, so the
   application layer can make several repository calls atomic.
 - Single-writer caveat (slices 2 and 3): `query()` and `transaction()` take the same re-entrant
@@ -317,6 +319,7 @@ class Database:
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
         self._tx_depth = 0  # only touched while holding `_lock`, i.e. by the owning thread
+        self._reading = False  # a snapshot is open; same rule as `_tx_depth`
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIR_MODE)
             _create_private_file(self._path)
@@ -376,10 +379,36 @@ class Database:
         """
         with self._lock:
             conn = self._connection()
+            if self._reading:
+                raise StorageError("cannot write inside a read snapshot")
             if self._tx_depth == 0:
                 yield from self._outermost(conn)
             else:
                 yield from self._nested(conn)
+
+    @contextmanager
+    def snapshot(self) -> Iterator[sqlite3.Connection]:
+        """Consistent read view: a plain (deferred) `BEGIN`, which in WAL mode pins the database
+        as of the first read and takes no write lock. Other connections keep committing and a
+        writer holding the lock does not stop it, but its reads do not see their commits until the
+        block ends. It holds this object's lock like `transaction()`, so other threads of the
+        process wait. A snapshot inside a transaction or snapshot of the same thread joins it;
+        a write transaction inside a snapshot raises `StorageError`."""
+        with self._lock:
+            conn = self._connection()
+            if self._reading or self._tx_depth > 0:
+                yield conn
+                return
+            try:
+                conn.execute("BEGIN")
+            except sqlite3.Error as exc:
+                raise map_sqlite_error(exc) from None
+            self._reading = True
+            try:
+                yield conn
+            finally:
+                self._reading = False
+                _rollback(conn)  # nothing was written, so ending it is a rollback
 
     def _outermost(self, conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         try:

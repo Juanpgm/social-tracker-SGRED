@@ -271,21 +271,29 @@ class ControlService:
 
     def overview(self) -> SystemOverview:
         """Everything an operator listing needs in a fixed number of queries (sources, states,
-        flags, two settings), however many sources exist. The reads are not one snapshot: a
-        concurrent writer may land between them."""
-        global_state = self._global_state()
-        states = {s.source_id: s.state for s in self._control.list_source_states()}
-        flags = {
-            key.removeprefix(SETTING_SOURCE_ANALYSIS_PREFIX): _stored_flag(value)
-            for key, value in self._control.list_settings(SETTING_SOURCE_ANALYSIS_PREFIX).items()
-        }
+        flags, two settings), however many sources exist, all read inside one `uow.snapshot()`.
+
+        The snapshot makes the result a single point in time: a source another process adds,
+        enables or switches while this runs is either wholly in or wholly out, so an enabled
+        source is never listed with a missing (hence DISABLED) state. It takes no write lock.
+        """
+        with self._uow.snapshot():
+            global_state = self._global_state()
+            states = {s.source_id: s.state for s in self._control.list_source_states()}
+            flags = {
+                key.removeprefix(SETTING_SOURCE_ANALYSIS_PREFIX): _stored_flag(value)
+                for key, value in self._control.list_settings(
+                    SETTING_SOURCE_ANALYSIS_PREFIX
+                ).items()
+            }
+            sources = self._sources.list()
+            threshold = self.alert_min_confidence()
         rows: list[SourceOverview] = []
-        for source in self._sources.list():
+        for source in sources:
             flag = flags.get(source.id, False)
             effective = analysis_effective(global_state, flag, source_enabled=source.enabled)
             state = states.get(source.id, CollectionState.DISABLED)
             rows.append(SourceOverview(source, state, flag, effective))
-        threshold = self.alert_min_confidence()
         return SystemOverview(global_state is GlobalState.ACTIVE, threshold, tuple(rows))
 
     # ---- collection state machine ----

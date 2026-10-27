@@ -166,3 +166,77 @@ class _NothingStored:
 def test_without_any_stored_value_the_threshold_is_the_default_half():
     service = ControlService(_NothingStored(), None, None, FixedClock(START))  # type: ignore[arg-type]
     assert service.alert_min_confidence() == 0.5
+
+
+# ---- SQLite-only: the overview is one snapshot, in a fixed number of statements -------
+
+
+class _WriteOnceAfterStates:
+    """A control repository that lets another connection commit right after the states are read,
+    which is where the old, unsnapshotted overview could be torn."""
+
+    def __init__(self, inner, concurrent_write) -> None:
+        self._inner, self._concurrent_write = inner, concurrent_write
+
+    def list_source_states(self):
+        states = self._inner.list_source_states()
+        self._concurrent_write()
+        return states
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_a_source_committed_between_the_reads_of_an_overview_is_not_half_shown(tmp_path):
+    path = tmp_path / "torn.db"
+    with Database(path) as reader, Database(path) as writer:
+        env = sqlite_env(reader)
+        env.add_source("src_one")
+        env.enable_source("src_one")
+        other = sqlite_env(writer)
+
+        def commit_a_running_source() -> None:
+            other.add_source("src_two")
+            other.enable_source("src_two")
+
+        service = ControlService(
+            _WriteOnceAfterStates(env.control, commit_a_running_source),
+            env.sources,
+            env.uow,
+            env.clock,
+        )
+        overview = service.overview()
+
+        # one point in time: src_two is wholly absent, never "enabled" with a missing state
+        assert [o.source.id for o in overview.sources] == ["src_one"]
+        assert all(
+            o.state is not CollectionState.DISABLED for o in overview.sources if o.source.enabled
+        )
+        # the next overview sees it, complete
+        later = env.service.overview()
+        assert [(o.source.id, o.source.enabled, o.state) for o in later.sources] == [
+            ("src_one", True, CollectionState.IDLE),
+            ("src_two", True, CollectionState.IDLE),
+        ]
+
+
+def _statements_for_an_overview(tmp_path, count: int) -> list[str]:
+    with Database(tmp_path / f"n{count}.db") as db:
+        env = sqlite_env(db)
+        for n in range(count):
+            env.add_source(f"src_{n:02d}")
+            env.enable_source(f"src_{n:02d}")
+            env.service.set_source_analysis(f"src_{n:02d}", True, **WHO)
+        seen: list[str] = []
+        db._conn.set_trace_callback(seen.append)  # type: ignore[union-attr]
+        assert len(env.service.overview().sources) == count
+        db._conn.set_trace_callback(None)  # type: ignore[union-attr]
+        return seen
+
+
+def test_the_overview_issues_the_same_statements_for_one_source_and_for_thirty(tmp_path):
+    few = _statements_for_an_overview(tmp_path, 1)
+    many = _statements_for_an_overview(tmp_path, 30)
+    assert few  # the trace really recorded something
+    assert len(many) == len(few)
+    assert [sql.split()[0] for sql in many] == [sql.split()[0] for sql in few]
