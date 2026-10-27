@@ -1,6 +1,5 @@
 """The `social-tracker` console script is declared and really starts the CLI."""
 
-import os
 import subprocess
 import sys
 import tomllib
@@ -10,6 +9,7 @@ import typer
 
 from social_tracker.bootstrap import DB_PATH_ENV
 from social_tracker.entrypoints import cli
+from tests.entrypoints.conftest import scrubbed_env
 
 
 def test_the_console_script_points_at_the_typer_app(repo_root: Path):
@@ -19,13 +19,11 @@ def test_the_console_script_points_at_the_typer_app(repo_root: Path):
 
 
 def test_the_app_runs_as_a_real_process_with_separate_streams_and_exit_codes(tmp_path: Path):
-    env = {"SOCIAL_TRACKER_ACTOR": "proc", DB_PATH_ENV: str(tmp_path / "proc.db")}
+    env = scrubbed_env(SOCIAL_TRACKER_ACTOR="proc", **{DB_PATH_ENV: str(tmp_path / "proc.db")})
     run = [sys.executable, "-c", "from social_tracker.entrypoints.cli import app; app()"]
 
     def invoke(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [*run, *args], capture_output=True, text=True, env=_environ(env), check=False
-        )
+        return subprocess.run([*run, *args], capture_output=True, text=True, env=env, check=False)
 
     listing = invoke("sources", "list")
     assert (listing.returncode, listing.stdout, listing.stderr) == (
@@ -40,10 +38,6 @@ def test_the_app_runs_as_a_real_process_with_separate_streams_and_exit_codes(tmp
     assert usage.returncode == 2
 
 
-def _environ(extra: dict[str, str]) -> dict[str, str]:
-    return {**os.environ, **extra}
-
-
 def test_an_unexpected_failure_prints_a_traceback_without_local_variables(tmp_path: Path):
     canary = "canary-" + "local-77"
     script = f"""
@@ -56,7 +50,7 @@ def explode():
 cli.build_container = explode
 cli.app()
 """
-    env = {**os.environ, DB_PATH_ENV: str(tmp_path / "x.db")}
+    env = scrubbed_env(**{DB_PATH_ENV: str(tmp_path / "x.db")})
     result = subprocess.run(
         [sys.executable, "-c", script, "sources", "list"],
         capture_output=True,
@@ -64,6 +58,6 @@ cli.app()
         env=env,
         check=False,
     )
-    assert result.returncode == 1
+    assert result.returncode == 70  # a bug has its own exit status, apart from refusals (1)
     assert "RuntimeError" in result.stderr  # a bug is still reported loudly...
     assert canary not in result.stdout + result.stderr  # ...but never with the values in scope

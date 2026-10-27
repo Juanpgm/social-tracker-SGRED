@@ -4,22 +4,30 @@ Every write needs a `--reason` and is attributed to an actor (`--actor`, else
 `$SOCIAL_TRACKER_ACTOR`, else `cli:<OS user>`); both go to the audit log through the services.
 
 Exit codes: 0 success, 1 the operation was refused (invalid input, conflict, unknown source,
-storage failure...), 2 a usage error (missing option, unknown command). Refusals print one
-`error: ...` line (plus the individual problems of a rejected import) on stderr and nothing on
-stdout; results go to stdout. Messages come from the services and never echo values, keys or
-paths the operator typed, so a pasted secret is not repeated back.
+storage failure...), 2 a usage error (missing option, unknown command), 70 an unexpected failure,
+that is a bug (BSD `EX_SOFTWARE`). Refusals print one `error: ...` line (plus the individual
+problems of a rejected import) on stderr and nothing on stdout; results go to stdout. An
+unexpected failure prints `error: unexpected failure (<ExceptionType>); this is a bug` and the
+frames where it happened, never the exception message or local variables.
+
+Messages of refusals come from the services and do not echo the values or keys the operator
+typed (`--set`, reasons, actors), so a pasted secret is not repeated back. Paths are different:
+an operator-chosen path may appear in what `status` and `sources export -o` print, with control
+and hidden characters escaped, and never in an error message.
 
 Only `social_tracker.bootstrap` knows about storage: this module never imports it.
 """
 
 import os
 import sys
+import traceback
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Annotated
 
+import click
 import typer
 
 from social_tracker.bootstrap import build_container
@@ -36,8 +44,13 @@ from social_tracker.shared.text import escape_unprintable
 from social_tracker.sources.service import ImportConflictError, ImportReport
 from social_tracker.sources.yaml_io import MAX_FILE_BYTES
 
+EXIT_REFUSED = 1
+EXIT_UNEXPECTED = 70  # sysexits.h EX_SOFTWARE: an internal error, i.e. a bug
+
 app = typer.Typer(
-    help="Manage the sources of the social risk monitor and the analysis switches.",
+    help="Manage the sources of the social risk monitor and the analysis switches.\n\n"
+    "Exit status: 0 success, 1 refused (invalid input, conflict, storage failure...), "
+    "2 usage error, 70 unexpected failure (a bug).",
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_show_locals=False,  # a traceback must never print local secrets
@@ -103,9 +116,12 @@ _MAX_PROBLEMS_SHOWN = 20
 
 @contextmanager
 def _guard() -> Iterator[None]:
-    """Turn a refused operation into one `error:` line on stderr and exit code 1."""
+    """Turn a refused operation into one `error:` line on stderr and exit code 1, and any other
+    failure (a bug) into a one-line report, the frames without values, and exit code 70."""
     try:
         yield
+    except (typer.Exit, typer.Abort, click.ClickException):
+        raise  # click's own control flow: a usage error, --help, an interrupted prompt
     except DomainError as exc:
         typer.echo(f"error: {exc.message}", err=True)
         if isinstance(exc, ImportConflictError):
@@ -113,7 +129,11 @@ def _guard() -> Iterator[None]:
                 typer.echo(f"  entry {problem.index}: {problem.message}", err=True)
             if len(exc.problems) > _MAX_PROBLEMS_SHOWN:
                 typer.echo(f"  and {len(exc.problems) - _MAX_PROBLEMS_SHOWN} more", err=True)
-        raise typer.Exit(1) from None
+        raise typer.Exit(EXIT_REFUSED) from None
+    except Exception as exc:
+        typer.echo(f"error: unexpected failure ({type(exc).__name__}); this is a bug", err=True)
+        traceback.print_tb(exc.__traceback__, file=sys.stderr)
+        raise typer.Exit(EXIT_UNEXPECTED) from None
 
 
 def _on_off(flag: bool) -> str:
