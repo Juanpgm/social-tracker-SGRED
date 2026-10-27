@@ -13,6 +13,7 @@ from typing import Any
 from social_tracker.control.domain import (
     DEFAULT_SETTINGS,
     ControlEvent,
+    FetchStatus,
     SourceState,
     validate_setting,
     validate_setting_key,
@@ -33,6 +34,23 @@ def _state_from_row(row: sqlite3.Row) -> SourceState:
         )
     except DomainError:
         raise StorageError("stored source state is invalid") from None
+
+
+def _fetch_status_from_row(row: sqlite3.Row) -> FetchStatus:
+    try:
+        fetched = row["last_fetch_at"]
+        return FetchStatus(
+            row["source_id"],
+            parse_utc(fetched) if fetched is not None else None,
+            row["last_error"],
+            row["etag"],
+            row["last_modified"],
+        )
+    except DomainError:
+        raise StorageError("stored fetch status is invalid") from None
+
+
+_FETCH_COLUMNS = "source_id, last_fetch_at, last_error, etag, last_modified"
 
 
 def _event_from_row(row: sqlite3.Row) -> ControlEvent:
@@ -125,9 +143,35 @@ class SqliteControlRepository:
                 ),
             )
 
+    def get_fetch_status(self, source_id: str) -> FetchStatus | None:
+        rows = self._db.query(
+            f"SELECT {_FETCH_COLUMNS} FROM source_fetch_status WHERE source_id = ?", (source_id,)
+        )
+        return _fetch_status_from_row(rows[0]) if rows else None
+
+    def list_fetch_statuses(self) -> list[FetchStatus]:
+        rows = self._db.query(
+            f"SELECT {_FETCH_COLUMNS} FROM source_fetch_status ORDER BY source_id"
+        )
+        return [_fetch_status_from_row(row) for row in rows]
+
+    def save_fetch_status(self, status: FetchStatus) -> None:
+        if not isinstance(status, FetchStatus):
+            raise ValidationError("status must be a FetchStatus")
+        fetched = format_utc(status.last_fetch_at) if status.last_fetch_at is not None else None
+        with self._db.transaction() as conn:
+            conn.execute(
+                f"INSERT INTO source_fetch_status ({_FETCH_COLUMNS}) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (source_id) DO UPDATE SET last_fetch_at = excluded.last_fetch_at, "
+                "last_error = excluded.last_error, etag = excluded.etag, "
+                "last_modified = excluded.last_modified",
+                (status.source_id, fetched, status.last_error, status.etag, status.last_modified),
+            )
+
     def delete_source_state(self, source_id: str) -> None:
         with self._db.transaction() as conn:
             conn.execute("DELETE FROM source_state WHERE source_id = ?", (source_id,))
+            conn.execute("DELETE FROM source_fetch_status WHERE source_id = ?", (source_id,))
 
     def append_control_event(self, event: ControlEvent) -> None:
         if not isinstance(event, ControlEvent):

@@ -22,6 +22,7 @@ from social_tracker.control.domain import (
     SETTING_GLOBAL_ANALYSIS_ENABLED,
     CollectionState,
     ControlEvent,
+    FetchStatus,
     SourceState,
 )
 from social_tracker.control.ports import ControlRepository
@@ -506,6 +507,9 @@ class ControlRepositoryContract:
             "list_settings",
             "get_source_state",
             "list_source_states",
+            "get_fetch_status",
+            "list_fetch_statuses",
+            "save_fetch_status",
             "save_source_state",
             "delete_source_state",
             "append_control_event",
@@ -555,3 +559,44 @@ class ControlRepositoryContract:
             t.join(timeout=10)
         kinds = {e.kind for e in repo.list_control_events()}
         assert kinds == {f"kind_{i}" for i in range(total)}
+
+    # ---- fetch status (what the collector last learned about a source) ----
+
+    def test_an_unknown_fetch_status_is_none_and_the_listing_starts_empty(
+        self, repo: ControlRepository
+    ):
+        assert repo.get_fetch_status("src_one") is None
+        assert repo.list_fetch_statuses() == []
+
+    def test_a_fetch_status_round_trips_and_saving_replaces_it(self, repo: ControlRepository):
+        first = FetchStatus(
+            "src_one", AT, None, etag='"v1"', last_modified="Sun, 01 Mar 2026 08:00:00 GMT"
+        )
+        repo.save_fetch_status(first)
+        assert repo.get_fetch_status("src_one") == first
+        second = FetchStatus("src_one", AT + timedelta(hours=1), "http 503", None, None)
+        repo.save_fetch_status(second)
+        assert repo.get_fetch_status("src_one") == second
+        assert repo.list_fetch_statuses() == [second]
+
+    def test_fetch_statuses_are_listed_by_source_id_and_are_independent(
+        self, repo: ControlRepository
+    ):
+        for source_id in ("src_c", "src_a", "src_b"):
+            repo.save_fetch_status(FetchStatus(source_id, AT, None))
+        assert [s.source_id for s in repo.list_fetch_statuses()] == ["src_a", "src_b", "src_c"]
+        repo.save_fetch_status(FetchStatus("src_b", None, "timeout"))
+        assert repo.get_fetch_status("src_a") == FetchStatus("src_a", AT, None)
+
+    def test_deleting_the_source_state_forgets_the_fetch_status_too(self, repo: ControlRepository):
+        repo.save_fetch_status(FetchStatus("src_one", AT, None))
+        repo.save_fetch_status(FetchStatus("src_two", AT, None))
+        repo.delete_source_state("src_one")
+        assert repo.get_fetch_status("src_one") is None
+        assert repo.get_fetch_status("src_two") is not None
+
+    @pytest.mark.parametrize("bad", [None, {"source_id": "src_one"}, "src_one", 3])
+    def test_a_non_status_is_rejected(self, repo: ControlRepository, bad):
+        with pytest.raises(ValidationError):
+            repo.save_fetch_status(bad)
+        assert repo.list_fetch_statuses() == []

@@ -7,6 +7,7 @@ mutates its input, so behaviour is fully deterministic (jitter is injected as a 
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -367,3 +368,69 @@ def validate_actor(value: Any) -> str:
 
 def validate_reason(value: Any) -> str:
     return _free_text(value, "reason", MAX_REASON)
+
+
+# ---- fetch status ---------------------------------------------------------------------
+
+MAX_FETCH_ERROR = 300
+MAX_ETAG = 512
+MAX_LAST_MODIFIED = 100
+_UNKNOWN_ERROR = "unknown error"
+_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
+_SPACE_RE = re.compile(r"\s+")
+_HIDDEN = frozenset({"Cf", "Cs", "Zl", "Zp"})
+
+
+def sanitize_error(text: Any) -> str:
+    """Make `text` safe to store and show as a source's last error: no control or hidden
+    characters, every URL replaced by `<url>` (it could carry a token), whitespace collapsed,
+    at most `MAX_FETCH_ERROR` characters, never empty. The collector only produces fixed phrases,
+    so this is the second line of defence against an unexpected message."""
+    if not isinstance(text, str):
+        return _UNKNOWN_ERROR
+    visible = "".join(
+        " " if ord(ch) < 32 or 127 <= ord(ch) < 160 else ch
+        for ch in text
+        if unicodedata.category(ch) not in _HIDDEN
+    )
+    flat = _SPACE_RE.sub(" ", _URL_RE.sub("<url>", visible)).strip()
+    return flat[:MAX_FETCH_ERROR].rstrip() or _UNKNOWN_ERROR
+
+
+def _optional_text(value: Any, what: str, max_len: int, *, printable: bool = False) -> str | None:
+    if value is None:
+        return None
+    if printable:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > max_len
+            or any(not 32 <= ord(ch) < 127 for ch in value)
+        ):
+            raise ValidationError(f"{what} must be 1-{max_len} printable ASCII characters")
+        return value
+    return _free_text(value, what, max_len)
+
+
+@dataclass(frozen=True)
+class FetchStatus:
+    """What the collector last learned about one source.
+
+    `last_fetch_at` is the time of the last SUCCESSFUL fetch (a "not modified" answer counts);
+    `last_error` is the sanitized reason of the last failure and is cleared by the next success.
+    `etag` and `last_modified` are the validators for the next conditional request.
+    """
+
+    source_id: str
+    last_fetch_at: datetime | None = None
+    last_error: str | None = None
+    etag: str | None = None
+    last_modified: str | None = None
+
+    def __post_init__(self) -> None:
+        validate_slug(self.source_id)
+        if self.last_fetch_at is not None:
+            object.__setattr__(self, "last_fetch_at", ensure_utc(self.last_fetch_at))
+        _optional_text(self.last_error, "last_error", MAX_FETCH_ERROR)
+        _optional_text(self.etag, "etag", MAX_ETAG, printable=True)
+        _optional_text(self.last_modified, "last_modified", MAX_LAST_MODIFIED, printable=True)

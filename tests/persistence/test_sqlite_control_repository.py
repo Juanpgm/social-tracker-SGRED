@@ -14,6 +14,7 @@ from social_tracker.control.domain import (
     SETTING_GLOBAL_ANALYSIS_ENABLED,
     CollectionState,
     ControlEvent,
+    FetchStatus,
     SourceState,
 )
 from social_tracker.control.ports import ControlRepository
@@ -504,3 +505,45 @@ def test_a_closed_database_surfaces_as_a_storage_error(tmp_path):
     ):
         with pytest.raises(StorageError):
             action()
+
+
+# ---- fetch status ----
+
+FETCH_ROWS = {
+    "garbage time": {"last_fetch_at": "yesterday"},
+    "naive time": {"last_fetch_at": "2026-03-01T08:00:00"},
+    "empty error": {"last_error": ""},
+    "long error": {"last_error": "e" * 301},
+    "control character in error": {"last_error": "bad\nerror"},
+    "long etag": {"etag": "e" * 513},
+    "invalid id": {"source_id": "Bad Id"},
+}
+
+
+@pytest.mark.parametrize("overrides", FETCH_ROWS.values(), ids=FETCH_ROWS.keys())
+def test_a_malformed_stored_fetch_status_is_a_storage_error(repo, db, overrides):
+    row = {
+        "source_id": "src_a",
+        "last_fetch_at": None,
+        "last_error": None,
+        "etag": None,
+        "last_modified": None,
+        **overrides,
+    }
+    insert_raw(db, "source_fetch_status", **row)
+    with pytest.raises(StorageError) as info:
+        repo.get_fetch_status(row["source_id"])
+    assert info.value.code == "storage_error"
+    with pytest.raises(StorageError):
+        repo.list_fetch_statuses()
+
+
+def test_a_fetch_status_is_stored_with_utc_text_and_survives_a_reopen(tmp_path):
+    path = tmp_path / "fetch.db"
+    status = FetchStatus("src_a", AT.replace(microsecond=250000), "timeout", '"e"', "lm")
+    with Database(path) as first:
+        SqliteControlRepository(first).save_fetch_status(status)
+        row = first.query("SELECT * FROM source_fetch_status")[0]
+        assert tuple(row) == ("src_a", "2026-03-01T08:00:00.250000+00:00", "timeout", '"e"', "lm")
+    with Database(path) as second:
+        assert SqliteControlRepository(second).get_fetch_status("src_a") == status

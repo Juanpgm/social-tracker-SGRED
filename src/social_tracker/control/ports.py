@@ -2,7 +2,7 @@
 
 from typing import Protocol, runtime_checkable
 
-from social_tracker.control.domain import ControlEvent, SourceState
+from social_tracker.control.domain import ControlEvent, FetchStatus, SourceState
 
 
 @runtime_checkable
@@ -53,8 +53,20 @@ class ControlRepository(Protocol):
         """Insert or replace the state of `state.source_id`."""
         ...
 
+    def get_fetch_status(self, source_id: str) -> FetchStatus | None: ...
+
+    def list_fetch_statuses(self) -> list[FetchStatus]:
+        """Every stored fetch status, sorted by source id, in a single query. A copy."""
+        ...
+
+    def save_fetch_status(self, status: FetchStatus) -> None:
+        """Insert or replace the fetch status of `status.source_id` (`ValidationError` for
+        anything that is not a `FetchStatus`)."""
+        ...
+
     def delete_source_state(self, source_id: str) -> None:
-        """Forget the runtime state of `source_id`; a no-op if there is none (idempotent).
+        """Forget the runtime state of `source_id` and its fetch status; a no-op if there is
+        none (idempotent).
 
         Called when a source is deleted. Repositories stay independent (no cross-repository
         foreign key), so the application service removes the state in the same joined

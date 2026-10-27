@@ -5,6 +5,7 @@ import threading
 from social_tracker.control.domain import (
     DEFAULT_SETTINGS,
     ControlEvent,
+    FetchStatus,
     SourceState,
     validate_setting,
     validate_setting_key,
@@ -19,6 +20,7 @@ class InMemoryControlRepository:
         self._settings: dict[str, str] = dict(DEFAULT_SETTINGS)
         self._states: dict[str, SourceState] = {}
         self._events: list[ControlEvent] = []
+        self._fetch: dict[str, FetchStatus] = {}
 
     def get_setting(self, key: str) -> str | None:
         validate_setting_key(key)
@@ -55,9 +57,24 @@ class InMemoryControlRepository:
         with self._lock:
             self._states[state.source_id] = state
 
+    def get_fetch_status(self, source_id: str) -> FetchStatus | None:
+        with self._lock:
+            return self._fetch.get(source_id)
+
+    def list_fetch_statuses(self) -> list[FetchStatus]:
+        with self._lock:
+            return [self._fetch[key] for key in sorted(self._fetch)]
+
+    def save_fetch_status(self, status: FetchStatus) -> None:
+        if not isinstance(status, FetchStatus):
+            raise ValidationError("status must be a FetchStatus")
+        with self._lock:
+            self._fetch[status.source_id] = status
+
     def delete_source_state(self, source_id: str) -> None:
         with self._lock:
             self._states.pop(source_id, None)
+            self._fetch.pop(source_id, None)
 
     def append_control_event(self, event: ControlEvent) -> None:
         if not isinstance(event, ControlEvent):

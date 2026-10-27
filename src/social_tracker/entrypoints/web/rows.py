@@ -3,6 +3,8 @@
 Health is a reading of the collection state, nothing more: `ok` while it is idle or collecting,
 `degraded` in backoff (failures so far, the next attempt), `failed` once collection stopped, and
 no health at all for a disabled source. The reason is the stored failure count and retry time.
+The last fetch (UTC) and the last error are what the collector recorded; a source that never
+fetched, or never failed, shows the explicit placeholder `n/a` (done by the template).
 """
 
 from dataclasses import dataclass
@@ -20,6 +22,15 @@ class Row:
     overview: SourceOverview
     health: str
     reason: str
+
+    @property
+    def last_fetch(self) -> str | None:
+        moment = self.overview.last_fetch_at
+        return moment.strftime("%Y-%m-%d %H:%M:%S UTC") if moment else None
+
+    @property
+    def last_error(self) -> str | None:
+        return self.overview.last_error
 
 
 def _failures(count: int) -> str:

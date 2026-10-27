@@ -1089,6 +1089,7 @@ class ControlServiceContract:
         assert reads == {
             "control.get_setting",
             "control.list_source_states",
+            "control.list_fetch_statuses",
             "control.list_settings",
             "sources.list",
         }

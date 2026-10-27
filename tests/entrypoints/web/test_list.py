@@ -28,7 +28,7 @@ def test_a_source_row_shows_what_is_known_and_explicit_placeholders_for_the_rest
     assert "recorded" in row  # mode
     assert "4" in row
     assert "disabled" in row  # collection state of a fresh source
-    # no collector exists yet, so there is no last fetch or last error: marked, not invented
+    # nothing was fetched yet, so there is no last fetch or last error: marked, not invented
     html_row = row_of(web.client.get("/").text, "city_news")
     assert re.findall(r'<td class="placeholder">([^<]*)</td>', html_row) == ["n/a", "n/a"]
     headers = re.findall(r'<th scope="col">([^<]+)</th>', web.client.get("/").text)

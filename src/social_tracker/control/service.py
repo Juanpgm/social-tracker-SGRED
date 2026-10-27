@@ -122,6 +122,8 @@ class SourceOverview:
     effective: bool
     consecutive_failures: int = 0
     next_run_at: datetime | None = None  # set only while in backoff
+    last_fetch_at: datetime | None = None  # the last successful fetch
+    last_error: str | None = None  # sanitized reason of the last failure, until the next success
 
 
 @dataclass(frozen=True)
@@ -282,6 +284,7 @@ class ControlService:
         with self._uow.snapshot():
             global_state = self._global_state()
             states = {s.source_id: s for s in self._control.list_source_states()}
+            fetches = {f.source_id: f for f in self._control.list_fetch_statuses()}
             flags = {
                 key.removeprefix(SETTING_SOURCE_ANALYSIS_PREFIX): _stored_flag(value)
                 for key, value in self._control.list_settings(
@@ -298,7 +301,19 @@ class ControlService:
             state = stored.state if stored else CollectionState.DISABLED
             failures = stored.consecutive_failures if stored else 0
             retry_at = stored.next_run_at if stored else None
-            rows.append(SourceOverview(source, state, flag, effective, failures, retry_at))
+            fetch = fetches.get(source.id)
+            rows.append(
+                SourceOverview(
+                    source,
+                    state,
+                    flag,
+                    effective,
+                    failures,
+                    retry_at,
+                    fetch.last_fetch_at if fetch else None,
+                    fetch.last_error if fetch else None,
+                )
+            )
         return SystemOverview(global_state is GlobalState.ACTIVE, threshold, tuple(rows))
 
     # ---- collection state machine ----
