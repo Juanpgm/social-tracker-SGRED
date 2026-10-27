@@ -860,7 +860,7 @@ def test_a_maximum_size_text_is_analysed_quickly():
     # The slowest shape: every pattern keeps finding a start and then fails.
     text = "habra un sismo mañana " * 900 + "fuentes " * 200
     prepared = prepare("", text, max_chars=SETTINGS.max_text_chars)
-    assert len(prepared.raw) == SETTINGS.max_text_chars
+    assert len(prepared.raw) == SETTINGS.max_text_chars + 1  # two halves and the seam
     config, matcher = _default()
     started = time.perf_counter()
     detect_signals(prepared, matcher, config, reference_year=2026, item_url=None, settings=SETTINGS)

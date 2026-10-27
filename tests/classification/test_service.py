@@ -267,15 +267,18 @@ def test_the_title_counts_as_text(world):
     assert world.verdict(item).topics == (Topic.EARTHQUAKE,)
 
 
-def test_text_past_the_bound_is_cut_flagged_and_not_seen():
+def test_a_long_text_is_read_at_both_ends_and_flagged():
     world = memory_world()
     world.ready()
-    cut = world.add("a", "relleno " * 3000 + "sismo")  # the keyword sits past 20,000 characters
-    kept = world.add("b", "sismo " + "relleno " * 4000)
+    tail = world.add("a", "relleno " * 3000 + "sismo")  # the keyword sits in the last part
+    head = world.add("b", "sismo " + "relleno " * 4000)
     exact = world.add("c", "x" * 19_994 + " sismo")  # exactly 20,000 characters
     run(world)
-    assert (world.verdict(cut).label, world.verdict(cut).truncated) == (Label.OUT_OF_SCOPE, True)
-    assert (world.verdict(kept).topics, world.verdict(kept).truncated) == (
+    assert (world.verdict(tail).topics, world.verdict(tail).truncated) == (
+        (Topic.EARTHQUAKE,),
+        True,
+    )
+    assert (world.verdict(head).topics, world.verdict(head).truncated) == (
         (Topic.EARTHQUAKE,),
         True,
     )
@@ -283,6 +286,44 @@ def test_text_past_the_bound_is_cut_flagged_and_not_seen():
         (Topic.EARTHQUAKE,),
         False,
     )
+
+
+def test_a_truncated_text_without_a_topic_in_the_parts_read_is_kept_for_review():
+    world = memory_world()
+    world.ready()
+    hidden = world.add(
+        "a", "relleno " * 2000 + "sismo " + "relleno " * 2500
+    )  # in the unread middle
+    run(world)
+    verdict = world.verdict(hidden)
+    assert (verdict.label, verdict.stage, verdict.truncated) == (
+        Label.UNCLASSIFIED,
+        Stage.TOPIC,
+        True,
+    )
+    assert (verdict.needs_llm, verdict.low_confidence, verdict.scope_reason) == (True, True, None)
+    assert 0.0 < verdict.priority < 0.2
+    assert world.status(hidden) is ItemStatus.CLASSIFIED
+    assert world.signatures.get(hidden.id) is None
+
+
+def test_a_rumor_after_padding_is_classified_not_dropped():
+    world = memory_world()
+    world.ready()
+    item = world.add("a", "x " * 10001 + "Mañana habrá un temblor fuerte en Cali, compartan")
+    run(world)
+    verdict = world.verdict(item)
+    assert verdict.truncated is True
+    assert verdict.label is not Label.OUT_OF_SCOPE
+    assert "prediction_claim" in {s.name for s in verdict.signals}
+
+
+def test_a_short_text_without_a_topic_is_still_out_of_scope_not_reviewed():
+    world = memory_world()
+    world.ready()
+    item = world.add("a", OFF_TOPIC)
+    run(world)
+    assert world.verdict(item).label is Label.OUT_OF_SCOPE
 
 
 def test_the_largest_item_is_classified_quickly_and_the_same_twice():

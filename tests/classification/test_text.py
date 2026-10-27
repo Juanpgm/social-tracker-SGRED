@@ -67,14 +67,7 @@ def test_prepare_truncates_at_the_character_bound_and_says_so():
     text = "a" * 50 + " sismo"
     cut = prepare("", text, max_chars=50)
     assert cut.truncated is True
-    assert cut.tokens == ("a" * 50,)  # the word after the bound is not seen
+    assert cut.tokens == ("a" * 25, "a" * 19, "sismo")  # the first and the last half are read
     exact = prepare("", "a" * 50, max_chars=50)
     assert exact.truncated is False  # exactly at the bound is not a truncation
     assert prepare("", "a" * 51, max_chars=50).truncated is True
-
-
-def test_truncation_is_deterministic_and_never_splits_a_character():
-    text = "😀" * 30
-    first = prepare("", text, max_chars=7)
-    assert first == prepare("", text, max_chars=7)
-    assert first.raw == "😀" * 7

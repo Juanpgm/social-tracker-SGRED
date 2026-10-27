@@ -91,6 +91,7 @@ DEFAULT_BATCH = 200
 CANDIDATE_LIMIT = 200  # signatures compared per item: the oldest that share a band or the hash
 EXACT_RECYCLED_CONFIDENCE = 0.9  # identical content; a near copy scales it by its similarity
 NOT_CHECKED = "not_checked"
+REVIEW_PRIORITY = 0.1  # a truncated text with no topic in what was read: last in the queue
 UNAVAILABLE = "unavailable"
 _LOG = logging.getLogger("social_tracker.classifier")
 
@@ -379,6 +380,18 @@ class ClassifierService:
                 stage=Stage.TOPIC,
                 rationale="no words to classify",
                 low_confidence=True,
+                catalog_status=NOT_CHECKED,
+                **common,
+            )
+        if common["truncated"]:  # part of the text was never read: it cannot be called off topic
+            return Classification(
+                label=Label.UNCLASSIFIED,
+                confidence=0.0,
+                stage=Stage.TOPIC,
+                rationale="truncated text with no topic in the parts read: needs review",
+                low_confidence=True,
+                needs_llm=True,
+                priority=REVIEW_PRIORITY,
                 catalog_status=NOT_CHECKED,
                 **common,
             )
