@@ -1,12 +1,26 @@
 """Builders shared by the LLM tests."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+
+import httpx2
 
 from social_tracker.classification.domain import Classification, Label, Signal, Stage, Topic
 from social_tracker.llm.domain import JudgeEvidence, JudgeRequest, JudgeResponse
 
 NOW = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+
+
+def with_identity(handler: Callable[[httpx2.Request], httpx2.Response]):
+    """A scripted Ollama: the root page says who it is, everything else is the handler's."""
+
+    def wrapped(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET" and request.url.path == "/":
+            return httpx2.Response(200, text="Ollama is running")
+        return handler(request)
+
+    return wrapped
 
 
 def item_id(n: int | str = 1) -> str:

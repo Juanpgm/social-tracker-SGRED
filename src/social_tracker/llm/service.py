@@ -7,30 +7,47 @@ cascade in the worker pass and only while global analysis is on.
 
 Rules of the road
 - Only the work of the CPU stages is ever replaced, and only by a VALID verdict: one of four
-  labels with a confidence from 0 to 1 and a short rationale (see `schema`). Anything else is
-  retried once and then counts as `unclassified`: the verdict of the earlier stage stays (RC-9).
-  The credibility of the source stays a prior: it is recorded, never applied to a judged
-  confidence. A judged label under 0.5 is applied but flagged `low_confidence`.
-- The judge is a different failure domain from the CPU. A judge that is down, slow or sick costs
-  the escalation and nothing else: the item keeps its CPU verdict, is marked `escalation_failed`
-  with an exponential backoff and is tried again later. A failure that may be the item's own (a
-  timeout, a 5xx, a body that is not an answer) counts towards parking it for good after
-  `max_failures`; "nothing is listening" and "no model" do not. Two failed items in a row, or one
-  that says the judge is unreachable, end the batch.
+  labels with a confidence from 0 to 1 and a short rationale (see `schema`). An invalid answer is
+  asked again ONCE, with a corrective message that names the class of the problem and another
+  seed; if that is invalid too the verdict of the earlier stage stays (RC-9), but only when the
+  judge has been answering OTHER items: a judge that answers nothing valid for anyone is sick,
+  not the item. The credibility of the source stays a prior: it is recorded, never applied to a
+  judged confidence.
+- A valid answer that is suspicious is not taken at face value (`llm.domain.judged`): the model's
+  confidence is at most 0.95, and a `no_risk` that clears a text the earlier stages found
+  obfuscated, a risk signal of at least 0.6, or a claim the catalog contradicts is capped at 0.7,
+  flagged `low_confidence` and noted for review. Each such case is counted (`contradicted`, logged
+  as `llm_contradicts_prior`).
+- The judge is a different failure domain from the CPU. A failure is either the JUDGE's (nothing
+  listening, a refused or rate-limited request, a 5xx, a model that is slow to load, a server that
+  is not Ollama) or possibly the ITEM's (a warm call that never finishes, a body that is not an
+  answer). A judge-level failure never counts against the item: the reservation of the hour is
+  given back when the model gave nothing, the item goes behind the others with a backoff, the
+  whole judge backs off (doubling, capped) and the batch ends. An item-level failure counts towards
+  parking the item (after `max_failures`) ONLY while other items are being judged successfully;
+  otherwise it is treated as the judge's. A parked item is not lost: it re-enters the queue after
+  `parked_ttl_s`, or at once with `requeue_parked`.
 - One judgment at a time: a lock in the process and a lease in the database keep two workers (or
-  a worker and a one-shot command) from loading the GPU together. The lease expires, so a crashed
-  holder frees it.
+  a worker and a one-shot command) from loading the GPU together. The lease outlives the longest
+  possible judgment (a cold load, then the retry) and expires, so a crashed holder frees it.
 - No network call inside a write transaction. Everything is read first, the judge is called with
   no transaction open, and the answer is written in one short transaction that first checks that
   the item still exists, is still classified, its source is still eligible (PC-2) and its verdict
   still waits: a source switched off, an item purged or a verdict settled meanwhile discard the
   answer instead of writing it. A repeated or racing run never judges an item twice.
 - Budget: at most `hourly_cap` judgments are started per UTC hour (an invalid answer's one retry
-  belongs to the same judgment). Items beyond it wait. If more than `queue_max` wait, the OLDEST
-  are dropped, counted, and keep their CPU verdict.
+  belongs to the same judgment). A server that is down does not burn it. A pass also stops after
+  `pass_budget_s` of wall-clock time, and checks the stop flag between items and between the two
+  calls of a judgment.
+- The queue is bounded. When more than `queue_max` items could be served, one source's excess over
+  its fair share is dropped first, then the LOWEST priority first (the oldest among equals); they
+  keep their CPU verdict, are counted and settle as `parked`.
 - Exact copies that wait for their original (`awaiting_original`) are settled when the original
-  leaves the queue: with the judged verdict (their own credibility prior stays on their record)
-  or, if there is none, with the provisional one they already have.
+  leaves the queue: a copy whose text is IDENTICAL to the original's takes its judged verdict (its
+  own credibility prior stays on its record); a copy that differs by a character (punctuation, a
+  look-alike letter, another address) is judged for itself; if there is no verdict to copy, the
+  copy keeps its provisional one with the same low-confidence flag. A copy whose original is gone,
+  settled or ineligible never waits for ever: it is released into the queue as a normal item.
 - Item text, rationales and model output are never logged: logs carry counts, ids and codes.
 """
 
@@ -44,7 +61,7 @@ from datetime import datetime, timedelta
 from social_tracker.classification.domain import Classification, Label, Stage
 from social_tracker.classification.ports import ClassificationRepository
 from social_tracker.control.service import ControlService
-from social_tracker.items.domain import Item, ItemStatus
+from social_tracker.items.domain import Item, ItemStatus, text_identity
 from social_tracker.items.ports import ItemRepository
 from social_tracker.llm.domain import (
     PROMPT_VERSION,
@@ -59,17 +76,20 @@ from social_tracker.llm.domain import (
     LlmSettings,
     QueueEntry,
     backoff_delay,
+    contradicts_prior,
     evidence_of,
     hour_start,
     judged,
     left_unjudged,
     prompt_text,
     released_duplicate,
+    requeued_copy,
     reused_by_duplicate,
 )
 from social_tracker.llm.ports import EscalationRepository, LlmJudge
+from social_tracker.llm.prompt import fit_request
 from social_tracker.shared.clock import Clock
-from social_tracker.shared.errors import NotFoundError, StorageError, ValidationError
+from social_tracker.shared.errors import DomainError, NotFoundError, StorageError, ValidationError
 from social_tracker.shared.uow import UnitOfWork
 
 _LOG = logging.getLogger("social_tracker.llm")
@@ -80,17 +100,34 @@ LEASE_MARGIN_S = 30
 GATE_POLL_S = 0.2
 DROP_PAGE = 1000
 MAX_DROP_PAGES = 100
+SWEEP_PAGE = 100  # parked items re-queued, and orphaned copies released, per pass
+REQUEUE_PRIORITY = 0.1  # a parked item that comes back queues behind the healthy ones
+IDENTITY_TTL_S = 300  # how long "this address is Ollama" is trusted
+SUCCESS_WINDOW = timedelta(hours=1)  # "the judge has been answering" looks this far back
 UNEXPECTED = "llm_unexpected"
+BAD_REQUEST = "llm_bad_request"
 BUSY = "busy"
 PING_ITEM_ID = "ping_check"
 PING_TEXT = "Prueba de conexion: este mensaje no trata ningun tema."
 
 _CONTINUE = False
 _STOP = True
+# Failures that say nothing about which item was asked: no server, no model, not Ollama.
+_NOT_THERE = frozenset(
+    {JudgeErrorKind.UNREACHABLE, JudgeErrorKind.MODEL_NOT_FOUND, JudgeErrorKind.NOT_OLLAMA}
+)
 
 
 def _never() -> bool:
     return False
+
+
+class _Interrupted(Exception):  # noqa: N818 - control flow inside this module, never leaves it
+    """A stop request or the pass budget came between the two calls of a judgment."""
+
+    def __init__(self, *, stopped: bool) -> None:
+        super().__init__()
+        self.stopped = stopped
 
 
 @dataclass(frozen=True)
@@ -98,8 +135,12 @@ class EscalationReport:
     """What one `escalate` run did. `judged` got a valid verdict; `invalid` got two invalid
     answers (RC-9); `reused` are copies settled from an original (or a recycled copy of a judged
     item) without a call; `skipped` stopped being eligible between listing and writing; `failed`
-    will be retried; `parked` gave up for good; `dropped` left a full queue. `candidates` is what
-    a dry run would have sent."""
+    will be retried; `parked` gave up; `dropped` left a full queue. `requeued` are parked items
+    that came back, `released` copies that stopped waiting for an original that is gone,
+    `contradicted` valid `no_risk` answers that clear a suspicious text (capped, flagged).
+    `candidates` and `pending_drops` are what a dry run would have sent and dropped. `error` is
+    the code of the judge-level failure that ended the run, `backing_off` says the judge is
+    resting after one, `out_of_time` that the pass budget ran out."""
 
     judged: int = 0
     invalid: int = 0
@@ -116,6 +157,26 @@ class EscalationReport:
     unreachable: bool = False
     storage_errors: int = 0
     eligible_sources: int = 0
+    requeued: int = 0
+    released: int = 0
+    contradicted: int = 0
+    pending_drops: int = 0
+    backing_off: bool = False
+    out_of_time: bool = False
+    error: str | None = None
+
+    @property
+    def settled(self) -> int:
+        """Items that left the queue with a verdict of this stage."""
+        return self.judged + self.invalid + self.reused
+
+    @property
+    def nothing_could_be_judged(self) -> bool:
+        """The run judged nothing because the judge was unreachable or resting, busy with another
+        process, or the run was stopped: worth a different exit status than a quiet queue."""
+        return self.settled == 0 and (
+            self.unreachable or self.backing_off or self.busy or self.stopped
+        )
 
 
 @dataclass
@@ -133,17 +194,26 @@ class _Tally:
     unreachable: bool = False
     storage_errors: int = 0
     eligible_sources: int = 0
+    requeued: int = 0
+    released: int = 0
+    contradicted: int = 0
+    backing_off: bool = False
+    out_of_time: bool = False
+    error: str | None = None
     streak: int = field(default=0)
+    deadline: datetime | None = field(default=None)
 
     def report(self) -> EscalationReport:
-        data = {k: v for k, v in vars(self).items() if k != "streak"}
+        data = {k: v for k, v in vars(self).items() if k not in {"streak", "deadline"}}
         return EscalationReport(**data)
 
 
 @dataclass(frozen=True)
 class LlmStatus:
     """What `llm status` shows. `installed` are the models the server has, `missing` the
-    configured ones it lacks (empty when the server cannot be asked)."""
+    configured ones it lacks (empty when the server cannot be asked). `error` is the code of what
+    went wrong asking: nothing listening, or something that is not Ollama (then nothing more is
+    asked of it)."""
 
     reachable: bool
     error: str | None
@@ -198,6 +268,9 @@ class EscalationService:
         self._should_stop = should_stop
         self._holder = holder
         self._gate = threading.Lock()
+        self._judge_failures = 0  # judge-level failures in a row (sets how long it rests)
+        self._rests_until: datetime | None = None
+        self._identified_until: datetime | None = None
 
     # ---- reading ----
 
@@ -214,14 +287,16 @@ class EscalationService:
         return self._escalations.get_state(item_id)
 
     def status(self) -> LlmStatus:
-        """Ask the server which models it has (a `GET`, no model is loaded) and put it next to the
-        local figures. A server that is down is a status, not an error."""
+        """Ask the server who it is and which models it has (two `GET`s, no model is loaded) and
+        put it next to the local figures. A server that is down, or is not Ollama, is a status,
+        not an error."""
         settings = self._settings
         used = self._escalations.calls_in_hour(hour_start(self._clock.now()))
         counts = self._escalations.counts()
         installed: tuple[str, ...] = ()
         error: str | None = None
         try:
+            self._judge.identify()
             installed = self._judge.list_models()
         except JudgeError as exc:
             error = exc.code
@@ -263,6 +338,7 @@ class EscalationService:
                 return PingResult(False, error=BUSY)
             started = self._clock.now()
             try:
+                self._judge.identify()
                 answer = self._judge.judge(request)
             except JudgeError as exc:
                 return PingResult(False, error=exc.code)
@@ -285,24 +361,27 @@ class EscalationService:
         if dry_run:
             return self._dry_run(eligible, now, count)
         tally = _Tally(eligible_sources=len(eligible))
+        tally.deadline = now + timedelta(seconds=self._settings.pass_budget_s)
         try:
-            self._drop_overflow(tally, now)
-            entries = (
-                self._escalations.queue(source_ids=eligible, now=now, limit=count)
-                if eligible
-                else []
-            )
-            for entry in entries:
-                if self._should_stop():
-                    tally.stopped = True
-                    break
-                if self._cycle(entry, overview.alert_min_confidence, tally) is _STOP:
-                    break
+            self._housekeeping(eligible, tally, now)
+            entries = self._servable(eligible, now, count, tally)
+            if entries and self._identify(tally, now) is _CONTINUE:
+                self._serve(entries, overview.alert_min_confidence, tally)
         except StorageError as exc:
             _LOG.warning("escalation stopped by a storage error: %s", exc.code)
             tally.storage_errors += 1
-        report = tally.report()
-        return report
+        if tally.contradicted:
+            _LOG.warning("llm_contradicts_prior=%d", tally.contradicted)
+        return tally.report()
+
+    def requeue_parked(self, limit: int | None = None) -> int:
+        """Send up to `limit` parked items (the longest parked first) back to the queue now,
+        instead of waiting for their time-to-live. Returns how many came back."""
+        count = self._batch(limit)
+        tally = _Tally()
+        for state in self._escalations.parked(before=None, limit=count):
+            self._requeue_one(state.item_id, tally)
+        return tally.requeued
 
     def _batch(self, limit: int | None) -> int:
         if limit is None:
@@ -311,17 +390,126 @@ class EscalationService:
             raise ValidationError(f"limit must be a whole number from 1 to {MAX_BATCH}")
         return limit
 
+    def _servable(
+        self, eligible: list[str], now: datetime, count: int, tally: _Tally
+    ) -> list[QueueEntry]:
+        if not eligible:
+            return []
+        if self._rests_until is not None and now < self._rests_until:
+            tally.backing_off = True
+            tally.unreachable = True
+            return []
+        return self._escalations.queue(source_ids=eligible, now=now, limit=count)
+
+    def _serve(self, entries: list[QueueEntry], alert_min: float, tally: _Tally) -> None:
+        for entry in entries:
+            if self._should_stop():
+                tally.stopped = True
+                return
+            if tally.deadline is not None and self._clock.now() >= tally.deadline:
+                tally.out_of_time = True
+                return
+            if self._cycle(entry, alert_min, tally) is _STOP:
+                return
+
     def _dry_run(self, eligible: list[str], now: datetime, count: int) -> EscalationReport:
+        """What a run would do, doing none of it: the items it would send (not those that settle
+        without a call), the cap, and the items a full queue would drop."""
         entries = (
             self._escalations.queue(source_ids=eligible, now=now, limit=count) if eligible else []
         )
+        sendable = [e for e in entries if self._needs_a_call(e.item_id)]
         used = self._escalations.calls_in_hour(hour_start(now))
         room = max(0, self._settings.hourly_cap - used)
+        waiting = self._escalations.queued_count(source_ids=eligible, now=now)
         return EscalationReport(
-            candidates=min(len(entries), room),
-            cap_reached=len(entries) > room,
+            candidates=min(len(sendable), room),
+            cap_reached=len(sendable) > room,
             eligible_sources=len(eligible),
+            pending_drops=max(0, waiting - self._settings.queue_max),
         )
+
+    def _needs_a_call(self, item_id: str) -> bool:
+        current = self._classifications.get(item_id)
+        item = self._items.get(item_id)
+        if current is None or not current.needs_llm or not self._eligible(item):
+            return False
+        return not (current.recycled_of is not None and self._already_judged(current.recycled_of))
+
+    # ---- housekeeping before the queue is served ----
+
+    def _housekeeping(self, eligible: list[str], tally: _Tally, now: datetime) -> None:
+        self._requeue_expired(tally, now)
+        if eligible:
+            self._release_orphans(eligible, tally)
+            self._drop_overflow(eligible, tally, now)
+
+    def _requeue_expired(self, tally: _Tally, now: datetime) -> None:
+        cutoff = now - timedelta(seconds=self._settings.parked_ttl_s)
+        for state in self._escalations.parked(before=cutoff, limit=SWEEP_PAGE):
+            self._requeue_one(state.item_id, tally)
+
+    def _requeue_one(self, item_id: str, tally: _Tally) -> None:
+        """A parked item goes back in the queue, behind the healthy ones, with a clean slate."""
+        with self._uow.transaction():
+            if not self._classifications.reopen(item_id, REQUEUE_PRIORITY):
+                return
+            self._escalations.clear_state(item_id)
+        tally.requeued += 1
+
+    def _release_orphans(self, eligible: list[str], tally: _Tally) -> None:
+        """Copies that wait for an original that will never be judged (purged, pruned, settled
+        without them, or from a source that is off) stop waiting: they are judged for themselves."""
+        for copy_id in self._escalations.orphaned_copies(source_ids=eligible, limit=SWEEP_PAGE):
+            with self._uow.transaction():
+                fresh = self._classifications.get(copy_id)
+                if fresh is None or not fresh.awaiting_original:
+                    continue
+                if not self._eligible(self._items.get(copy_id)):
+                    continue
+                original = (
+                    self._classifications.get(fresh.duplicate_of) if fresh.duplicate_of else None
+                )
+                priority = original.priority if original is not None else 0.0
+                near = original.item_id if original is not None else None
+                if self._classifications.settle(
+                    requeued_copy(fresh, near_of=near, priority=priority)
+                ):
+                    tally.released += 1
+
+    # ---- the judge: who is there, and when it rests ----
+
+    def _identify(self, tally: _Tally, now: datetime) -> bool:
+        """Before any item text is sent, check that the address answers like Ollama. A loopback
+        port can be held by any local process."""
+        if self._identified_until is not None and now < self._identified_until:
+            return _CONTINUE
+        try:
+            self._judge.identify()
+        except JudgeError as exc:
+            self._judge_down(exc.code, tally, now)
+            return _STOP
+        except Exception as exc:  # noqa: BLE001 - a broken adapter is a judge that is not there
+            _LOG.warning("the judge could not be identified: %s", type(exc).__name__)
+            self._judge_down(UNEXPECTED, tally, now)
+            return _STOP
+        self._identified_until = now + timedelta(seconds=IDENTITY_TTL_S)
+        return _CONTINUE
+
+    def _judge_down(self, code: str, tally: _Tally, now: datetime) -> None:
+        """A judge-level failure: the whole judge rests, doubling up to the cap."""
+        settings = self._settings
+        self._judge_failures += 1
+        delay = backoff_delay(self._judge_failures, settings.retry_base_s, settings.retry_cap_s)
+        self._rests_until = now + delay
+        self._identified_until = None
+        tally.unreachable = True
+        tally.error = code
+        _LOG.warning("the judge failed (%s); it rests for %d s", code, int(delay.total_seconds()))
+
+    def _judge_up(self) -> None:
+        self._judge_failures = 0
+        self._rests_until = None
 
     # ---- one item at a time ----
 
@@ -336,7 +524,7 @@ class EscalationService:
                 return
         try:
             now = self._clock.now()
-            span = 2 * self._settings.call_deadline_s + LEASE_MARGIN_S
+            span = self._settings.longest_judgment_s + LEASE_MARGIN_S
             taken = self._escalations.try_lease(self._holder, now, now + timedelta(seconds=span))
             if not taken:
                 yield False
@@ -367,6 +555,16 @@ class EscalationService:
         except NotFoundError:
             return False
 
+    def _request(self, current: Classification, item: Item) -> JudgeRequest:
+        """The question for one item: its text cleaned, bounded and fitted to the context window,
+        and the evidence found so far. Raises `ValidationError` for an item it cannot describe."""
+        settings = self._settings
+        text, truncated = prompt_text(item.title, item.text, settings.max_prompt_chars)
+        request = JudgeRequest(current.item_id, text, truncated, evidence_of(current))
+        return fit_request(
+            request, num_ctx=settings.num_ctx, output_tokens=settings.max_output_tokens
+        )
+
     def _judge_one(self, item_id: str, alert_min: float, tally: _Tally) -> bool:
         current = self._classifications.get(item_id)
         item = self._items.get(item_id)
@@ -375,37 +573,55 @@ class EscalationService:
             return _CONTINUE
         assert item is not None  # _eligible said so
         if current.recycled_of is not None and self._already_judged(current.recycled_of):
-            return self._settle_without_call(current, alert_min, tally)
-        if not self._escalations.reserve_call(
-            hour_start(self._clock.now()), self._settings.hourly_cap
-        ):
+            return self._settle_without_call(current, item, alert_min, tally)
+        try:
+            request = self._request(current, item)
+        except DomainError as exc:
+            # The item cannot be described to the judge: no call, no budget, and it is the
+            # item's own fault.
+            _LOG.warning("%s cannot be put to the judge: %s", item_id, exc.code)
+            return self._fail_item(current, BAD_REQUEST, tally, called=False)
+        hour = hour_start(self._clock.now())
+        if not self._escalations.reserve_call(hour, self._settings.hourly_cap):
             tally.cap_reached = True
             return _STOP
-        text, truncated = prompt_text(item.title, item.text, self._settings.max_prompt_chars)
-        request = JudgeRequest(item_id, text, truncated, evidence_of(current))
         try:
-            answer = self._ask(request)
+            answer = self._ask(request, tally)
+        except _Interrupted as stop:
+            tally.stopped = stop.stopped
+            tally.out_of_time = not stop.stopped
+            return _STOP
         except JudgeError as exc:
-            if exc.kind is JudgeErrorKind.INVALID_OUTPUT:
-                return self._settle_invalid(item_id, exc, alert_min, tally)
-            return self._fail(current, exc.code, exc.item_specific, tally)
+            return self._on_error(current, item, exc, hour, alert_min, tally)
         except Exception as exc:  # noqa: BLE001 - one broken call must not stall the queue
             _LOG.warning("the judge raised an unexpected error: %s", type(exc).__name__)
-            return self._fail(current, UNEXPECTED, True, tally)
-        return self._settle_answer(item_id, answer, alert_min, tally)
+            return self._on_trouble(current, UNEXPECTED, tally)
+        self._judge_up()
+        return self._settle_answer(current, item, answer, alert_min, tally)
 
-    def _ask(self, request: JudgeRequest) -> JudgeResponse:
-        """One question, asked again ONCE if the answer breaks the schema (RC-9)."""
+    def _ask(self, request: JudgeRequest, tally: _Tally) -> JudgeResponse:
+        """One question, asked again ONCE if the answer breaks the schema (RC-9): with a
+        corrective message that names the class of the problem and another seed. A stop or the
+        pass budget is honoured between the two calls."""
         try:
             return self._judge.judge(request)
         except JudgeError as exc:
             if exc.kind is not JudgeErrorKind.INVALID_OUTPUT:
                 raise
-        return self._judge.judge(request)
+            first = exc
+        if self._should_stop():
+            raise _Interrupted(stopped=True)
+        if tally.deadline is not None and self._clock.now() >= tally.deadline:
+            raise _Interrupted(stopped=False)
+        return self._judge.judge(replace(request, attempt=1, previous_problem=first.problem))
 
     def _already_judged(self, original_id: str) -> bool:
         original = self._classifications.get(original_id)
         return original is not None and original.stage is Stage.LLM
+
+    def _judge_has_answered(self, now: datetime, tally: _Tally) -> bool:
+        """The judge gave a valid verdict for some item in this pass or in the last hour."""
+        return tally.judged > 0 or self._escalations.judged_since(now - SUCCESS_WINDOW) > 0
 
     # ---- writing the outcome (one short transaction each) ----
 
@@ -417,18 +633,23 @@ class EscalationService:
         return fresh
 
     def _settle_answer(
-        self, item_id: str, answer: JudgeResponse, alert_min: float, tally: _Tally
+        self,
+        current: Classification,
+        item: Item,
+        answer: JudgeResponse,
+        alert_min: float,
+        tally: _Tally,
     ) -> bool:
         with self._uow.transaction():
-            fresh = self._still_waiting(item_id)
-            new = judged(fresh, answer, alert_min) if fresh is not None else None
+            fresh = self._still_waiting(current.item_id)
+            now = self._clock.now()
+            new = judged(fresh, answer, alert_min, now) if fresh is not None else None
             if fresh is None or new is None or not self._classifications.settle(new):
                 tally.skipped += 1
                 return _CONTINUE
-            now = self._clock.now()
             self._escalations.add_judgment(
                 Judgment(
-                    item_id=item_id,
+                    item_id=current.item_id,
                     outcome="judged",
                     label=answer.label.value,
                     confidence=answer.confidence,
@@ -444,25 +665,29 @@ class EscalationService:
                     judged_at=now,
                 )
             )
-            self._escalations.clear_state(item_id)
-            copies = self._settle_copies(new, answer, alert_min, now)
+            self._escalations.clear_state(current.item_id)
+            copies = self._settle_copies(new, item, fresh.priority, answer, alert_min, now)
+        if contradicts_prior(fresh, answer):
+            tally.contradicted += 1
         tally.judged += 1
         tally.reused += copies
         tally.streak = 0
         return _CONTINUE
 
     def _settle_invalid(
-        self, item_id: str, exc: JudgeError, alert_min: float, tally: _Tally
+        self, current: Classification, item: Item, exc: JudgeError, alert_min: float, tally: _Tally
     ) -> bool:
         with self._uow.transaction():
-            fresh = self._still_waiting(item_id)
-            if fresh is None or not self._classifications.settle(left_unjudged(fresh)):
+            fresh = self._still_waiting(current.item_id)
+            now = self._clock.now()
+            if fresh is None or not self._classifications.settle(
+                left_unjudged(fresh, now, "invalid")
+            ):
                 tally.skipped += 1
                 return _CONTINUE
-            now = self._clock.now()
             self._escalations.add_judgment(
                 Judgment(
-                    item_id=item_id,
+                    item_id=current.item_id,
                     outcome="invalid",
                     label=None,
                     confidence=None,
@@ -478,59 +703,99 @@ class EscalationService:
                     judged_at=now,
                 )
             )
-            self._escalations.clear_state(item_id)
-            copies = self._settle_copies(left_unjudged(fresh), None, alert_min, now, invalid=True)
-        _LOG.warning("the judge gave two invalid answers for %s", item_id)
+            self._escalations.clear_state(current.item_id)
+            copies = self._settle_copies(
+                left_unjudged(fresh, now, "invalid"),
+                item,
+                fresh.priority,
+                None,
+                alert_min,
+                now,
+                reason="invalid",
+            )
+        _LOG.warning("the judge gave two invalid answers for %s", current.item_id)
         tally.invalid += 1
         tally.reused += copies
         tally.streak = 0
+        self._judge_up()
         return _CONTINUE
 
     def _settle_without_call(
-        self, current: Classification, alert_min: float, tally: _Tally
+        self, current: Classification, item: Item, alert_min: float, tally: _Tally
     ) -> bool:
         """A recycled copy of an item that was already judged: it keeps the verdict of the cascade
         and leaves the queue without a call (as the cascade does for a copy it classifies later)."""
         with self._uow.transaction():
             fresh = self._still_waiting(current.item_id)
-            if fresh is None or not self._classifications.settle(_out_of_queue(fresh)):
+            now = self._clock.now()
+            if fresh is None:
+                tally.skipped += 1
+                return _CONTINUE
+            settled = replace(
+                fresh, needs_llm=False, priority=0.0, settled_at=now, settle_reason="duplicate"
+            )
+            if not self._classifications.settle(settled):
                 tally.skipped += 1
                 return _CONTINUE
             self._escalations.clear_state(current.item_id)
-            now = self._clock.now()
-            self._settle_copies(_out_of_queue(fresh), None, alert_min, now)
+            self._settle_copies(
+                settled,
+                item,
+                fresh.priority,
+                None,
+                alert_min,
+                now,
+                reason="duplicate",
+                unjudged=False,
+            )
         tally.reused += 1
         return _CONTINUE
 
     def _settle_copies(
         self,
         original: Classification,
+        original_item: Item,
+        original_priority: float,
         answer: JudgeResponse | None,
         alert_min: float,
         now: datetime,
         *,
-        invalid: bool = False,
+        reason: str = "duplicate",
+        unjudged: bool = True,
     ) -> int:
-        """Settle the exact copies that wait for `original`: with its judged verdict if there is
-        one, else release them with the provisional verdict they have. Inside the caller's
-        transaction. Returns how many were settled."""
-        settled = 0
+        """Settle the exact copies that wait for `original`, inside the caller's transaction. A
+        copy whose item is gone, unclassified or from a source that is off now (PC-2) is left
+        alone. With a judged verdict, a copy whose text is IDENTICAL to the original's takes it;
+        one that differs is queued to be judged for itself. Without a verdict (invalid, parked,
+        dropped) the copy keeps its provisional one and stops waiting. Returns how many copies took
+        a verdict from the original."""
+        reused = 0
         for copy in self._classifications.awaiting(original.item_id):
-            if answer is not None:
-                update = reused_by_duplicate(copy, original, alert_min)
+            copy_item = self._items.get(copy.item_id)
+            if not self._eligible(copy_item):
+                continue
+            assert copy_item is not None  # _eligible said so
+            shares = answer is not None and _same_text(original_item, copy_item)
+            if answer is not None and not shares:
+                update = requeued_copy(copy, near_of=original.item_id, priority=original_priority)
+            elif answer is not None:
+                update = reused_by_duplicate(copy, original, alert_min, now)
             else:
-                update = released_duplicate(copy)
+                update = released_duplicate(copy, now, reason)
+                if not unjudged:
+                    update = replace(update, low_confidence=copy.low_confidence)
             if not self._classifications.settle(update):
                 continue
-            settled += 1
-            if answer is None and not invalid:
-                continue  # nothing was judged: no record to keep
+            if answer is not None and shares:
+                reused += 1
+            if (answer is None and reason != "invalid") or (answer is not None and not shares):
+                continue  # nothing was judged for this copy: no record to keep
             self._escalations.add_judgment(
                 Judgment(
                     item_id=copy.item_id,
                     outcome="reused",
                     label=answer.label.value if answer else None,
-                    confidence=answer.confidence if answer else None,
+                    confidence=original.confidence if answer else None,
                     rationale=update.rationale if answer else None,
                     evidence=answer.evidence if answer else (),
                     llm_model=answer.model if answer else None,
@@ -543,25 +808,92 @@ class EscalationService:
                     judged_at=now,
                 )
             )
-        return settled
+        return reused
 
     # ---- failures ----
 
-    def _fail(self, current: Classification, code: str, item_specific: bool, tally: _Tally) -> bool:
-        """The call failed. Remember it with a backoff; park the item if it keeps failing for
-        reasons that may be its own; end the batch if the judge itself is the problem."""
+    def _on_error(
+        self,
+        current: Classification,
+        item: Item,
+        exc: JudgeError,
+        hour: datetime,
+        alert_min: float,
+        tally: _Tally,
+    ) -> bool:
+        """The call failed. A judge-level failure is the server's; an invalid answer settles the
+        item only while the judge answers other items; anything else may be the item's."""
+        now = self._clock.now()
+        if exc.kind is JudgeErrorKind.INVALID_OUTPUT:
+            if self._judge_has_answered(now, tally):
+                return self._settle_invalid(current, item, exc, alert_min, tally)
+            # Nothing valid has come out of the judge for anyone: a sick judge, not a bad item.
+            return self._judge_failed(current, exc.code, tally, refund=None)
+        if exc.judge_level:
+            nowhere = exc.kind in _NOT_THERE
+            return self._judge_failed(current, exc.code, tally, refund=hour, behind=not nowhere)
+        return self._on_trouble(current, exc.code, tally)
+
+    def _on_trouble(self, current: Classification, code: str, tally: _Tally) -> bool:
+        """A failure that may be the item's: it counts against the item only while the judge is
+        answering other items; otherwise it is the judge's."""
+        if self._judge_has_answered(self._clock.now(), tally):
+            return self._fail_item(current, code, tally)
+        return self._judge_failed(current, code, tally, refund=None)
+
+    def _judge_failed(
+        self,
+        current: Classification,
+        code: str,
+        tally: _Tally,
+        *,
+        refund: datetime | None,
+        behind: bool = True,
+    ) -> bool:
+        """A failure of the judge: give the reservation back when the model gave nothing, put the
+        item behind the others (it is not counted against it), rest the whole judge and end the
+        batch. The item waits one step longer than the judge rests, so that when the judge is
+        back the others are served first, not the same item again; when nothing is there at all
+        (`behind` off) the item says nothing and waits as long as the judge does."""
+        now = self._clock.now()
+        if refund is not None:
+            self._escalations.release_call(refund)
+        before = self._escalations.get_state(current.item_id)
+        attempts = (before.attempts if before else 0) + 1
+        failures = before.item_failures if before else 0
+        step = attempts + 1 if behind else attempts
+        wait = now + backoff_delay(step, self._settings.retry_base_s, self._settings.retry_cap_s)
+        self._escalations.put_state(
+            EscalationState(
+                current.item_id, "escalation_failed", attempts, wait, code, now, failures
+            )
+        )
+        tally.failed += 1
+        self._judge_down(code, tally, now)
+        return _STOP
+
+    def _fail_item(
+        self, current: Classification, code: str, tally: _Tally, *, called: bool = True
+    ) -> bool:
+        """The call failed for a reason that may be the item's own and the judge is answering
+        other items. Remember it with a backoff; park the item after `max_failures`."""
         settings = self._settings
         now = self._clock.now()
         before = self._escalations.get_state(current.item_id)
         attempts = (before.attempts if before else 0) + 1
-        failures = (before.item_failures if before else 0) + int(item_specific)
+        failures = (before.item_failures if before else 0) + 1
         _LOG.warning("escalation of %s failed: %s", current.item_id, code)
         if failures >= settings.max_failures:
             with self._uow.transaction():
                 fresh = self._classifications.get(current.item_id)
                 if fresh is not None and fresh.needs_llm:
-                    self._classifications.settle(left_unjudged(fresh))
-                    self._settle_copies(left_unjudged(fresh), None, 0.0, now)
+                    parked = left_unjudged(fresh, now, "parked")
+                    self._classifications.settle(parked)
+                    item = self._items.get(current.item_id)
+                    if item is not None:
+                        self._settle_copies(
+                            parked, item, fresh.priority, None, 0.0, now, reason="parked"
+                        )
                 self._escalations.put_state(
                     EscalationState(current.item_id, "parked", attempts, None, code, now, failures)
                 )
@@ -574,35 +906,74 @@ class EscalationService:
                 )
             )
             tally.failed += 1
+        if not called:
+            return _CONTINUE
         tally.streak += 1
-        if not item_specific:
-            tally.unreachable = True
-            return _STOP
         return _STOP if tally.streak >= BREAKER else _CONTINUE
 
     # ---- the queue bound ----
 
-    def _drop_overflow(self, tally: _Tally, now: datetime) -> None:
-        """More than `queue_max` waiting: drop the OLDEST beyond it, keep their CPU verdict, count
-        them. Their waiting copies are released."""
+    def _drop_overflow(self, eligible: list[str], tally: _Tally, now: datetime) -> None:
+        """More than `queue_max` items could be served: drop the excess. A source over its fair
+        share loses its own excess first (the lowest priority, then the oldest of it), so one
+        source cannot crowd out the others; if the queue is still over, the lowest priority goes
+        first, the oldest among equals. Their CPU verdicts stay, they are counted, and their
+        waiting copies are released."""
+        excess = (
+            self._escalations.queued_count(source_ids=eligible, now=now) - self._settings.queue_max
+        )
+        if excess <= 0:
+            return
+        cap = self._settings.source_cap
+        per_source = self._escalations.queued_by_source(source_ids=eligible, now=now)
+        for source_id in sorted(per_source):
+            over = per_source[source_id] - cap
+            if over > 0 and excess > 0:
+                excess -= self._drop(eligible, now, tally, min(over, excess), source_id)
+        if excess > 0:
+            self._drop(eligible, now, tally, excess, None)
+
+    def _drop(
+        self, eligible: list[str], now: datetime, tally: _Tally, wanted: int, source_id: str | None
+    ) -> int:
+        """Drop up to `wanted` items, a page at a time. Returns how many were dropped."""
+        dropped = 0
         for _ in range(MAX_DROP_PAGES):
-            excess = self._escalations.queued_count() - self._settings.queue_max
-            if excess <= 0:
-                return
-            for item_id in self._escalations.oldest_queued(min(excess, DROP_PAGE)):
-                with self._uow.transaction():
-                    fresh = self._classifications.get(item_id)
-                    if fresh is None or not fresh.needs_llm:
-                        continue
-                    self._classifications.settle(left_unjudged(fresh))
-                    self._escalations.put_state(
-                        EscalationState(item_id, "dropped", 0, None, "queue_full", now, 0)
-                    )
-                    self._settle_copies(left_unjudged(fresh), None, 0.0, now)
-                tally.dropped += 1
+            if dropped >= wanted:
+                return dropped
+            ids = self._escalations.drop_candidates(
+                source_ids=eligible,
+                now=now,
+                limit=min(wanted - dropped, DROP_PAGE),
+                source_id=source_id,
+            )
+            if not ids:
+                return dropped
+            done = sum(self._drop_one(item_id, now) for item_id in ids)
+            tally.dropped += done
+            dropped += done
+            if done == 0:
+                return dropped
         _LOG.warning("the queue is still over its bound after %d pages of drops", MAX_DROP_PAGES)
+        return dropped
+
+    def _drop_one(self, item_id: str, now: datetime) -> bool:
+        with self._uow.transaction():
+            fresh = self._classifications.get(item_id)
+            if fresh is None or not fresh.needs_llm:
+                return False
+            dropped = left_unjudged(fresh, now, "parked")
+            if not self._classifications.settle(dropped):
+                return False
+            self._escalations.put_state(
+                EscalationState(item_id, "dropped", 0, None, "queue_full", now, 0)
+            )
+            item = self._items.get(item_id)
+            if item is not None:
+                self._settle_copies(dropped, item, fresh.priority, None, 0.0, now, reason="parked")
+        return True
 
 
-def _out_of_queue(verdict: Classification) -> Classification:
-    """The verdict as it is, out of the queue, with nothing else changed."""
-    return replace(verdict, needs_llm=False, priority=0.0)
+def _same_text(original: Item, copy: Item) -> bool:
+    """The copy may take a model's verdict only if its text is the original's to the byte."""
+    return text_identity(original.title, original.text) == text_identity(copy.title, copy.text)

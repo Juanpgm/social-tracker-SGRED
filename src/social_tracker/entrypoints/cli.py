@@ -615,7 +615,18 @@ def _render_escalation(report: EscalationReport, waiting: int) -> str:
         line += "; stopped on request"
     if report.busy:
         line += "; another worker holds the model, try again later"
-    return line
+    if report.out_of_time:
+        line += "; the time budget of the pass ran out, the rest waits for the next one"
+    extras = [
+        f"{report.requeued} parked item(s) back in the queue" if report.requeued else "",
+        f"{report.released} copy(ies) released from an original that is gone"
+        if report.released
+        else "",
+        f"{report.contradicted} no_risk answer(s) capped for contradicting earlier evidence"
+        if report.contradicted
+        else "",
+    ]
+    return "; ".join([line, *[e for e in extras if e]])
 
 
 @classify_app.command("escalate")
@@ -646,9 +657,12 @@ def classify_escalate(
     down leaves the CPU verdicts as they are and the items are tried again later with a growing
     delay. At most the hourly cap (SOCIAL_TRACKER_LLM_HOURLY_CAP) are judged per hour.
 
-    Exit status: 0 when it ran (also when nothing was waiting), 1 when the model server was not
-    reachable or a storage error stopped the run, 3 when no source is eligible so there was
-    nothing it could do."""
+    Exit status: 0 when it ran (also when nothing was waiting), 1 when a storage error stopped
+    the run or the model server failed after some items were judged, 3 when it could do nothing:
+    no source is eligible, or nothing could be judged because the model server was not reachable
+    (or is not Ollama, or is resting after a failure), another process holds the model, or the
+    run was stopped. `--dry-run` sends nothing: it counts the items that would be sent (not those
+    that settle without a call) and the items a full queue would drop."""
     stop = threading.Event()
     with _guard(), closing(build_llm(stop=stop)) as built:
         with stop_on_signals(stop.set):
@@ -661,6 +675,11 @@ def classify_escalate(
         typer.echo(f"dry run: {report.candidates} item(s) would be sent to the language model")
         if report.cap_reached:
             typer.echo("the hourly cap would stop the rest until the next hour")
+        if report.pending_drops:
+            typer.echo(
+                f"{report.pending_drops} item(s) would be dropped from the full queue "
+                "(the lowest priority first, the oldest among equals)"
+            )
         return
     typer.echo(_render_escalation(report, waiting))
     if report.storage_errors:
@@ -668,10 +687,14 @@ def classify_escalate(
         raise typer.Exit(EXIT_REFUSED)
     if report.unreachable:
         typer.echo(
-            "error: the language model server is not reachable or has no usable model "
-            "(see `social-tracker llm status`); the items stay queued and are tried again later",
+            "error: the language model server is not reachable, is not Ollama or has no usable "
+            "model (see `social-tracker llm status`); the items stay queued and are tried again "
+            "later",
             err=True,
         )
+    if report.nothing_could_be_judged:
+        raise typer.Exit(EXIT_NOTHING_ELIGIBLE)
+    if report.unreachable:
         raise typer.Exit(EXIT_REFUSED)
 
 
@@ -706,6 +729,8 @@ def _render_verdict(c: Classification) -> str:
         lines.append(f"near copy of: {c.near_of}")
     if c.recycled_of is not None:
         lines.append(f"recycled of: {c.recycled_of}")
+    if c.settle_reason is not None and c.settled_at is not None:
+        lines.append(f"settled: {c.settle_reason} at {c.settled_at.isoformat()}")
     lines += [
         f"priority: {c.priority:.4f}",
         f"catalog: {c.catalog_status}",
@@ -807,6 +832,8 @@ def _render_stats(stats: ClassificationStats, llm: EscalationCounts | None = Non
         f"low confidence: {stats.low_confidence}",
         f"duplicates: {stats.duplicates}",
         f"waiting for their original's judgment: {stats.awaiting_original}",
+        f"waiting for an original that is gone (released on the next pass): "
+        f"{stats.orphaned_awaiting}",
         f"near copies: {stats.near_duplicates}",
         f"recycled: {stats.recycled}",
         f"truncated: {stats.truncated}",
@@ -1018,6 +1045,28 @@ def llm_status() -> None:
     with _guard(), closing(build_llm()) as built:
         status = built.service.status()
     typer.echo(_render_llm_status(status))
+
+
+@llm_app.command("requeue-parked")
+def llm_requeue_parked(
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            "--limit",
+            min=1,
+            max=1000,
+            help="How many parked items to send back at most (default: SOCIAL_TRACKER_LLM_BATCH).",
+        ),
+    ] = None,
+) -> None:
+    """Put parked items (given up on after repeated failures) back in the queue now.
+
+    They come back by themselves after SOCIAL_TRACKER_LLM_PARKED_TTL_S (default 24 hours); this
+    command does not wait. They queue behind the healthy items, with a clean slate of failures,
+    and nothing is sent to the model by this command. Needs no running model server."""
+    with _guard(), closing(build_llm()) as built:
+        back = built.service.requeue_parked(limit)
+    typer.echo(f"{back} parked item(s) back in the queue")
 
 
 def _render_ping(result: PingResult) -> str:

@@ -57,7 +57,16 @@ Environment:
   `SOCIAL_TRACKER_LLM_HOURLY_CAP` (judgments per UTC hour, 1..100000, default 200),
   `SOCIAL_TRACKER_LLM_QUEUE_MAX` (items waiting; the oldest beyond it are dropped, default 2000),
   `SOCIAL_TRACKER_LLM_BATCH` (judged per worker pass, 1..1000, default 20),
-  `SOCIAL_TRACKER_LLM_MAX_FAILURES` (item-specific failures before an item is parked, default 3),
+  `SOCIAL_TRACKER_LLM_MAX_FAILURES` (failures that may be the item's own before it is parked,
+  default 3; a failure of the server never counts),
+  `SOCIAL_TRACKER_LLM_LOAD_TIMEOUT_S` (deadline of a call that has to load the model first,
+  1..1800, default 180), `SOCIAL_TRACKER_LLM_NUM_CTX` (context window sent to the server,
+  2560..262144, default 8192; the prompt is cut to fit it),
+  `SOCIAL_TRACKER_LLM_PASS_BUDGET_S` (wall-clock budget of one escalation pass, 1..86400, default
+  120), `SOCIAL_TRACKER_LLM_PARKED_TTL_S` (a parked item re-enters the queue after this long,
+  60..2592000, default 86400) and `SOCIAL_TRACKER_LLM_SOURCE_SHARE` (the share of the queue bound
+  one source may hold when the queue overflows, above 0 up to 1, at most four decimals, default
+  0.25),
   `SOCIAL_TRACKER_LLM_RETRY_BASE_S` and `SOCIAL_TRACKER_LLM_RETRY_CAP_S` (backoff after a failed
   call: 60 doubling up to 3600) and `SOCIAL_TRACKER_LLM_PROMPT_CHARS` (item text longer than this
   is read at both ends, 100..100000, default 6000). A blank value means the default.
@@ -149,6 +158,11 @@ LLM_MAX_FAILURES_ENV = "SOCIAL_TRACKER_LLM_MAX_FAILURES"
 LLM_RETRY_BASE_ENV = "SOCIAL_TRACKER_LLM_RETRY_BASE_S"
 LLM_RETRY_CAP_ENV = "SOCIAL_TRACKER_LLM_RETRY_CAP_S"
 LLM_PROMPT_CHARS_ENV = "SOCIAL_TRACKER_LLM_PROMPT_CHARS"
+LLM_LOAD_TIMEOUT_ENV = "SOCIAL_TRACKER_LLM_LOAD_TIMEOUT_S"
+LLM_NUM_CTX_ENV = "SOCIAL_TRACKER_LLM_NUM_CTX"
+LLM_PASS_BUDGET_ENV = "SOCIAL_TRACKER_LLM_PASS_BUDGET_S"
+LLM_PARKED_TTL_ENV = "SOCIAL_TRACKER_LLM_PARKED_TTL_S"
+LLM_SOURCE_SHARE_ENV = "SOCIAL_TRACKER_LLM_SOURCE_SHARE"
 CATALOG_FETCH_LIMITS = FetchLimits(
     timeout_s=10.0, deadline_s=20.0, max_bytes=4 * 1024 * 1024, max_redirects=2
 )
@@ -459,6 +473,16 @@ def _model_setting(env: Mapping[str, str], name: str, default: str | None) -> st
     return text
 
 
+def _share_setting(env: Mapping[str, str], name: str, default: float) -> float:
+    """A share above 0 and up to 1, at most four decimals (blank or absent: `default`)."""
+    text = env.get(name, "").strip()
+    if not text:
+        return default
+    if not _THRESHOLD.fullmatch(text) or not 0 < float(text) <= 1:
+        raise ValidationError(f"{name} must be a number above 0 up to 1 (at most four decimals)")
+    return float(text)
+
+
 def parse_llm_settings(env: Mapping[str, str]) -> LlmSettings:
     """The LLM escalation settings from the environment (blank or absent: the defaults). The
     address must be the loopback one: anything else stops the start."""
@@ -493,6 +517,15 @@ def parse_llm_settings(env: Mapping[str, str]) -> LlmSettings:
         retry_base_s=retry_base,
         retry_cap_s=retry_cap,
         max_failures=_bounded(env, LLM_MAX_FAILURES_ENV, defaults.max_failures, 1, 100),
+        load_deadline_s=float(
+            _bounded(env, LLM_LOAD_TIMEOUT_ENV, int(defaults.load_deadline_s), 1, 1800)
+        ),
+        num_ctx=_bounded(env, LLM_NUM_CTX_ENV, defaults.num_ctx, 2560, 262_144),
+        pass_budget_s=float(
+            _bounded(env, LLM_PASS_BUDGET_ENV, int(defaults.pass_budget_s), 1, 86_400)
+        ),
+        parked_ttl_s=_bounded(env, LLM_PARKED_TTL_ENV, defaults.parked_ttl_s, 60, 2_592_000),
+        source_share=_share_setting(env, LLM_SOURCE_SHARE_ENV, defaults.source_share),
     )
 
 
@@ -504,6 +537,9 @@ class _UnreachableJudge:
         raise JudgeError(JudgeErrorKind.UNREACHABLE, "this process has no model server client")
 
     def list_models(self) -> tuple[str, ...]:
+        raise JudgeError(JudgeErrorKind.UNREACHABLE, "this process has no model server client")
+
+    def identify(self) -> None:
         raise JudgeError(JudgeErrorKind.UNREACHABLE, "this process has no model server client")
 
 

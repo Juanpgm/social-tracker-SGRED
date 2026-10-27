@@ -5,61 +5,12 @@ server of `tests.llm.fake_ollama` on the loopback interface.
 """
 
 import re
-from datetime import timedelta
 
 import pytest
 
-from social_tracker import bootstrap
 from social_tracker.classification.domain import Label
-from social_tracker.entrypoints import cli as cli_module
-from social_tracker.llm.domain import JudgeError, JudgeErrorKind
-from social_tracker.persistence.db import Database
-from social_tracker.persistence.items_repo import SqliteItemRepository
-from tests.entrypoints.conftest import WHY, Cli
-from tests.items.factories import NOW, make_item
-from tests.llm.harness import ScriptedJudge
-
-PREDICTION = "Mañana habrá un temblor fuerte en Cali, compartan este mensaje"
-SECOND = "Dicen que mañana habrá un sismo muy fuerte en Cali, pásalo a todos"
-REPORT = "El SGC reportó un sismo de magnitud 4.2 en Cali"
-
-
-@pytest.fixture
-def judge(monkeypatch: pytest.MonkeyPatch) -> ScriptedJudge:
-    scripted = ScriptedJudge()
-    monkeypatch.setattr(
-        cli_module, "build_llm", lambda stop=None: bootstrap.build_llm(judge=scripted, stop=stop)
-    )
-    return scripted
-
-
-def seed(cli: Cli, *items) -> None:
-    with Database(cli.db_path) as db:
-        SqliteItemRepository(db).add_new(items)
-
-
-@pytest.fixture
-def queued(cli: Cli) -> Cli:
-    """A source with everything on and items classified, some of them waiting for the LLM."""
-    cli.add()
-    cli.ok("sources", "enable", "src_news", "--reason", WHY)
-    cli.ok("analysis", "on", "--source", "src_news", "--reason", WHY)
-    cli.ok("analysis", "on", "--reason", WHY)
-    seed(
-        cli,
-        make_item("a", title="Alerta", text=PREDICTION, published_at=NOW),
-        make_item("b", title="Alerta 2", text=SECOND, published_at=NOW + timedelta(hours=1)),
-        make_item("c", title="Sismo", text=REPORT, published_at=NOW + timedelta(hours=2)),
-    )
-    cli.ok("classify", "run")
-    return cli
-
-
-def waiting(cli: Cli) -> int:
-    match = re.search(r"queued for the LLM: (\d+)", cli.ok("classify", "stats").stdout)
-    assert match is not None
-    return int(match.group(1))
-
+from social_tracker.llm.domain import PROMPT_VERSION, JudgeError, JudgeErrorKind
+from tests.entrypoints.conftest import WHY, Cli, waiting
 
 # ---- classify escalate ----
 
@@ -112,21 +63,23 @@ def test_with_global_analysis_off_nothing_is_sent(queued: Cli, judge):
     assert judge.calls == 0
 
 
-def test_a_judge_that_is_down_is_exit_one_and_the_items_are_kept_for_later(queued: Cli, judge):
+def test_a_judge_that_is_down_is_exit_three_and_the_items_are_kept_for_later(queued: Cli, judge):
     judge.default = JudgeError(JudgeErrorKind.UNREACHABLE)
     before = waiting(queued)
     result = queued("classify", "escalate")
-    assert result.exit_code == 1
+    assert result.exit_code == 3  # nothing could be judged: the judge is not there
     assert "not reachable" in result.stderr
     assert "1 failed" in result.stdout
     assert waiting(queued) == before  # still queued, with a backoff
 
 
 def test_invalid_answers_are_reported_and_leave_the_cpu_verdicts(queued: Cli, judge):
-    judge.default = JudgeError(JudgeErrorKind.INVALID_OUTPUT, raw_output="garbage")
-    result = queued.ok("classify", "escalate", "--limit", "1")
+    garbage = JudgeError(JudgeErrorKind.INVALID_OUTPUT, raw_output="garbage")
+    # the judge answers the first item, so the next one's double failure is that item's own
+    judge.script.extend([None, garbage, garbage])
+    result = queued.ok("classify", "escalate", "--limit", "2")
     assert "1 invalid" in result.stdout
-    shown = queued.ok("classify", "show", judge.requests[0].item_id).stdout
+    shown = queued.ok("classify", "show", judge.requests[1].item_id).stdout
     assert "stage: rules" in shown
     assert "llm: two invalid answers" in shown
 
@@ -153,7 +106,7 @@ def test_show_names_the_model_and_the_prompt_version_of_a_judged_item(queued: Cl
     queued.ok("classify", "escalate", "--limit", "1")
     item = judge.requests[0].item_id
     shown = queued.ok("classify", "show", item).stdout
-    assert "llm: judged by st-gemma4-e4b (prompt judge-1)" in shown
+    assert f"llm: judged by st-gemma4-e4b (prompt {PROMPT_VERSION})" in shown
     assert "label: no_risk" in shown
 
 
@@ -263,8 +216,14 @@ def test_status_and_ping_over_a_real_loopback_socket(queued: Cli):
     }
     with FakeOllama() as server:
         server.script.default = None
+        banner = reply(200, "Ollama is running")  # who is there, asked before anything else
         server.script.steps.extend(
-            [reply(200, {"models": [{"name": "st-gemma4-e4b:latest"}]}), reply(200, chat)]
+            [
+                banner,
+                reply(200, {"models": [{"name": "st-gemma4-e4b:latest"}]}),
+                banner,
+                reply(200, chat),
+            ]
         )
         env = {"SOCIAL_TRACKER_LLM_BASE_URL": server.url}
         status = queued.ok("llm", "status", env=env).stdout
@@ -272,5 +231,5 @@ def test_status_and_ping_over_a_real_loopback_socket(queued: Cli):
         assert "reachable: yes" in status
         assert "missing: st-qwen35-4b" in status
         assert "ok: st-gemma4-e4b answered" in ping
-        assert [r.path for r in server.requests] == ["/api/tags", "/api/chat"]
+        assert [r.path for r in server.requests] == ["/", "/api/tags", "/", "/api/chat"]
         assert Label.NO_RISK.value in ping

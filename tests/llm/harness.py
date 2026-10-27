@@ -12,9 +12,11 @@ from typing import Any
 from social_tracker.classification.domain import Classification, ClassifierSettings
 from social_tracker.items.domain import Item, ItemStatus
 from social_tracker.llm.domain import (
+    PROMPT_VERSION,
     JudgeError,
     JudgeRequest,
     JudgeResponse,
+    Judgment,
     LlmSettings,
 )
 from social_tracker.llm.service import EscalationService
@@ -36,6 +38,8 @@ class ScriptedJudge:
         self.requests: list[JudgeRequest] = []
         self.on_call: Callable[[JudgeRequest], None] | None = None
         self.models: tuple[str, ...] | Exception = ("st-gemma4-e4b:latest", "st-qwen35-4b:latest")
+        self.identity: Exception | None = None  # what `identify` raises, if anything
+        self.identified = 0
         self._lock = threading.Lock()
         self.in_flight = 0
         self.max_in_flight = 0
@@ -64,6 +68,11 @@ class ScriptedJudge:
         if isinstance(self.models, Exception):
             raise self.models
         return self.models
+
+    def identify(self) -> None:
+        self.identified += 1
+        if self.identity is not None:
+            raise self.identity
 
     @property
     def calls(self) -> int:
@@ -143,6 +152,29 @@ class LlmWorld:
 
     def escalate(self, **kwargs: Any):
         return self.service.escalate(**kwargs)
+
+    def prime_success(self, n: int = 9000) -> None:
+        """Record that the judge answered some other item a moment ago: from then on a failure
+        that may be the item's own counts against the item (it does not while the judge answers
+        nobody)."""
+        self.escalations.add_judgment(
+            Judgment(
+                item_id=f"itm_{n:08d}",
+                outcome="judged",
+                label="no_risk",
+                confidence=0.9,
+                rationale="an earlier judgment",
+                evidence=(),
+                llm_model="st-gemma4-e4b",
+                prompt_version=PROMPT_VERSION,
+                raw_output=None,
+                prior_label="unintentional_rumor",
+                prior_confidence=0.5,
+                prior_stage="rules",
+                reused_from=None,
+                judged_at=self.clock.now(),
+            )
+        )
 
     def close(self) -> None:
         self.base.close()

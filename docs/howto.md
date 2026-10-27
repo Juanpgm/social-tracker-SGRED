@@ -82,7 +82,10 @@ stages stay as they are.
 **Privacy.** The text of an item is sent only to the address in `SOCIAL_TRACKER_LLM_BASE_URL`, and
 that address must be `http://127.0.0.1` or `http://localhost` (with an optional port); the
 application refuses to start with any other. Nothing is sent to a cloud service, no proxy is
-used and no redirect is followed.
+used and no redirect is followed. A loopback port can be held by any local program, so the
+application first asks the address who it is (Ollama answers `Ollama is running`) and sends
+nothing to something that does not say so; keep your own port for Ollama and run nothing else
+there.
 
 **Run Ollama.** Install it from [ollama.com](https://ollama.com) and start the server (it listens
 on `127.0.0.1:11434` by default). The models are large: on Windows, if `C:` is short of space,
@@ -91,7 +94,9 @@ move them to another drive by setting the environment variable `OLLAMA_MODELS` (
 they were unless you move the folder.
 
 **Models.** The default judge is `st-gemma4-e4b`; if it is not installed or cannot be loaded,
-`st-qwen35-4b` is tried once (a Qwen model is told not to think). Both names, and the rest of the
+`st-qwen35-4b` is tried once (every model is told not to think; a model that rejects that is asked
+again without it). The first call after the server unloaded the model has to load it again and gets
+a longer deadline (`SOCIAL_TRACKER_LLM_LOAD_TIMEOUT_S`, 180 seconds). Both names, and the rest of the
 settings, are the `SOCIAL_TRACKER_LLM_*` variables of the README. The server frees the GPU 300
 seconds after the last call (`SOCIAL_TRACKER_LLM_KEEP_ALIVE_S`).
 
@@ -106,6 +111,9 @@ seconds after the last call (`SOCIAL_TRACKER_LLM_KEEP_ALIVE_S`).
   `classify escalate` sends them once (the worker does it after every pass while global analysis is
   on).
 
-**If the server is down** nothing breaks: the CPU verdicts stay, the items are marked
-`escalation_failed` and are tried again after 60 seconds, then 120, doubling up to one hour.
+**If the server is down** nothing breaks: the CPU verdicts stay, the whole judge rests and the item
+it was asked about goes behind the others, for 60 seconds, then 120, doubling up to one hour; the
+hourly budget is not used up by a server that does not answer. Only a failure that may be the
+item's own (and only while the model is answering other items) counts towards parking it;
+a parked item returns to the queue after a day, or when you run `social-tracker llm requeue-parked`.
 `classify show ITEM_ID` prints when, and which model and prompt version judged an item.

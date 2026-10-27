@@ -9,13 +9,35 @@ from social_tracker.llm.domain import JudgeError, JudgeErrorKind, LlmSettings
 from tests.llm.harness import LlmWorld, error, memory_llm
 from tests.llm.support import NOW, response
 
+COPIES = "src_copies"
+MORE = "src_more"
+
+
+def ready(w: LlmWorld) -> None:
+    """Global analysis on, the news source and the source the copies come from (one source never
+    repeats its own text)."""
+    w.ready()
+    w.ready(COPIES)
+    w.ready(MORE)
+
 
 def waiting_dup(
-    w: LlmWorld, n: int, original: Classification, *, credibility: int = 3, **changes
+    w: LlmWorld,
+    n: int,
+    original: Classification,
+    *,
+    credibility: int = 3,
+    same_text: bool = True,
+    source: str = COPIES,
+    **changes,
 ) -> Classification:
-    """An exact copy that waits for its original (it took the original's provisional verdict)."""
+    """An exact copy that waits for its original (it took the original's provisional verdict).
+    The text is the original's to the byte unless `same_text` is off."""
+    text = w.items.get(original.item_id).text if same_text else None
     return w.seed(
         n,
+        text=text,
+        source=source,
         needs_llm=False,
         priority=0.0,
         duplicate_of=original.item_id,
@@ -34,10 +56,10 @@ def waiting_dup(
 
 def test_waiting_duplicates_take_the_judged_verdict_with_their_own_credibility_and_a_note():
     w = memory_llm()
-    w.ready()
+    ready(w)
     original = w.seed(1)
     low = waiting_dup(w, 2, original, credibility=1)
-    high = waiting_dup(w, 3, original, credibility=5)
+    high = waiting_dup(w, 3, original, credibility=5, source=MORE)
     w.judge.default = response(label=Label.RECYCLED_CONTENT, confidence=0.7)
     report = w.escalate()
     assert (report.judged, report.reused) == (1, 2)
@@ -63,7 +85,7 @@ def test_waiting_duplicates_take_the_judged_verdict_with_their_own_credibility_a
 
 def test_a_low_confidence_judgment_is_low_confidence_in_its_copies_too():
     w = memory_llm()
-    w.ready()
+    ready(w)
     original = w.seed(1)
     dup = waiting_dup(w, 2, original)
     w.judge.default = response(confidence=0.45)
@@ -73,18 +95,18 @@ def test_a_low_confidence_judgment_is_low_confidence_in_its_copies_too():
 
 def test_copies_of_another_original_are_untouched():
     w = memory_llm()
-    w.ready()
-    original = w.seed(1)
-    other = w.seed(2, needs_llm=False, priority=0.0, label=Label.NO_RISK, stage=Stage.LLM)
+    ready(w)
+    original = w.seed(1, priority=0.9)
+    other = w.seed(2, priority=0.1)  # still queued, but this run only reaches the first one
     stranger = waiting_dup(w, 3, other)
-    w.escalate()
+    w.escalate(limit=1)
     assert w.verdict(stranger).awaiting_original is True
     assert w.verdict(original).stage is Stage.LLM
 
 
 def test_copies_are_settled_in_the_same_transaction_as_the_judgment():
     w = memory_llm()
-    w.ready()
+    ready(w)
     original = w.seed(1)
     dup = waiting_dup(w, 2, original)
     real = w.escalations.add_judgment
@@ -102,33 +124,39 @@ def test_copies_are_settled_in_the_same_transaction_as_the_judgment():
 
 def test_an_original_judged_invalid_releases_its_copies_with_their_provisional_verdict():
     w = memory_llm()
-    w.ready()
+    ready(w)
     original = w.seed(1)
     dup = waiting_dup(w, 2, original)
+    w.prime_success()
     w.judge.script.extend([JudgeError(JudgeErrorKind.INVALID_OUTPUT)] * 2)
     report = w.escalate()
     assert (report.invalid, report.judged) == (1, 0)
     after = w.verdict(dup)
     assert after.awaiting_original is False
     assert (after.label, after.confidence) == (dup.label, dup.confidence)
+    # the same treatment as the original: low confidence, settled as invalid
+    assert (after.low_confidence, after.settle_reason) == (True, "invalid")
     j = w.escalations.get_judgment(dup.item_id)
     assert (j.outcome, j.label, j.reused_from) == ("reused", None, original.item_id)
 
 
 def test_an_original_that_is_parked_releases_its_copies():
     w = memory_llm(LlmSettings(max_failures=1))
-    w.ready()
+    ready(w)
     original = w.seed(1)
     dup = waiting_dup(w, 2, original)
+    w.prime_success()
     w.judge.default = error("timeout")
     assert w.escalate().parked == 1
-    assert w.verdict(dup).awaiting_original is False
+    after = w.verdict(dup)
+    assert after.awaiting_original is False
+    assert (after.low_confidence, after.settle_reason) == (True, "parked")
     assert w.escalations.get_judgment(dup.item_id) is None  # nothing was judged
 
 
 def test_an_original_that_fails_for_now_keeps_its_copies_waiting():
     w = memory_llm()
-    w.ready()
+    ready(w)
     original = w.seed(1)
     dup = waiting_dup(w, 2, original)
     w.judge.default = error("unreachable")
@@ -178,7 +206,7 @@ def seed_queue(w: LlmWorld, count: int) -> list[Classification]:
 @pytest.mark.parametrize(("queued", "dropped"), [(2, 0), (3, 0), (4, 1), (5, 2)])
 def test_the_oldest_beyond_the_queue_bound_are_dropped_and_counted(queued, dropped):
     w = memory_llm(LlmSettings(queue_max=3, hourly_cap=1))
-    w.ready()
+    ready(w)
     stored = seed_queue(w, queued)
     report = w.escalate()
     assert report.dropped == dropped
@@ -193,7 +221,7 @@ def test_the_oldest_beyond_the_queue_bound_are_dropped_and_counted(queued, dropp
 
 def test_the_ones_kept_after_a_drop_are_the_newest():
     w = memory_llm(LlmSettings(queue_max=2, hourly_cap=10))
-    w.ready()
+    ready(w)
     stored = seed_queue(w, 4)
     w.escalate()
     assert sorted(r.item_id for r in w.judge.requests) == sorted(s.item_id for s in stored[2:])
@@ -201,7 +229,7 @@ def test_the_ones_kept_after_a_drop_are_the_newest():
 
 def test_a_dropped_original_releases_its_copies():
     w = memory_llm(LlmSettings(queue_max=1, hourly_cap=10))
-    w.ready()
+    ready(w)
     oldest = w.seed(1, classified_at=NOW)
     w.seed(2, classified_at=NOW + timedelta(minutes=1))
     dup = waiting_dup(w, 3, oldest)
@@ -211,7 +239,7 @@ def test_a_dropped_original_releases_its_copies():
 
 def test_a_dropped_item_is_never_judged_later():
     w = memory_llm(LlmSettings(queue_max=1, hourly_cap=1))
-    w.ready()
+    ready(w)
     stored = seed_queue(w, 2)
     w.escalate()
     w.clock.advance(timedelta(hours=2))
@@ -221,7 +249,8 @@ def test_a_dropped_item_is_never_judged_later():
 
 def test_a_dry_run_drops_nothing():
     w = memory_llm(LlmSettings(queue_max=1))
-    w.ready()
+    ready(w)
     stored = seed_queue(w, 3)
-    assert w.escalate(dry_run=True).dropped == 0
+    report = w.escalate(dry_run=True)
+    assert (report.dropped, report.pending_drops) == (0, 2)  # it says what it would drop
     assert all(w.verdict(s).needs_llm for s in stored)
