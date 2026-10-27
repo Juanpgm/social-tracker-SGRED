@@ -429,10 +429,10 @@ def test_secret_references_round_trip_through_the_file_for_every_scheme(scheme: 
 
 
 def test_a_raw_token_in_secret_ref_is_rejected_without_echoing_it():
-    token = "ghp_" + "a1B2c3D4" * 4 + "wxyz"
-    (problem,) = problems_of(doc(payload("instagram", secret_ref=token)))
+    pasted = "ghp_" + "a1B2c3D4" * 4 + "wxyz"
+    (problem,) = problems_of(doc(payload("instagram", secret_ref=pasted)))
     assert problem.fields == ("secret_ref",)
-    assert token not in problem.message
+    assert pasted not in problem.message
 
 
 def test_instagram_without_a_secret_reference_is_rejected():
