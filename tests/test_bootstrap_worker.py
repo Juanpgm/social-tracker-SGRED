@@ -15,8 +15,9 @@ from social_tracker.bootstrap import (
     parse_private_hosts,
     parse_retention_days,
 )
-from social_tracker.collector.http_fetcher import DEFAULT_ALLOWED_PORTS, HttpFetcher
+from social_tracker.collector.http_fetcher import DEFAULT_ALLOWED_PORTS, FetchLimits, HttpFetcher
 from social_tracker.items.domain import DEFAULT_RETENTION_DAYS
+from social_tracker.persistence.worker_lock import WorkerLockHeldError
 from social_tracker.shared.errors import ValidationError
 from tests.actors import WHO
 from tests.collector.harness import FEED, FakeFetcher
@@ -134,6 +135,58 @@ def test_an_invalid_port_list_stops_the_start_before_the_database_is_opened(tmp_
     with pytest.raises(ValidationError):
         build_worker(env(tmp_path, **{ALLOWED_PORTS_ENV: "99999"}))
     assert not (tmp_path / "w.db").exists()
+
+
+# ---- one worker per database ----
+
+
+def test_a_second_worker_on_the_same_database_is_refused_while_the_first_runs(tmp_path):
+    first = build_worker(env(tmp_path))
+    try:
+        with pytest.raises(WorkerLockHeldError) as caught:
+            build_worker(env(tmp_path))
+        assert "another worker" in caught.value.message
+        assert first.container.control.global_analysis_enabled() is False  # the first one is fine
+    finally:
+        first.close()
+
+
+def test_the_lock_is_released_when_the_worker_container_is_closed(tmp_path):
+    build_worker(env(tmp_path)).close()
+    again = build_worker(env(tmp_path))
+    again.close()
+    again.close()  # closing twice is harmless
+
+
+def test_the_lock_is_released_when_wiring_the_worker_fails_after_it_was_taken(
+    tmp_path, monkeypatch
+):
+    def broken(*args, **kwargs):
+        raise RuntimeError("wiring bug")
+
+    monkeypatch.setattr("social_tracker.bootstrap.Worker", broken)
+    with pytest.raises(RuntimeError):
+        build_worker(env(tmp_path))
+    monkeypatch.undo()
+    build_worker(env(tmp_path)).close()  # neither the lock nor the database was left behind
+
+
+def test_a_worker_and_a_plain_container_can_share_the_database(tmp_path):
+    worker = build_worker(env(tmp_path))
+    try:
+        other = build_container(env(tmp_path))
+        other.close()
+    finally:
+        worker.close()
+
+
+def test_the_claim_timeout_covers_the_fetch_deadline_with_a_margin(tmp_path):
+    built = build_worker(env(tmp_path))
+    try:
+        timeout = built.worker._collector.claim_timeout_s
+        assert timeout >= FetchLimits().deadline_s + 60
+    finally:
+        built.close()
 
 
 # ---- the worker ----

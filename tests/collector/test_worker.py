@@ -85,6 +85,22 @@ def test_starting_without_the_reset_still_recovers_an_interrupted_collection(rig
     assert rig.world.state().state is CollectionState.BACKOFF
 
 
+def test_a_pass_leaves_a_collection_that_is_still_in_flight_alone(rig):
+    rig.world.ready()
+    rig.world.control.start_collection("src_news", actor="system:worker", reason="in flight")
+    summary = rig.worker.run_pass()
+    assert summary.results == ()
+    assert rig.world.state().state is CollectionState.COLLECTING
+
+
+def test_a_pass_recovers_a_collection_that_has_been_stuck_for_longer_than_any_fetch_can_last(rig):
+    rig.world.ready()
+    rig.world.control.start_collection("src_news", actor="system:worker", reason="stuck")
+    rig.world.clock.advance(timedelta(seconds=rig.world.collector.claim_timeout_s + 1))
+    rig.worker.run_pass()
+    assert rig.world.state().state is CollectionState.BACKOFF
+
+
 def test_starting_recovers_a_collection_a_crashed_worker_left_running(rig):
     rig.world.ready()
     rig.world.control.start_collection("src_news", actor="system:worker", reason="before crash")

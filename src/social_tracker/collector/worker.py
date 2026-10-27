@@ -86,7 +86,8 @@ class Worker:
 
     def start(self, reset_analysis: bool = True) -> None:
         """Reset global analysis to OFF (audited, unless `reset_analysis` is false) and recover
-        interrupted collections."""
+        interrupted collections. The caller holds the single-worker lock, so every collection
+        still marked as running belongs to a dead worker and is recovered at once."""
         if reset_analysis:
             change = self._control.set_global_analysis(False, actor=ACTOR, reason=STARTUP_REASON)
             _LOG.info(
@@ -94,7 +95,7 @@ class Worker:
             )
         else:
             _LOG.info("worker started; global analysis left as it is")
-        for source_id in self._collector.recover_interrupted():
+        for source_id in self._collector.recover_interrupted(force=True):
             _LOG.warning("recovered an interrupted collection of %s", source_id)
 
     def run(self, *, once: bool = False, reset_analysis: bool = True) -> PassSummary | None:

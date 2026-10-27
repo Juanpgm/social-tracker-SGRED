@@ -68,6 +68,10 @@ from social_tracker.sources.ports import SourceRepository
 
 ACTOR = "system:worker"
 INTERRUPTED = "interrupted collection"
+# A claim older than this is a dead one: longer than a fetch can last (its deadline) plus parsing
+# and storing. The composition root derives the value from the fetcher's real deadline.
+DEFAULT_CLAIM_TIMEOUT_S = 120.0
+_STARTED_EVENT = "collection_started"
 _LOG = logging.getLogger("social_tracker.collector")
 
 
@@ -125,7 +129,16 @@ class CollectorService:
         clock: Clock,
         *,
         jitter: Callable[[float], float] = _no_jitter,
+        claim_timeout_s: float = DEFAULT_CLAIM_TIMEOUT_S,
     ) -> None:
+        if (
+            isinstance(claim_timeout_s, bool)
+            or not isinstance(claim_timeout_s, int | float)
+            or not math.isfinite(claim_timeout_s)
+            or claim_timeout_s <= 0
+        ):
+            raise ValueError("claim_timeout_s must be a positive, finite number")
+        self.claim_timeout_s = float(claim_timeout_s)
         self._sources = sources
         self._control = control
         self._repo = control_repo
@@ -283,17 +296,34 @@ class CollectorService:
         now = self._clock.now()
         return [s.id for s in sources if is_due(s, states.get(s.id), fetches.get(s.id), now)]
 
-    def recover_interrupted(self) -> list[str]:
+    def _claim_is_stale(self, source_id: str, now: datetime) -> bool:
+        """True if the latest start of `source_id` is older than `claim_timeout_s`, is missing,
+        or lies in the future (the clock moved backwards): a live claim is none of those."""
+        with self._uow.snapshot():
+            events = self._repo.list_control_events(source_id)
+        started = [e.at for e in events if e.kind == _STARTED_EVENT]
+        if not started:
+            return True
+        age_s = (now - max(started)).total_seconds()
+        return age_s < 0 or age_s > self.claim_timeout_s
+
+    def recover_interrupted(self, *, force: bool = False) -> list[str]:
         """Fail every source left in `collecting` by a run that died (a crash, a kill).
 
-        A worker runs one collection at a time, so at the start of a pass any `collecting` source
-        is a leftover: it is moved on like any failed attempt (counted, with backoff), instead of
-        staying stuck forever. Run ONE worker per database: a second worker would see the first
-        one's in-flight collection as interrupted.
+        A recovered source is moved on like any failed attempt (counted, with backoff), instead
+        of staying stuck forever. Only ONE worker may run per database (`WorkerLock`).
+
+        `force` is for the moment a worker has just taken that lock: the previous owner is then
+        certainly dead, so every collecting source is a leftover. Without it (the periodic
+        check) only a claim older than `claim_timeout_s` is recovered, so a collection that is
+        legitimately in flight is never failed from under its owner.
         """
         recovered: list[str] = []
+        now = self._clock.now()
         for state in self._repo.list_source_states():
             if state.state is not CollectionState.COLLECTING:
+                continue
+            if not force and not self._claim_is_stale(state.source_id, now):
                 continue
             with self._uow.transaction():
                 try:

@@ -22,7 +22,8 @@ Environment:
 
 `build_container` is for the CLI and the web UI and never creates a network client. `build_worker`
 adds the collector and the HTTP fetcher (the application's only outbound path) for
-`social-tracker run`.
+`social-tracker run`, and takes the single-worker lock next to the database (see
+`persistence.worker_lock`): a second worker on the same database is refused.
 """
 
 import ipaddress
@@ -34,7 +35,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from social_tracker.collector.http_fetcher import DEFAULT_ALLOWED_PORTS, HttpFetcher
+from social_tracker.collector.http_fetcher import DEFAULT_ALLOWED_PORTS, FetchLimits, HttpFetcher
 from social_tracker.collector.ports import Fetcher
 from social_tracker.collector.service import CollectorService
 from social_tracker.collector.worker import DEFAULT_TICK_S, Worker
@@ -46,6 +47,7 @@ from social_tracker.persistence.db import DEFAULT_BUSY_TIMEOUT_MS, Database
 from social_tracker.persistence.items_repo import SqliteItemRepository
 from social_tracker.persistence.sources_repo import SqliteSourceRepository
 from social_tracker.persistence.unit_of_work import SqliteUnitOfWork
+from social_tracker.persistence.worker_lock import WorkerLock
 from social_tracker.shared.clock import SystemClock
 from social_tracker.shared.errors import ValidationError
 from social_tracker.sources.service import SourceRegistry
@@ -62,6 +64,7 @@ _RETENTION_DIGITS = re.compile(r"[0-9]{1,4}")
 _HOST_NAME = re.compile(r"[a-z0-9._-]{1,253}")
 _PORT_DIGITS = re.compile(r"[0-9]{1,5}")
 _BACKOFF_JITTER_FRACTION = 0.1
+CLAIM_MARGIN_S = 60.0  # what a claim may outlast the fetch deadline (parse and store) unchallenged
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,7 @@ class WorkerContainer:
     container: Container
     worker: Worker
     fetcher: Fetcher
+    lock: WorkerLock | None = None
 
     @property
     def sources(self) -> SourceRegistry:
@@ -102,7 +106,10 @@ class WorkerContainer:
         return self.container.items
 
     def close(self) -> None:
+        """Release the database, then the single-worker lock. Safe to call more than once."""
         self.container.close()
+        if self.lock is not None:
+            self.lock.release()
 
 
 def resolve_db_path(raw: str) -> Path:
@@ -219,9 +226,12 @@ def build_worker(
     private_hosts = parse_private_hosts(env.get(ALLOW_PRIVATE_HOSTS_ENV, ""))
     allowed_ports = parse_allowed_ports(env.get(ALLOWED_PORTS_ENV, ""))
     wiring = _open(env)
+    lock = WorkerLock(wiring.db.path)
     try:
+        lock.acquire()  # before anything else touches the collection state
+        limits = FetchLimits()
         chosen = fetcher or HttpFetcher(
-            wiring.clock, private_hosts=private_hosts, allowed_ports=allowed_ports
+            wiring.clock, limits=limits, private_hosts=private_hosts, allowed_ports=allowed_ports
         )
         container = wiring.container
         collector = CollectorService(
@@ -233,6 +243,7 @@ def build_worker(
             wiring.uow,
             wiring.clock,
             jitter=_random_jitter,
+            claim_timeout_s=limits.deadline_s + CLAIM_MARGIN_S,
         )
         worker = Worker(
             collector,
@@ -245,5 +256,6 @@ def build_worker(
         )
     except BaseException:
         wiring.db.close()
+        lock.release()
         raise
-    return WorkerContainer(container, worker, chosen)
+    return WorkerContainer(container, worker, chosen, lock)

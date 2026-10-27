@@ -43,7 +43,7 @@ def test_recovering_an_interrupted_collection_keeps_the_last_successful_fetch(wo
     fetched_at = world.clock.now()
     world.clock.advance(timedelta(minutes=11))
     world.control.start_collection("src_news", actor="system:worker", reason="before the crash")
-    assert world.collector.recover_interrupted() == ["src_news"]
+    assert world.collector.recover_interrupted(force=True) == ["src_news"]
     status = world.control_repo.get_fetch_status("src_news")
     assert (status.last_fetch_at, status.last_error) == (fetched_at, "interrupted collection")
 

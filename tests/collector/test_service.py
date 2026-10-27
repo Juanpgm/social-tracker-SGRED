@@ -13,6 +13,7 @@ from social_tracker.collector.domain import (
 )
 from social_tracker.collector.service import CollectOutcome, CollectResult
 from social_tracker.control.domain import MAX_CONSECUTIVE_FAILURES, CollectionState, FetchStatus
+from social_tracker.shared.clock import FixedClock
 from social_tracker.shared.errors import NotFoundError, StorageError, ValidationError
 from tests.actors import WHO
 from tests.collector.harness import (
@@ -569,12 +570,12 @@ def test_two_collectors_on_one_source_produce_exactly_one_effective_collection(w
 def test_a_collection_interrupted_by_a_crash_is_recovered_as_a_failure(world):
     world.ready()
     world.control.start_collection("src_news", actor="system:worker", reason="crashed run")
-    recovered = world.collector.recover_interrupted()
+    recovered = world.collector.recover_interrupted(force=True)
     assert recovered == ["src_news"]
     state = world.state()
     assert (state.state, state.consecutive_failures) == (CollectionState.BACKOFF, 1)
     assert world.control_repo.get_fetch_status("src_news").last_error == "interrupted collection"
-    assert world.collector.recover_interrupted() == []
+    assert world.collector.recover_interrupted(force=True) == []
 
 
 def test_recovery_leaves_idle_disabled_and_backing_off_sources_alone(world):
@@ -587,6 +588,89 @@ def test_recovery_leaves_idle_disabled_and_backing_off_sources_alone(world):
     assert world.collector.recover_interrupted() == []
     assert world.state("src_idle").state is CollectionState.IDLE
     assert world.state("src_back").consecutive_failures == 1
+
+
+def claim(world, source_id: str = "src_news") -> None:
+    world.control.start_collection(source_id, actor="system:worker", reason="in flight")
+
+
+def timeout_s(world) -> float:
+    return world.collector.claim_timeout_s
+
+
+def test_a_collection_that_just_started_is_not_taken_for_a_dead_one(world):
+    world.ready()
+    claim(world)
+    assert world.collector.recover_interrupted() == []
+    assert world.state().state is CollectionState.COLLECTING
+
+
+@pytest.mark.parametrize(
+    ("age_s", "recovered"), [(-1.0, False), (0.0, False), (0.001, True), (1.0, True)]
+)
+def test_a_claim_is_recovered_only_once_it_is_older_than_the_claim_timeout(world, age_s, recovered):
+    world.ready()
+    claim(world)
+    world.clock.advance(timedelta(seconds=timeout_s(world) + age_s))
+    assert (world.collector.recover_interrupted() != []) is recovered
+    assert (world.state().state is CollectionState.BACKOFF) is recovered
+
+
+def test_the_claim_timeout_leaves_room_for_the_whole_fetch_deadline():
+    from social_tracker.collector.http_fetcher import FetchLimits
+    from social_tracker.collector.service import DEFAULT_CLAIM_TIMEOUT_S
+
+    assert FetchLimits().deadline_s + 30 < DEFAULT_CLAIM_TIMEOUT_S
+
+
+def test_force_recovers_even_a_claim_that_started_a_moment_ago(world):
+    world.ready()
+    claim(world)
+    assert world.collector.recover_interrupted(force=True) == ["src_news"]
+
+
+def test_the_age_of_a_claim_counts_from_its_latest_start_not_an_earlier_one(world):
+    world.ready()
+    claim(world)
+    world.control.fail_collection("src_news", actor="system:worker", reason="first try failed")
+    world.clock.advance(timedelta(seconds=timeout_s(world) * 10))  # the first start is ancient
+    world.control.retry_collection("src_news", actor="system:worker", reason="retry")
+    claim(world)  # a fresh claim
+    assert world.collector.recover_interrupted() == []
+    assert world.state().state is CollectionState.COLLECTING
+
+
+def test_a_claim_with_a_start_time_in_the_future_is_treated_as_stale(world):
+    world.ready()
+    claim(world)
+    # the clock moved backwards since the claim (a FixedClock cannot, so swap the collector's)
+    world.collector._clock = FixedClock(world.clock.now() - timedelta(hours=3))
+    assert world.collector.recover_interrupted() == ["src_news"]
+
+
+def test_a_collecting_source_without_any_start_event_is_recovered(world):
+    from social_tracker.control.domain import SourceState
+
+    world.ready()
+    world.control_repo.save_source_state(SourceState("src_news", CollectionState.COLLECTING))
+    assert world.collector.recover_interrupted() == ["src_news"]
+
+
+@pytest.mark.parametrize("bad", [0, -1.0, float("nan"), float("inf"), True, "5"])
+def test_an_invalid_claim_timeout_is_refused(world, bad):
+    from social_tracker.collector.service import CollectorService
+
+    with pytest.raises(ValueError, match="claim_timeout_s"):
+        CollectorService(
+            world.sources_repo,
+            world.control,
+            world.control_repo,
+            world.items,
+            world.fetcher,
+            world.uow,
+            world.clock,
+            claim_timeout_s=bad,
+        )
 
 
 # ---- due sources ----

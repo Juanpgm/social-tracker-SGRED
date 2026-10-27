@@ -60,7 +60,7 @@ def test_a_database_locked_while_fetching_stores_nothing_and_the_leftover_is_rec
     assert (
         locked_world.state().state is CollectionState.COLLECTING
     )  # stuck, as a crash would leave it
-    assert locked_world.collector.recover_interrupted() == ["src_news"]
+    assert locked_world.collector.recover_interrupted(force=True) == ["src_news"]
     assert locked_world.state().state is CollectionState.BACKOFF
     locked_world.wait_out_backoff()
     locked_world.fetcher.then(FEED)

@@ -3,6 +3,7 @@
 import logging
 import threading
 import time
+from datetime import timedelta
 
 from social_tracker.collector.worker import Worker
 from social_tracker.control.domain import CollectionState
@@ -11,10 +12,11 @@ from tests.collector.harness import FakeFetcher, memory_world
 from tests.collector.test_worker import Rig
 
 
-def test_every_pass_recovers_a_collection_that_a_crash_left_running():
+def test_every_pass_recovers_a_collection_that_a_crash_left_running_for_too_long():
     rig = Rig(memory_world(FakeFetcher()))
     rig.world.ready()
     rig.world.control.start_collection("src_news", actor="system:worker", reason="crashed run")
+    rig.world.clock.advance(timedelta(seconds=rig.world.collector.claim_timeout_s + 1))
     rig.worker.run_pass()
     assert rig.world.state().state is CollectionState.BACKOFF
 
