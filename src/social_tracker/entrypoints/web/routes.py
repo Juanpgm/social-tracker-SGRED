@@ -326,3 +326,31 @@ def update_source(request: Request, source_id: str, form: Form) -> Response:
         except ConflictError as exc:
             errors, conflict = map_conflict(exc), True
     return _failure(request, source.type, source.id, form, errors, conflict=conflict)
+
+
+# ---- delete ----
+
+
+def _confirm_page(request: Request, source: Source, error: str = "", status: int = 200) -> Response:
+    return render(request, "confirm_delete.html", status=status, source=source, error=error)
+
+
+@router.get("/sources/{source_id}/delete", response_class=HTMLResponse)
+def confirm_delete(request: Request, source_id: str) -> Response:
+    return _confirm_page(request, _load(request.app.state.ctx, source_id))
+
+
+@router.post("/sources/{source_id}/delete")
+def delete_source(request: Request, source_id: str, form: Form) -> Response:
+    ctx: WebContext = request.app.state.ctx
+    if not is_valid_slug(source_id):
+        return _redirect("not_found")
+    errors = check_reason(form)
+    try:
+        if errors:
+            return _confirm_page(request, _load(ctx, source_id), errors.fields["reason"], 422)
+        with ctx.services() as services:
+            services.sources.delete(source_id, actor=ACTOR, reason=reason_of(form))
+    except NotFoundError:
+        return _redirect("not_found")
+    return _redirect("deleted")
