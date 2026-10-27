@@ -15,8 +15,10 @@ have not been classified yet, oldest published first:
    enough) never inherits a verdict: its rules run on its own text; within the window it only
    links to the original (`near_of`), beyond it it is recycled. Short texts match only identical
    content inside the window.
-4. CATALOG: the cross-check port (`unavailable` until a real one is wired), resolved before the
-   item's write transaction opens.
+4. CATALOG: the cross-check port, resolved before the item's write transaction opens and read
+   from the local cache of the official catalogs (no network here). A `mismatch` is a rules signal
+   (`catalog_mismatch`) that raises the risk; a `consistent` claim lowers an unlinked attribution;
+   `unavailable` and `no_claim` change nothing and never block.
 
 The LLM stage is a later unit: an item the cascade cannot settle is only MARKED (`needs_llm` and a
 priority) here.
@@ -495,6 +497,7 @@ class ClassifierService:
             item_url=item.url,
             settings=settings,
             source_official=source.official,
+            catalog_status=catalog if catalog is not None else UNAVAILABLE,
         )
         match = self._find_match(item, sign)
         catalog = catalog if catalog is not None else UNAVAILABLE
