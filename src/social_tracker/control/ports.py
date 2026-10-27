@@ -10,7 +10,8 @@ class ControlRepository(Protocol):
     """Persistence port for settings, per-source runtime state and the control event log.
 
     Settings are string key/values; `global_analysis_enabled` defaults to "false" and unknown
-    keys read as None.
+    keys read as None. Per-source analysis flags (`source_analysis.<source id>`) hold only
+    "true" or "false".
 
     Validation is part of the contract and lives in the repository, not in the database:
     every implementation (SQLite included) MUST apply `validate_setting` on `set_setting` and
@@ -28,6 +29,18 @@ class ControlRepository(Protocol):
     def get_setting(self, key: str) -> str | None: ...
 
     def set_setting(self, key: str, value: str) -> None: ...
+
+    def delete_setting(self, key: str) -> None:
+        """Forget the stored value of `key`; a no-op if there is none (idempotent). A key that
+        has a default reads as that default afterwards. Raises `ValidationError` for an invalid
+        key, like `get_setting`."""
+        ...
+
+    def list_settings(self, prefix: str) -> dict[str, str]:
+        """Every setting whose key starts with `prefix` (literally: no wildcards), sorted by
+        key, defaults included unless overridden. `""` lists everything. The result is a copy.
+        Raises `ValidationError` for an invalid prefix."""
+        ...
 
     def get_source_state(self, source_id: str) -> SourceState | None: ...
 

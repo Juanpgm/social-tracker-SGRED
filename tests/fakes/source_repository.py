@@ -46,6 +46,10 @@ class InMemorySourceRepository:
             except KeyError:
                 raise NotFoundError(f"source not found: {source_id}") from None
 
+    def exists(self, source_id: str) -> bool:
+        with self._lock:
+            return isinstance(source_id, str) and source_id in self._by_id
+
     def find_by_name_ci(self, name: str) -> Source | None:
         with self._lock:
             owner = self._name_owner.get(normalize_name(name))

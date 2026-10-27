@@ -53,6 +53,7 @@ SOURCE_MUST_BE_CAUGHT_BY = {
     "update_is_delete_then_add": [
         "test_update_to_another_sources_name_conflicts_and_changes_nothing"
     ],
+    "exists_is_always_true": ["test_exists_is_true_only_for_a_stored_source"],
 }
 
 CONTROL_MUST_BE_CAUGHT_BY = {
@@ -68,6 +69,8 @@ CONTROL_MUST_BE_CAUGHT_BY = {
         "test_global_analysis_rejects_other_values_and_keeps_the_old_one",
         "test_non_string_key_is_rejected",
     ],
+    "list_settings_with_like": ["test_list_settings_treats_the_prefix_literally_not_as_a_pattern"],
+    "delete_setting_does_nothing": ["test_delete_setting_removes_an_override"],
     "state_insert_only": ["test_save_is_an_upsert"],
     "delete_state_not_idempotent": ["test_delete_source_state_is_idempotent"],
     "delete_state_wipes_every_state": ["test_delete_source_state_removes_only_that_state"],

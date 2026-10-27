@@ -132,6 +132,26 @@ class SettingsWithoutValidation(SqliteControlRepository):
             )
 
 
+class ListSettingsWithLike(SqliteControlRepository):
+    """Matches the prefix with LIKE, so `_` and `%` in it act as wildcards."""
+
+    def list_settings(self, prefix: str) -> dict[str, str]:
+        rows = self._db.query(
+            "SELECT key, value FROM settings WHERE key LIKE ? ORDER BY key", (prefix + "%",)
+        )
+        return {row["key"]: row["value"] for row in rows}
+
+
+class DeleteSettingDoesNothing(SqliteControlRepository):
+    def delete_setting(self, key: str) -> None:
+        return None
+
+
+class ExistsIsAlwaysTrue(SqliteSourceRepository):
+    def exists(self, source_id: str) -> bool:
+        return True
+
+
 class StateInsertOnly(SqliteControlRepository):
     """No upsert: saving a second state for the same source blows up."""
 
@@ -270,6 +290,7 @@ SOURCE_WRONG: dict[str, Callable[[Path], object]] = {
     "drops_keywords": lambda p: _plain(p, DropsKeywords),
     "conflict_becomes_storage_error": lambda p: _plain(p, ConflictBecomesStorageError),
     "update_is_delete_then_add": lambda p: _plain(p, UpdateAsDeleteThenAdd),
+    "exists_is_always_true": lambda p: _plain(p, ExistsIsAlwaysTrue),
 }
 
 CONTROL_WRONG: dict[str, Callable[[Path], object]] = {
@@ -278,6 +299,8 @@ CONTROL_WRONG: dict[str, Callable[[Path], object]] = {
     "empty_id_means_no_filter": lambda p: _plain(p, EmptyIdMeansNoFilter),
     "event_log_capped_at_100": lambda p: _plain(p, EventLogCappedAt100),
     "settings_without_validation": lambda p: _plain(p, SettingsWithoutValidation),
+    "list_settings_with_like": lambda p: _plain(p, ListSettingsWithLike),
+    "delete_setting_does_nothing": lambda p: _plain(p, DeleteSettingDoesNothing),
     "state_insert_only": lambda p: _plain(p, StateInsertOnly),
     "upsert_skips_state": lambda p: _plain(p, UpsertSkipsState),
     "upsert_skips_failures": lambda p: _plain(p, UpsertSkipsFailures),

@@ -31,6 +31,9 @@ from tests.sources.factories import payload
 
 
 class TestInMemoryControlService(ControlServiceContract):
+    def corrupt_setting(self, env: Env, key: str, value: str) -> None:
+        env.control._settings[key] = value  # type: ignore[attr-defined]
+
     def make_env(self, service_cls: type[ControlService] = ControlService) -> Env:
         sources, control = InMemorySourceRepository(), InMemoryControlRepository()
         uow, clock = InMemoryUnitOfWork([sources, control]), FixedClock(START)
@@ -51,6 +54,14 @@ class TestSqliteControlService(ControlServiceContract):
         yield
         for db in self._opened:
             db.close()
+
+    def corrupt_setting(self, env: Env, key: str, value: str) -> None:
+        with self._opened[-1].transaction() as conn:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
 
     def make_env(self, service_cls: type[ControlService] = ControlService) -> Env:
         db = Database(self._root / f"control-{len(self._opened)}.db")

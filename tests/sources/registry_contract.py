@@ -677,14 +677,15 @@ class RegistryContract:
         env.registry.add(data("src_two", "Reused"), **WHO)
         assert [s.id for s in env.registry.list()] == ["src_two"]
 
-    def test_delete_switches_off_the_per_source_analysis_flag(self, env: Env):
+    def test_delete_removes_the_per_source_analysis_flag_and_records_it(self, env: Env):
         env.registry.add(data(), **WHO)
         env.control.set_setting(source_analysis_key("src_one"), "true")
         env.registry.delete("src_one", **WHO)
         assert events(env)[-1][2]["analysis"] == "true"  # the previous value is on record
-        assert env.control.get_setting(source_analysis_key("src_one")) == "false"
+        assert env.control.get_setting(source_analysis_key("src_one")) is None  # no leftover row
         env.registry.add(data(), **WHO)
-        assert env.control.get_setting(source_analysis_key("src_one")) == "false"
+        assert env.control.get_setting(source_analysis_key("src_one")) is None
+        assert env.control.list_settings("source_analysis.") == {}
 
     def test_delete_does_not_create_an_analysis_flag_that_never_existed(self, env: Env):
         env.registry.add(data(), **WHO)

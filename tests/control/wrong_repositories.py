@@ -6,6 +6,7 @@ a contract that cannot fail protects nothing.
 """
 
 from social_tracker.control.domain import ControlEvent
+from social_tracker.shared.errors import NotFoundError
 from tests.fakes.control_repository import InMemoryControlRepository
 
 
@@ -82,6 +83,32 @@ class SkipsSettingValidation(InMemoryControlRepository):
             return self._settings.get(key)
 
 
+class DeleteSettingNotIdempotent(InMemoryControlRepository):
+    """Deleting a key that is not stored raises."""
+
+    def delete_setting(self, key: str) -> None:
+        with self._lock:
+            if key not in self._settings:
+                raise NotFoundError("no such setting")
+            del self._settings[key]
+
+
+class DeleteSettingDropsTheDefault(InMemoryControlRepository):
+    """Deleting a key that has a default makes it vanish instead of reading as the default."""
+
+    def delete_setting(self, key: str) -> None:
+        with self._lock:
+            self._settings.pop(key, None)
+
+
+class ListSettingsBySubstring(InMemoryControlRepository):
+    """Matches the prefix anywhere in the key."""
+
+    def list_settings(self, prefix: str) -> dict[str, str]:
+        with self._lock:
+            return {k: v for k, v in sorted(self._settings.items()) if prefix in k}
+
+
 WRONG_REPOSITORIES: dict[str, type[InMemoryControlRepository]] = {
     "empty_id_means_no_filter": EmptyIdMeansNoFilter,
     "sorted_by_timestamp": SortedByTimestamp,
@@ -92,4 +119,7 @@ WRONG_REPOSITORIES: dict[str, type[InMemoryControlRepository]] = {
     "rewrites_on_append": RewritesOnAppend,
     "shares_settings_across_instances": SharesSettingsAcrossInstances,
     "skips_setting_validation": SkipsSettingValidation,
+    "delete_setting_not_idempotent": DeleteSettingNotIdempotent,
+    "delete_setting_drops_the_default": DeleteSettingDropsTheDefault,
+    "list_settings_by_substring": ListSettingsBySubstring,
 }

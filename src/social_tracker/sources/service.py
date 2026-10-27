@@ -266,8 +266,7 @@ class SourceRegistry:
             analysis = self._control.get_setting(flag)
             self._sources.delete(current.id)
             self._control.delete_source_state(current.id)
-            if analysis is not None:
-                self._control.set_setting(flag, "false")  # a re-added id must not inherit it
+            self._control.delete_setting(flag)  # a re-added id must not inherit the old flag
             detail = {
                 "type": current.type,
                 "state": state.state.value if state else None,

@@ -57,7 +57,12 @@ from social_tracker.control.domain import (
 )
 from social_tracker.control.ports import ControlRepository
 from social_tracker.shared.clock import Clock
-from social_tracker.shared.errors import InvalidTransition, StorageError, ValidationError
+from social_tracker.shared.errors import (
+    InvalidTransition,
+    NotFoundError,
+    StorageError,
+    ValidationError,
+)
 from social_tracker.shared.ids import is_valid_slug
 from social_tracker.shared.uow import UnitOfWork
 from social_tracker.sources.ports import SourceRepository
@@ -167,7 +172,8 @@ class ControlService:
 
     def _known_source(self, source_id: Any) -> str:
         """Validate the id and make sure the source exists (`NotFoundError` otherwise)."""
-        self._sources.get(_check_source_id(source_id))
+        if not self._sources.exists(_check_source_id(source_id)):
+            raise NotFoundError("source not found")
         return source_id
 
     def _global_state(self) -> GlobalState:

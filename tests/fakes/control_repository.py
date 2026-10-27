@@ -8,6 +8,7 @@ from social_tracker.control.domain import (
     SourceState,
     validate_setting,
     validate_setting_key,
+    validate_setting_prefix,
 )
 from social_tracker.shared.errors import ValidationError
 
@@ -28,6 +29,19 @@ class InMemoryControlRepository:
         validate_setting(key, value)
         with self._lock:
             self._settings[key] = value
+
+    def delete_setting(self, key: str) -> None:
+        validate_setting_key(key)
+        with self._lock:
+            if key in DEFAULT_SETTINGS:
+                self._settings[key] = DEFAULT_SETTINGS[key]
+            else:
+                self._settings.pop(key, None)
+
+    def list_settings(self, prefix: str) -> dict[str, str]:
+        validate_setting_prefix(prefix)
+        with self._lock:
+            return {k: v for k, v in sorted(self._settings.items()) if k.startswith(prefix)}
 
     def get_source_state(self, source_id: str) -> SourceState | None:
         with self._lock:

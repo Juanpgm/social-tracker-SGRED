@@ -30,6 +30,35 @@ class SourceRepositoryContract:
     def repo(self) -> SourceRepository:
         return self.make_repo()
 
+    # ---- exists ----
+
+    def test_exists_is_true_only_for_a_stored_source(self, repo: SourceRepository):
+        assert repo.exists("src_one") is False
+        repo.add(make_source("src_one", "One"))
+        assert repo.exists("src_one") is True
+        assert repo.exists("src_two") is False
+
+    def test_exists_follows_deletes_and_re_adds(self, repo: SourceRepository):
+        repo.add(make_source("src_one", "One"))
+        repo.delete("src_one")
+        assert repo.exists("src_one") is False
+        repo.add(make_source("src_one", "One"))
+        assert repo.exists("src_one") is True
+
+    @pytest.mark.parametrize(
+        "bad", ["", "ab", "UPPER", "has space", "x" * 65, None, 5, ["src_one"]]
+    )
+    def test_exists_is_false_for_anything_that_is_not_a_stored_id(
+        self, repo: SourceRepository, bad
+    ):
+        repo.add(make_source("src_one", "One"))
+        assert repo.exists(bad) is False
+
+    def test_exists_returns_a_real_bool(self, repo: SourceRepository):
+        repo.add(make_source("src_one", "One"))
+        assert type(repo.exists("src_one")) is bool
+        assert type(repo.exists("src_two")) is bool
+
     # ---- add / get ----
 
     def test_add_then_get_round_trips(self, repo: SourceRepository):

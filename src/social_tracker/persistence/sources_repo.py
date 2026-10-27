@@ -115,6 +115,11 @@ class SqliteSourceRepository:
             raise NotFoundError(_NOT_FOUND)
         return _from_row(rows[0])
 
+    def exists(self, source_id: str) -> bool:
+        if not isinstance(source_id, str):
+            return False
+        return bool(self._db.query("SELECT 1 FROM sources WHERE id = ?", (source_id,)))
+
     def find_by_name_ci(self, name: str) -> Source | None:
         rows = self._db.query(
             f"SELECT {_COLUMNS} FROM sources WHERE normalized_name = ?", (normalize_name(name),)

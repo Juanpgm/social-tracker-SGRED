@@ -221,6 +221,7 @@ MAX_SETTING_KEY = 100
 MAX_SETTING_VALUE = 1000
 MAX_EVENT_KIND = 64
 MAX_EVENT_DETAIL = 2000
+SETTING_SOURCE_ANALYSIS_PREFIX = "source_analysis."
 
 
 def _require_text(
@@ -249,6 +250,10 @@ def validate_setting(key: Any, value: Any) -> tuple[str, str]:
         raise ValidationError(
             f"setting value for {key} must be one of: {', '.join(sorted(BOOLEAN_SETTING_VALUES))}"
         )
+    if key.startswith(SETTING_SOURCE_ANALYSIS_PREFIX):
+        validate_slug(key.removeprefix(SETTING_SOURCE_ANALYSIS_PREFIX))  # a real source id
+        if value not in BOOLEAN_SETTING_VALUES:
+            raise ValidationError("a per-source analysis flag must be one of: false, true")
     if key == SETTING_ALERT_MIN_CONFIDENCE:
         parse_confidence(value)
     return key, value
@@ -256,6 +261,13 @@ def validate_setting(key: Any, value: Any) -> tuple[str, str]:
 
 def validate_setting_key(key: Any) -> str:
     return _require_text(key, "setting key", MAX_SETTING_KEY, non_blank=True, no_control=True)
+
+
+def validate_setting_prefix(prefix: Any) -> str:
+    """A prefix to list settings by: like a key, except that it may be empty (match all)."""
+    return _require_text(
+        prefix, "setting key prefix", MAX_SETTING_KEY, non_blank=False, no_control=True
+    )
 
 
 @dataclass(frozen=True)
@@ -273,9 +285,6 @@ class ControlEvent:
         if self.source_id is not None:
             validate_slug(self.source_id)
         _require_text(self.detail, "detail", MAX_EVENT_DETAIL, non_blank=False)
-
-
-SETTING_SOURCE_ANALYSIS_PREFIX = "source_analysis."
 
 
 def source_analysis_key(source_id: str) -> str:

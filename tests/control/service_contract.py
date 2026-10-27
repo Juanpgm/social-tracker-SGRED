@@ -81,6 +81,19 @@ STATES: dict[str, SourceState | None] = {
 }
 
 
+class OnlyExists:
+    """A source repository that answers `exists` and fails the test if anything loads a source."""
+
+    def __init__(self, inner: SourceRepository) -> None:
+        self._inner = inner
+
+    def exists(self, source_id: str) -> bool:
+        return self._inner.exists(source_id)
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"a whole source must not be loaded just to check it exists: {name}")
+
+
 @dataclass
 class Env:
     service: ControlService
@@ -496,8 +509,12 @@ class ControlServiceContract:
                 call()
             assert caught.value.fields == ("source_id",)
 
+    def corrupt_setting(self, env: Env, key: str, value: str) -> None:
+        """Write `value` behind the repository's back (a tampered file or a buggy older version)."""
+        raise NotImplementedError
+
     def test_a_stored_flag_that_is_neither_true_nor_false_is_a_storage_error(self, env: Env):
-        env.control.set_setting(source_analysis_key("src_one"), "maybe")
+        self.corrupt_setting(env, source_analysis_key("src_one"), "maybe")
         with pytest.raises(StorageError):
             env.service.source_analysis_enabled("src_one")
         with pytest.raises(StorageError):
@@ -535,6 +552,15 @@ class ControlServiceContract:
         assert env.service.effective_analysis("src_one") is False
         env.service.set_global_analysis(True, **WHO)
         assert env.service.effective_analysis("src_one") is True
+
+    def test_existence_checks_do_not_load_the_whole_source(self, env: Env):
+        # The flag reads and writes and `get_state` only need to know the source exists.
+        service = env.service_cls(env.control, OnlyExists(env.sources), env.uow, env.clock)
+        assert service.source_analysis_enabled("src_one") is False
+        assert service.set_source_analysis("src_one", True, **WHO).changed is True
+        assert service.get_state("src_one").state is CollectionState.DISABLED
+        with pytest.raises(NotFoundError):
+            service.source_analysis_enabled("src_nope")
 
     def test_a_failing_event_append_leaves_the_source_flag_unchanged(self, env: Env):
         flaky = FlakyControl(env.control, "append_control_event")

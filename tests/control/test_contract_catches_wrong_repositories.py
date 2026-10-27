@@ -28,6 +28,11 @@ MUST_BE_CAUGHT_BY = {
     "shares_settings_across_instances": [
         "test_a_fresh_repository_does_not_see_another_ones_settings"
     ],
+    "delete_setting_not_idempotent": ["test_delete_setting_is_idempotent"],
+    "delete_setting_drops_the_default": [
+        "test_deleting_a_setting_that_has_a_default_restores_the_default"
+    ],
+    "list_settings_by_substring": ["test_list_settings_matches_prefixes_not_substrings"],
     "skips_setting_validation": [
         "test_invalid_value_is_rejected_and_keeps_the_old_one",
         "test_setting_value_over_the_limit_is_rejected_and_keeps_the_old_one",

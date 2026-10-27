@@ -85,7 +85,7 @@ def insert_raw(db: Database, **overrides: Any) -> None:
 def test_it_satisfies_the_port_and_exposes_nothing_else(repo):
     assert isinstance(repo, SourceRepository)
     public = {name for name in dir(repo) if not name.startswith("_")}
-    assert public == {"add", "update", "get", "find_by_name_ci", "delete", "list"}
+    assert public == {"add", "update", "get", "exists", "find_by_name_ci", "delete", "list"}
 
 
 # ---- uniqueness ----

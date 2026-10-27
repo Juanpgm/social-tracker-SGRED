@@ -14,6 +14,7 @@ from social_tracker.control.domain import (
     ControlEvent,
     validate_setting,
     validate_setting_key,
+    validate_setting_prefix,
 )
 from social_tracker.shared.errors import ValidationError
 
@@ -190,3 +191,40 @@ def test_accents_combining_marks_and_emoji_remain_allowed_in_events_and_settings
     text = "Mañana café \U0001f600"
     assert ControlEvent(at=AT, kind="paused", detail=text).detail == text
     assert validate_setting("note", text) == ("note", text)
+
+
+# ---- per-source analysis flags and listing prefixes ----------------------------------------
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_a_source_analysis_setting_takes_true_or_false(value: str):
+    key = "source_analysis.src_one"
+    assert validate_setting(key, value) == (key, value)
+
+
+@pytest.mark.parametrize("value", ["maybe", "TRUE", "1", "", " true"])
+def test_a_source_analysis_setting_rejects_other_values(value: str):
+    with pytest.raises(ValidationError, match="flag"):
+        validate_setting("source_analysis.src_one", value)
+
+
+@pytest.mark.parametrize("suffix", ["", "ab", "UPPER", "has space", "a.b", "x" * 65])
+def test_a_source_analysis_setting_needs_a_slug_source_id(suffix: str):
+    with pytest.raises(ValidationError):
+        validate_setting(f"source_analysis.{suffix}", "true")
+
+
+def test_keys_that_only_resemble_the_prefix_are_ordinary_settings():
+    assert validate_setting("source_analysisX", "anything") == ("source_analysisX", "anything")
+    assert validate_setting("my.source_analysis.x", "anything")[1] == "anything"
+
+
+@pytest.mark.parametrize("prefix", ["", "a", "source_analysis.", "k" * 100])
+def test_a_setting_prefix_may_be_empty_or_up_to_the_key_limit(prefix: str):
+    assert validate_setting_prefix(prefix) == prefix
+
+
+@pytest.mark.parametrize("prefix", [None, 5, b"a", "k" * 101, "a\x00", "a\u200b", "\ud800"])
+def test_a_bad_setting_prefix_is_rejected(prefix):
+    with pytest.raises(ValidationError, match="prefix"):
+        validate_setting_prefix(prefix)

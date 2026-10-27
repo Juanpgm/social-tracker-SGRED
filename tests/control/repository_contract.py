@@ -172,6 +172,132 @@ class ControlRepositoryContract:
 
     # ---- source state ----
 
+    # ---- delete_setting / list_settings ----
+
+    def test_delete_setting_removes_an_override(self, repo: ControlRepository):
+        repo.set_setting("a_key", "1")
+        repo.set_setting("b_key", "2")
+        repo.delete_setting("a_key")
+        assert repo.get_setting("a_key") is None
+        assert repo.get_setting("b_key") == "2"  # only that key goes
+
+    def test_delete_setting_is_idempotent(self, repo: ControlRepository):
+        repo.delete_setting("never_set")
+        repo.set_setting("a_key", "1")
+        repo.delete_setting("a_key")
+        repo.delete_setting("a_key")
+        assert repo.get_setting("a_key") is None
+
+    def test_deleting_a_setting_that_has_a_default_restores_the_default(
+        self, repo: ControlRepository
+    ):
+        repo.set_setting(SETTING_GLOBAL_ANALYSIS_ENABLED, "true")
+        repo.set_setting(SETTING_ALERT_MIN_CONFIDENCE, "0.9")
+        repo.delete_setting(SETTING_GLOBAL_ANALYSIS_ENABLED)
+        repo.delete_setting(SETTING_ALERT_MIN_CONFIDENCE)
+        assert repo.get_setting(SETTING_GLOBAL_ANALYSIS_ENABLED) == "false"
+        assert repo.get_setting(SETTING_ALERT_MIN_CONFIDENCE) == "0.5"
+
+    @pytest.mark.parametrize("key", ["", "   ", "k" * 101, "a\x00b", None, 5, "a\u200bb", "\ud800"])
+    def test_delete_setting_validates_the_key(self, repo: ControlRepository, key):
+        with pytest.raises(ValidationError):
+            repo.delete_setting(key)
+
+    def test_delete_setting_never_touches_state_or_events(self, repo: ControlRepository):
+        repo.save_source_state(SourceState("src_one", CollectionState.IDLE))
+        repo.append_control_event(event())
+        repo.set_setting("a_key", "1")
+        repo.delete_setting("a_key")
+        assert repo.get_source_state("src_one") is not None
+        assert len(repo.list_control_events()) == 1
+
+    def test_list_settings_returns_only_the_keys_with_the_prefix(self, repo: ControlRepository):
+        repo.set_setting("source_analysis.src_a", "true")
+        repo.set_setting("source_analysis.src_b", "false")
+        repo.set_setting("other_key", "x")
+        assert repo.list_settings("source_analysis.") == {
+            "source_analysis.src_a": "true",
+            "source_analysis.src_b": "false",
+        }
+
+    def test_list_settings_is_sorted_by_key(self, repo: ControlRepository):
+        for key in ("z_key", "a_key", "m_key"):
+            repo.set_setting(key, "1")
+        assert list(repo.list_settings("")) == [
+            "a_key",
+            "alert_min_confidence",
+            "global_analysis_enabled",
+            "m_key",
+            "z_key",
+        ]
+
+    def test_list_settings_treats_the_prefix_literally_not_as_a_pattern(
+        self, repo: ControlRepository
+    ):
+        repo.set_setting("a_key", "1")
+        repo.set_setting("abkey", "2")
+        repo.set_setting("a%key", "3")
+        assert repo.list_settings("a_") == {"a_key": "1"}
+        assert repo.list_settings("a%") == {"a%key": "3"}
+
+    def test_list_settings_matches_prefixes_not_substrings(self, repo: ControlRepository):
+        repo.set_setting("xx_source", "1")
+        repo.set_setting("source_xx", "2")
+        assert repo.list_settings("source") == {"source_xx": "2"}
+
+    def test_list_settings_includes_the_defaults_and_overrides_them(self, repo: ControlRepository):
+        assert repo.list_settings("global_") == {SETTING_GLOBAL_ANALYSIS_ENABLED: "false"}
+        repo.set_setting(SETTING_GLOBAL_ANALYSIS_ENABLED, "true")
+        assert repo.list_settings("global_") == {SETTING_GLOBAL_ANALYSIS_ENABLED: "true"}
+
+    def test_list_settings_without_a_match_is_empty(self, repo: ControlRepository):
+        repo.set_setting("a_key", "1")
+        assert repo.list_settings("nothing_like_this") == {}
+
+    def test_list_settings_with_an_empty_prefix_lists_everything(self, repo: ControlRepository):
+        repo.set_setting("a_key", "1")
+        assert repo.list_settings("") == {
+            "a_key": "1",
+            SETTING_ALERT_MIN_CONFIDENCE: "0.5",
+            SETTING_GLOBAL_ANALYSIS_ENABLED: "false",
+        }
+
+    @pytest.mark.parametrize("prefix", [None, 5, "a\x00b", "k" * 101, "a\u200bb", "\ud800"])
+    def test_list_settings_validates_the_prefix(self, repo: ControlRepository, prefix):
+        with pytest.raises(ValidationError):
+            repo.list_settings(prefix)
+
+    def test_the_listing_is_a_copy(self, repo: ControlRepository):
+        repo.set_setting("a_key", "1")
+        listing = repo.list_settings("a_")
+        listing["a_key"] = "tampered"
+        listing["b_key"] = "new"
+        assert repo.list_settings("").get("a_key") == "1"
+        assert repo.get_setting("b_key") is None
+
+    # ---- per-source analysis flags are validated like the global switch ----
+
+    @pytest.mark.parametrize("value", ["true", "false"])
+    def test_source_analysis_flags_accept_true_and_false(self, repo: ControlRepository, value):
+        repo.set_setting("source_analysis.src_one", value)
+        assert repo.get_setting("source_analysis.src_one") == value
+
+    @pytest.mark.parametrize(
+        "value", ["maybe", "TRUE", "True", "1", "0", "", " true", "true ", "yes"]
+    )
+    def test_source_analysis_flags_reject_anything_else_and_keep_the_old_value(
+        self, repo: ControlRepository, value
+    ):
+        repo.set_setting("source_analysis.src_one", "true")
+        with pytest.raises(ValidationError):
+            repo.set_setting("source_analysis.src_one", value)
+        assert repo.get_setting("source_analysis.src_one") == "true"
+
+    @pytest.mark.parametrize("suffix", ["", "UPPER", "has space", "ab", "x" * 65, "a.b"])
+    def test_a_source_analysis_key_needs_a_valid_source_id(self, repo: ControlRepository, suffix):
+        with pytest.raises(ValidationError):
+            repo.set_setting(f"source_analysis.{suffix}", "true")
+
     def test_missing_source_state_is_none(self, repo: ControlRepository):
         assert repo.get_source_state("src_one") is None
 
@@ -349,6 +475,8 @@ class ControlRepositoryContract:
         assert {
             "get_setting",
             "set_setting",
+            "delete_setting",
+            "list_settings",
             "get_source_state",
             "save_source_state",
             "delete_source_state",

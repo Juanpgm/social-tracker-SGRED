@@ -16,6 +16,7 @@ from social_tracker.control.domain import (
     SourceState,
     validate_setting,
     validate_setting_key,
+    validate_setting_prefix,
 )
 from social_tracker.persistence.db import Database, format_utc, parse_utc
 from social_tracker.shared.errors import DomainError, StorageError, ValidationError
@@ -70,6 +71,27 @@ class SqliteControlRepository:
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
+    def delete_setting(self, key: str) -> None:
+        validate_setting_key(key)
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+    def list_settings(self, prefix: str) -> dict[str, str]:
+        validate_setting_prefix(prefix)
+        # substr, not LIKE: the prefix is literal (LIKE would treat % and _ as wildcards).
+        rows = self._db.query(
+            "SELECT key, value FROM settings WHERE substr(key, 1, ?) = ? ORDER BY key",
+            (len(prefix), prefix),
+        )
+        found = {k: v for k, v in DEFAULT_SETTINGS.items() if k.startswith(prefix)}
+        for row in rows:
+            try:
+                validate_setting(row["key"], row["value"])
+            except ValidationError:
+                raise StorageError("stored setting is invalid") from None
+            found[row["key"]] = row["value"]
+        return dict(sorted(found.items()))
 
     def get_source_state(self, source_id: str) -> SourceState | None:
         rows = self._db.query(
