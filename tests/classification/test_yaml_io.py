@@ -141,10 +141,10 @@ def test_the_size_limit_is_in_bytes_and_exact():
 
 
 def test_the_error_does_not_echo_the_file_content():
-    secret = "hunter2-do-not-print"
+    marker = "hunter2-do-not-print"
     with pytest.raises(ValidationError) as caught:
-        load_topic_config(f"version: 1\nearthquake: [sismo]\n{secret}: x\n")
-    assert secret not in str(caught.value)
+        load_topic_config(f"version: 1\nearthquake: [sismo]\n{marker}: x\n")
+    assert marker not in str(caught.value)
     with pytest.raises(ValidationError) as caught:
-        load_topic_config(f"version: 1\nearthquake: [sismo, {secret}, {secret}]\n")
-    assert secret not in str(caught.value)
+        load_topic_config(f"version: 1\nearthquake: [sismo, {marker}, {marker}]\n")
+    assert marker not in str(caught.value)
