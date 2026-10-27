@@ -201,3 +201,49 @@ def test_the_busy_timeout_accepts_its_range_boundaries(tmp_path: Path, edge: str
 
 def test_a_blank_busy_timeout_means_the_default(tmp_path: Path):
     build_container({DB_PATH_ENV: str(tmp_path / "b.db"), BUSY_TIMEOUT_ENV: ""}).close()
+
+
+def _connection_busy_timeout(container) -> int:
+    return container._db.query("PRAGMA busy_timeout")[0][0]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1", 1),
+        ("2", 2),
+        ("599999", 599_999),
+        ("600000", 600_000),
+        (" 250 ", 250),
+        ("0000001", 1),
+        ("", 5000),
+        ("   ", 5000),
+    ],
+)
+def test_the_configured_busy_timeout_really_reaches_the_connection(
+    tmp_path: Path, raw: str, expected: int
+):
+    container = build_container({DB_PATH_ENV: str(tmp_path / "bt.db"), BUSY_TIMEOUT_ENV: raw})
+    try:
+        assert _connection_busy_timeout(container) == expected
+    finally:
+        container.close()
+
+
+def test_an_unset_busy_timeout_is_five_seconds_on_the_connection(tmp_path: Path):
+    container = build_container({DB_PATH_ENV: str(tmp_path / "bt.db")})
+    try:
+        assert _connection_busy_timeout(container) == 5000
+    finally:
+        container.close()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["0", "600001", "9999999", "00000000", "+5", "-1", "5 0", "0x10", "٣", "５"],
+)
+def test_busy_timeouts_outside_the_range_or_not_plain_digits_are_refused(tmp_path: Path, bad: str):
+    target = tmp_path / "bt.db"
+    with pytest.raises(ValidationError):
+        build_container({DB_PATH_ENV: str(target), BUSY_TIMEOUT_ENV: bad})
+    assert not target.exists()
