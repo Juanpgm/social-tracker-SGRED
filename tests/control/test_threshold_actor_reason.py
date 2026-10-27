@@ -252,3 +252,30 @@ def test_the_hidden_character_error_never_echoes_the_value(check, field, limit):
     with pytest.raises(ValidationError) as caught:
         check(CANARY + "‮")
     assert CANARY not in caught.value.message
+
+
+# ---- huge numbers never leak OverflowError --------------------------------------------
+
+HUGE = [10**400, -(10**400), 10**309, 2**1024, -(2**1024), 10**10_000, 1e308, -1e308]
+
+
+@pytest.mark.parametrize("value", HUGE, ids=[f"huge-{i}" for i in range(len(HUGE))])
+def test_huge_numbers_are_a_validation_error_not_an_overflow(value: Any):
+    with pytest.raises(ValidationError) as caught:
+        validate_confidence(value)
+    assert caught.value.fields == (SETTING_ALERT_MIN_CONFIDENCE,)
+
+
+@pytest.mark.parametrize(
+    "text", ["9" * 400, "9" * 399 + ".9", "1" + "0" * 350], ids=["a", "b", "c"]
+)
+def test_huge_stored_numbers_are_a_validation_error_not_an_overflow(text: str):
+    with pytest.raises(ValidationError):
+        parse_confidence(text)
+
+
+def test_the_largest_exactly_representable_ints_around_one_still_work():
+    assert validate_confidence(1) == 1.0
+    assert validate_confidence(0) == 0.0
+    with pytest.raises(ValidationError):
+        validate_confidence(2**53 + 1)

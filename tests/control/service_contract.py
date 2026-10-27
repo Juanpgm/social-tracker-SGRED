@@ -664,7 +664,21 @@ class ControlServiceContract:
 
     @pytest.mark.parametrize(
         "bad",
-        [math.nan, math.inf, -math.inf, -0.1, 1.01, "abc", "0.5", True, False, None, [], 2],
+        [
+            math.nan,
+            math.inf,
+            -math.inf,
+            -0.1,
+            1.01,
+            "abc",
+            "0.5",
+            True,
+            False,
+            None,
+            [],
+            2,
+            10**400,
+        ],
         ids=repr,
     )
     def test_invalid_thresholds_are_rejected_leaving_the_old_value_and_the_log(

@@ -293,7 +293,10 @@ def validate_confidence(value: Any) -> float:
     """A finite number in [0.0, 1.0] (bools, strings and None are not numbers here)."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise _bad_confidence("alert_min_confidence must be a number between 0 and 1")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:  # an int beyond the float range: far outside [0, 1] anyway
+        raise _bad_confidence("alert_min_confidence must be a number between 0 and 1") from None
     if not 0.0 <= number <= 1.0:  # a chained comparison is False for NaN, so NaN is rejected
         raise _bad_confidence("alert_min_confidence must be a number between 0 and 1")
     return number + 0.0  # turns -0.0 into 0.0
