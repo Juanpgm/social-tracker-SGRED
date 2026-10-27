@@ -262,6 +262,67 @@ def test_a_database_that_cannot_use_wal_is_rejected_and_not_leaked(tmp_path, mon
     path.unlink()  # the rejected connection was closed
 
 
+class _FaultyConnection:
+    """Wraps a real connection: records close() and raises `error` on matching statements."""
+
+    def __init__(self, conn: sqlite3.Connection, fail_on: str, error: BaseException) -> None:
+        self._conn = conn
+        self._fail_on = fail_on
+        self._error = error
+        self.closed = False
+
+    def execute(self, sql, *args):
+        if self._fail_on in sql:
+            raise self._error
+        return self._conn.execute(sql, *args)
+
+    def close(self) -> None:
+        self.closed = True
+        self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+@pytest.mark.parametrize(
+    ("fail_on", "error", "expected"),
+    [
+        ("PRAGMA synchronous", sqlite3.OperationalError("disk I/O error"), StorageError),
+        ("PRAGMA foreign_keys", sqlite3.DatabaseError("malformed"), StorageError),
+        (
+            "CREATE TABLE IF NOT EXISTS schema_migrations",
+            sqlite3.OperationalError("x"),
+            StorageError,
+        ),
+        ("PRAGMA synchronous", KeyboardInterrupt(), KeyboardInterrupt),
+        ("CREATE TABLE IF NOT EXISTS schema_migrations", MemoryError(), MemoryError),
+    ],
+    ids=[
+        "sqlite-error-in-pragma",
+        "sqlite-error-late",
+        "sqlite-error-in-runner",
+        "interrupt",
+        "oom",
+    ],
+)
+def test_any_failure_while_opening_closes_the_connection(
+    tmp_path, monkeypatch, fail_on, error, expected
+):
+    real_connect = sqlite3.connect
+    created: list[_FaultyConnection] = []
+
+    def connect(*args, **kwargs):
+        faulty = _FaultyConnection(real_connect(*args, **kwargs), fail_on, error)
+        created.append(faulty)
+        return faulty
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    with pytest.raises(expected):
+        Database(tmp_path / "leak.db")
+    assert len(created) == 1
+    assert created[0].closed, "the connection leaked when opening failed"
+
+
 # ---- lifecycle ----
 
 
@@ -541,6 +602,58 @@ def test_nested_use_after_close_is_a_storage_error(tmp_path):
         db.close()
         with db.transaction():
             pytest.fail("the body must not run on a closed database")
+
+
+def test_a_reader_thread_never_sees_an_uncommitted_row_that_is_later_rolled_back(tmp_path, opened):
+    db = opened(tmp_path / "t.db", migrations=[LOG])
+    written, reader_done = threading.Event(), threading.Event()
+    seen: list[list[str]] = []
+
+    def reader():
+        written.wait(timeout=5)
+        seen.append(logged(db))  # shares the connection: it must queue behind the writer
+        reader_done.set()
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    with pytest.raises(RuntimeError), db.transaction() as conn:  # noqa: PT012 - the body is the scenario
+        conn.execute("INSERT INTO log (msg) VALUES ('dirty')")
+        written.set()
+        assert not reader_done.wait(timeout=0.3), "the reader ran during the open transaction"
+        raise RuntimeError("roll back")
+    thread.join(timeout=10)
+    assert seen == [[]]
+
+
+def test_a_reader_thread_sees_the_committed_state_once_the_writer_finishes(tmp_path, opened):
+    db = opened(tmp_path / "t.db", migrations=[LOG])
+    written = threading.Event()
+    seen: list[list[str]] = []
+
+    def reader():
+        written.wait(timeout=5)
+        seen.append(logged(db))
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    with db.transaction() as conn:
+        conn.execute("INSERT INTO log (msg) VALUES ('kept')")
+        written.set()
+        time.sleep(0.1)
+    thread.join(timeout=10)
+    assert seen == [["kept"]]
+
+
+def test_a_failed_commit_leaves_the_connection_usable_and_outside_a_transaction(tmp_path, opened):
+    db = opened(tmp_path / "t.db", migrations=[DEFERRED_FK])
+    with pytest.raises(StorageError) as info, db.transaction() as conn:
+        conn.execute("INSERT INTO child (parent_id) VALUES (99)")  # only COMMIT notices
+    assert not isinstance(info.value, ConflictError)
+    assert db.query("SELECT count(*) FROM child")[0][0] == 0  # rolled back, not half-open
+    with db.transaction() as conn:  # BEGIN would fail inside a leftover transaction
+        conn.execute("INSERT INTO parent (id) VALUES (1)")
+        conn.execute("INSERT INTO child (parent_id) VALUES (1)")
+    assert db.query("SELECT count(*) FROM child")[0][0] == 1
 
 
 def test_threads_sharing_one_instance_never_lose_updates(tmp_path, opened):
