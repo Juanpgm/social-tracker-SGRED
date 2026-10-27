@@ -8,6 +8,11 @@ the result is plain text. The entry exactly as received (markup included) is kep
 Rules, each with a flag on the item or a reason in the report:
 - no visible title and no visible text: discarded, counted as `empty`; entries past the feed
   limit are counted as `over_limit`;
+- bidi controls and zero-width characters are removed from the title, text and author (see
+  `neutralize_invisible`; the raw payload keeps the original), before the hash is taken;
+- markup that hides content is not silent: an element left open (an unclosed `<script>`) or
+  closed ones that dropped `CONTENT_DROPPED_CHARS` characters or more flag the item
+  `content_dropped`;
 - text over 100 KiB is cut at the byte limit without splitting a character (`truncated`), as
   is a title over 1000 characters;
 - no usable publication date: the fetch time is used (`published_at_missing`); a date after the
@@ -42,6 +47,7 @@ from social_tracker.items.domain import (
     content_hash,
     item_id,
     item_size_bytes,
+    neutralize_invisible,
     normalize_text,
     optional_url,
     truncate_utf8,
@@ -49,6 +55,7 @@ from social_tracker.items.domain import (
 from social_tracker.shared.errors import ValidationError
 
 MAX_HTML_CHARS = 500_000  # input to the HTML reader is bounded, so its cost is too
+CONTENT_DROPPED_CHARS = 1_000  # dropped content at or above this flags the item
 DISCARD_EMPTY = "empty"
 DISCARD_OVER_LIMIT = "over_limit"
 DISCARD_OLDER_THAN_RETENTION = "older_than_retention"
@@ -67,7 +74,13 @@ class _VisibleText(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self.dropped = 0  # characters of content inside dropped elements
         self._dropping = 0
+
+    @property
+    def unclosed(self) -> bool:
+        """True if a dropped element was still open at the end of the input."""
+        return self._dropping > 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _DROPPED_CONTENT:
@@ -86,17 +99,24 @@ class _VisibleText(HTMLParser):
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if not self._dropping:
+        if self._dropping:
+            self.dropped += len(data)
+        else:
             self.parts.append(data)
 
 
-def strip_html(html: str) -> str:
-    """The visible text of `html` (or of plain text), normalized. Never executes or follows
-    anything; scripts, styles, comments and attributes disappear."""
+def strip_html_report(html: str) -> tuple[str, int, bool]:
+    """`(visible text, characters dropped, an element was left open)` for `html`. Never executes
+    or follows anything; scripts, styles, comments and attributes disappear."""
     reader = _VisibleText()
     reader.feed(html[:MAX_HTML_CHARS])
     reader.close()
-    return normalize_text("".join(reader.parts))
+    return normalize_text("".join(reader.parts)), reader.dropped, reader.unclosed
+
+
+def strip_html(html: str) -> str:
+    """The visible text of `html` (or of plain text), normalized."""
+    return strip_html_report(html)[0]
 
 
 # ---- fields ---------------------------------------------------------------------------
@@ -165,9 +185,13 @@ def _normalize(
 ) -> Item | str:
     """The item, or the reason (a `DISCARD_*` value) the entry is not stored."""
     flags: set[str] = set()
-    title_full = _one_line(strip_html(entry.title), 10 * MAX_TITLE_CHARS)
+    title_raw, title_dropped, title_open = strip_html_report(entry.title)
+    body_raw, body_dropped, body_open = strip_html_report(entry.body_html)
+    if title_open or body_open or title_dropped + body_dropped >= CONTENT_DROPPED_CHARS:
+        flags.add("content_dropped")
+    title_full = _one_line(neutralize_invisible(title_raw), 10 * MAX_TITLE_CHARS)
     title = title_full[:MAX_TITLE_CHARS]
-    text, text_cut = truncate_utf8(strip_html(entry.body_html), MAX_TEXT_BYTES)
+    text, text_cut = truncate_utf8(normalize_text(neutralize_invisible(body_raw)), MAX_TEXT_BYTES)
     if not title and not text.strip():
         return DISCARD_EMPTY
     if len(title_full) > MAX_TITLE_CHARS or text_cut:
@@ -191,7 +215,7 @@ def _normalize(
     if raw_cut:
         flags.add("raw_truncated")
 
-    author = _one_line(entry.author or "", MAX_AUTHOR_CHARS) or None
+    author = _one_line(neutralize_invisible(entry.author or ""), MAX_AUTHOR_CHARS) or None
     return Item(
         id=item_id(source_id, external_id),
         source_id=source_id,

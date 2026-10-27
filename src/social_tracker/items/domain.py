@@ -85,6 +85,46 @@ def normalize_text(raw: str) -> str:
     return _BLANK_LINES_RE.sub("\n\n", text).strip()
 
 
+# Characters with no visible form that reorder text (bidi controls and marks) or split a word so
+# that no search or keyword finds it (zero-width, soft hyphen, invisible operators, BOM).
+_BIDI = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c")
+_ZERO_WIDTH = frozenset("\u200b\u2060\ufeff\u00ad\u180e\u2061\u2062\u2063\u2064")
+_ALWAYS_REMOVED = _BIDI | _ZERO_WIDTH
+_JOINERS = frozenset("\u200c\u200d")  # ZWNJ and ZWJ: part of emoji sequences and some scripts
+
+
+def _ascii_alnum(char: str) -> bool:
+    return char.isascii() and char.isalnum()
+
+
+def neutralize_invisible(text: str) -> str:
+    """`text` without bidi controls (U+202A-202E, U+2066-2069, the left/right marks and the Arabic
+    letter mark) and without zero-width characters (ZWSP, word joiner, BOM, soft hyphen, the
+    invisible math operators): they can reorder what a reader sees or hide a word from every
+    search. The joiners ZWNJ and ZWJ are the exception because emoji sequences (family, flags)
+    and scripts such as Persian and Devanagari need them: they are kept unless they sit at an end
+    of the text, next to a space, or between two ASCII letters or digits (`sis<ZWJ>mo`, where
+    they can only be hiding something). Idempotent. The original stays in the raw payload."""
+    kept = [ch for ch in text if ch not in _ALWAYS_REMOVED]
+    out: list[str] = []
+    for index, char in enumerate(kept):
+        if char in _JOINERS:
+            before = out[-1] if out else ""
+            after = next((c for c in kept[index + 1 :] if c not in _JOINERS), "")
+            if (
+                not before
+                or not after
+                or before.isspace()
+                or after.isspace()
+                or (_ascii_alnum(before) and _ascii_alnum(after))
+            ):
+                continue
+            if before in _JOINERS:
+                continue  # a run of joiners counts once
+        out.append(char)
+    return "".join(out)
+
+
 def truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
     """`text` cut to at most `max_bytes` bytes of UTF-8, never inside a character."""
     encoded = text.encode("utf-8")
