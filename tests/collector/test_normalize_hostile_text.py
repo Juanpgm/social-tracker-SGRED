@@ -95,6 +95,22 @@ def test_joiners_that_belong_to_the_script_or_to_an_emoji_are_kept(text):
     assert one(title=text).title == text
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["x\u200d\u65e5\u672c", "\u65e5\u200dx", "1\u200d\U0001f468", "\U0001f468\u200cz"],
+    ids=["latin-cjk", "cjk-latin", "digit-emoji", "emoji-latin"],
+)
+def test_a_joiner_with_only_one_ascii_neighbour_is_kept(text):
+    assert one(title=text).title == text
+
+
+def test_a_run_of_joiners_counts_once():
+    assert one(title="\U0001f468\u200d\u200d\u200c\U0001f469").title == (
+        "\U0001f468\u200d\U0001f469"
+    )
+    assert neutralize_invisible("a\u200d\u200d\u200db") == "ab"
+
+
 def test_joiners_at_the_edges_or_next_to_spaces_are_removed():
     assert one(title="‍abc‌").title == "abc"
     assert one(title="a ‍ b").title == "a b"

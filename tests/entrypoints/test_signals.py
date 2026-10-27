@@ -63,6 +63,8 @@ def test_the_escalation_unwinds_the_stack_so_cleanup_runs():
 
 
 def test_signals_during_the_cleanup_after_an_escalation_are_ignored():
+    cleanup: list[str] = []
+
     def impatient():
         with stop_on_signals(lambda: None):
             try:
@@ -71,9 +73,12 @@ def test_signals_during_the_cleanup_after_an_escalation_are_ignored():
             finally:
                 signal.raise_signal(signal.SIGINT)  # the impatient third one: no new exception
                 signal.raise_signal(signal.SIGTERM)
+                cleanup.append("finished")  # reached only if neither of them interrupted it
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as caught:
         impatient()
+    assert cleanup == ["finished"]
+    assert caught.value.code == 143
 
 
 def test_a_new_context_starts_counting_from_zero_again():

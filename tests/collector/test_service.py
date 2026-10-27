@@ -352,6 +352,14 @@ def test_a_retry_after_beyond_its_maximum_is_clamped_and_the_clamp_is_logged(wor
     assert "src_news" in caplog.text
 
 
+def test_the_value_the_parser_clamps_to_is_logged_as_a_clamp(world, caplog):
+    world.ready()
+    world.fetcher.then(FetchError.http(429, retry_after_s=float(MAX_RETRY_AFTER_S)))
+    with caplog.at_level("INFO", logger="social_tracker.collector"):
+        collect(world)
+    assert "clamped" in caplog.text
+
+
 def test_a_retry_after_within_its_maximum_logs_no_clamp(world, caplog):
     world.ready()
     world.fetcher.then(FetchError.http(429, retry_after_s=MAX_RETRY_AFTER_S - 1.0))

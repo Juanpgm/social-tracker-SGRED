@@ -16,7 +16,10 @@ What it does, in order:
   error, costs that source or that pass and nothing more.
 - STOP (`request_stop`, wired to SIGINT/SIGTERM by the entrypoint): no new collection starts; the
   one in flight is completed and committed, never abandoned half-written (PC-6). The wait for
-  it is bounded by the fetcher's deadline, well inside the 30 s the product allows.
+  it is bounded by the fetcher's deadline (a wall-clock budget enforced inside every connect,
+  read, write and name lookup, see `collector.http_fetcher`), well inside the 30 s the product
+  allows. A second signal does not wait: the entrypoint exits at once (`entrypoints.signals`) and
+  the next start recovers the abandoned collection.
 
 The clock and the sleeper are injected so the loop is deterministic under test. Logs name source
 ids, counts and fixed reasons; never URLs, item text or exception messages.

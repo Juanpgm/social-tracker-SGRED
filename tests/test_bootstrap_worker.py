@@ -176,7 +176,9 @@ def test_allowed_ports_are_a_comma_separated_list_with_the_web_ports_as_default(
 
 
 @pytest.mark.parametrize(
-    "raw", ["0", "65536", "-1", "http", "80;443", "8o80", "80 443", "1.5", "٨٠", "+80", "1" * 9]
+    "raw",
+    ["0", "65536", "-1", "http", "80;443", "8o80", "80 443", "1.5", "٨٠", "+80", "1" * 9]
+    + ["9" * 5000],
 )
 def test_a_malformed_port_list_is_refused_with_the_variable_name(raw):
     with pytest.raises(ValidationError) as caught:

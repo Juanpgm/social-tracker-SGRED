@@ -136,6 +136,16 @@ def test_a_reset_needs_an_actor_and_a_reason(rig):
     assert rig.service.get_state("src_one").state is CollectionState.FAILED
 
 
+@pytest.mark.parametrize("state", ["idle", "disabled"])
+def test_the_actor_and_reason_are_checked_even_when_there_is_nothing_to_reset(rig, state):
+    if state == "disabled":
+        rig.registry.disable("src_one", **WHO)
+    with pytest.raises(ValidationError):
+        rig.service.reset_if_failed("src_one", actor="a", reason="   ")
+    with pytest.raises(ValidationError):
+        rig.service.reset_if_failed("src_one", actor="", reason="x")
+
+
 def test_reset_failed_itself_clears_the_error_and_still_refuses_other_states(rig):
     rig.fail_completely()
     rig.service.reset_failed("src_one", **WHO)
@@ -155,6 +165,12 @@ def test_enabling_a_source_clears_its_stale_error(rig):
     rig.registry.enable("src_one", **WHO)
     status = rig.repo.get_fetch_status("src_one")
     assert (status.last_error, status.last_fetch_at, status.etag) == (None, FETCHED, '"v1"')
+
+
+def test_disabling_a_source_keeps_its_last_error_for_the_operator_to_read(rig):
+    rig.repo.save_fetch_status(FetchStatus("src_one", FETCHED, "http 503"))
+    rig.registry.disable("src_one", **WHO)
+    assert rig.repo.get_fetch_status("src_one").last_error == "http 503"
 
 
 def test_enabling_an_enabled_source_changes_nothing_including_its_error(rig):

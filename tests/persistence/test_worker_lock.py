@@ -5,6 +5,7 @@ exits or crashes, so a stale lock file never blocks anyone (a hard kill is teste
 second process).
 """
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -59,6 +60,18 @@ def test_the_lock_file_sits_next_to_the_database(db):
         lock.release()
 
 
+def test_the_holder_writes_its_process_id_for_a_human_to_read(db):
+    lock = WorkerLock(db)
+    lock.acquire()
+    try:
+        with open(lock.path, "rb") as fh:
+            fh.seek(1)  # byte 0 is the locked byte on Windows and cannot be read by others
+            note = fh.read().decode("ascii")
+    finally:
+        lock.release()
+    assert note.strip() == f"pid {os.getpid()}"
+
+
 def test_a_second_holder_in_the_same_process_is_refused_with_a_clear_message(db):
     first = WorkerLock(db)
     first.acquire()
@@ -70,6 +83,37 @@ def test_a_second_holder_in_the_same_process_is_refused_with_a_clear_message(db)
     assert isinstance(caught.value, DomainError)
     assert "another worker" in caught.value.message
     assert str(db) not in caught.value.message  # error messages never carry paths
+
+
+def is_open(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
+
+
+def test_a_refused_attempt_does_not_leak_its_file_descriptor(db, monkeypatch):
+    holder = WorkerLock(db)
+    holder.acquire()
+    opened: list[int] = []
+    real_open = os.open
+
+    def spying_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", spying_open)
+    try:
+        for _ in range(3):
+            with pytest.raises(WorkerLockHeldError):
+                WorkerLock(db).acquire()
+    finally:
+        monkeypatch.undo()
+        holder.release()
+    assert len(opened) == 3
+    assert not any(is_open(fd) for fd in opened)
 
 
 def test_the_lock_is_free_again_after_release(db):

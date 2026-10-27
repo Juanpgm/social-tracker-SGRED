@@ -229,6 +229,49 @@ def test_a_budget_already_spent_before_the_lookup_never_starts_one():
     assert resolver.calls == []
 
 
+def clock_reading(*values: float):
+    """A monotonic clock that returns `values` in order, then the last one forever."""
+    reads = list(values)
+
+    def monotonic() -> float:
+        return reads.pop(0) if len(reads) > 1 else reads[0]
+
+    return monotonic
+
+
+def test_a_budget_of_exactly_zero_is_already_spent_before_the_fetch_starts():
+    resolver = FakeResolver()
+    # started at 0; the first check happens at exactly the deadline
+    fetcher, net, _ = build(
+        ok(), resolver, limits=FetchLimits(deadline_s=5.0), monotonic=clock_reading(0.0, 5.0)
+    )
+    error = failure(lambda: fetcher.fetch(FetchRequest("https://feeds.example.org/x")))
+    assert error.kind is FetchErrorKind.TIMEOUT
+    assert (resolver.calls, net.requests) == ([], [])
+
+
+def test_a_budget_of_exactly_zero_at_the_lookup_never_starts_it():
+    resolver = FakeResolver()
+    # started at 0, still fine at the loop check, exactly spent when the lookup begins
+    fetcher, net, _ = build(
+        ok(), resolver, limits=FetchLimits(deadline_s=5.0), monotonic=clock_reading(0.0, 0.0, 5.0)
+    )
+    error = failure(lambda: fetcher.fetch(FetchRequest("https://feeds.example.org/x")))
+    assert error.kind is FetchErrorKind.TIMEOUT
+    assert (resolver.calls, net.requests) == ([], [])
+
+
+def test_a_budget_of_exactly_zero_at_an_address_attempt_sends_nothing():
+    # started 0; loop check 0; lookup 0; the attempt check sees exactly the deadline
+    fetcher, net, resolver = build(
+        ok(), limits=FetchLimits(deadline_s=5.0), monotonic=clock_reading(0.0, 0.0, 0.0, 5.0)
+    )
+    error = failure(lambda: fetcher.fetch(FetchRequest("https://feeds.example.org/x")))
+    assert error.kind is FetchErrorKind.TIMEOUT
+    assert net.requests == []
+    assert len(resolver.calls) == 1
+
+
 def test_the_resolver_thread_is_a_daemon_so_a_hung_lookup_cannot_block_exit():
     resolver = SlowResolver(OVERLONG)
     fetcher = fetcher_for(resolver=resolver, deadline_s=0.3)
@@ -377,6 +420,21 @@ def test_an_exhausted_budget_fails_without_touching_the_socket(spent):
         backend.connect_tcp("1.2.3.4", 80, timeout=30.0)
     assert inner.stream.calls == []
     assert inner.connects == [10.0]  # only the first connect, made while the budget lasted
+
+
+def test_the_connection_after_the_tls_upgrade_keeps_spending_the_same_budget():
+    now = {"t": 0.0}
+    backend, inner = backend_at(now)
+    secure = backend.connect_tcp("1.2.3.4", 443, timeout=30.0).start_tls(None, "h", timeout=30.0)
+    secure.read(10, timeout=30.0)
+    assert inner.stream.calls[-1] == ("read", 10.0)
+    now["t"] = 9.5
+    secure.write(b"x", timeout=30.0)
+    assert inner.stream.calls[-1] == ("write", 0.5)
+    now["t"] = 10.0
+    with pytest.raises(httpcore2.ReadTimeout):
+        secure.read(10, timeout=30.0)
+    assert len(inner.stream.calls) == 3  # the exhausted read never reached the socket
 
 
 def test_closing_and_asking_about_the_socket_pass_through_after_the_deadline():
