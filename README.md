@@ -3,7 +3,8 @@
 Tracks social-media signals and surfaces risk. This release (slice 1) provides the foundation:
 a registry of **sources** (news RSS feeds, Instagram accounts, live streams, recorded audio), the
 **analysis switches** (system-wide and per source), a SQLite store and an append-only **audit
-log** in which every change records who made it and why.
+log** in which every change records who made it and why. A local **web UI** (`serve`) manages
+the same data from a browser.
 
 The collection and analysis workers are not part of this slice: nothing here fetches or analyses
 anything yet, and nothing ever publishes or sends data outside the system. You manage what *will*
@@ -78,6 +79,7 @@ source is enabled, and the source's own analysis switch is on. `status` counts t
 | `sources export [-o, --output FILE] [--force]` | Write every source as YAML to stdout or a file. |
 | `analysis on` / `analysis off` `[--source ID]` | Switch analysis for the system or for one source. |
 | `status` | Switches, alert threshold, source counts, collection states. |
+| `serve [--host H] [--port N] [--allow-non-loopback]` | Run the local web UI (see [Web UI](#web-ui)). |
 
 `--set KEY=VALUE` takes a source field. The value is read as JSON when it parses (`600`, `true`,
 `null`, `["flood","fire"]`) and as plain text otherwise; wrap text that looks like JSON in quotes
@@ -200,6 +202,41 @@ uv run social-tracker sources add weekly_podcast --type recorded_audio --name "W
 
 After adding, `sources enable ID` makes a source eligible for collection and `analysis on --source
 ID` opts it into analysis.
+
+## Web UI
+
+`uv run social-tracker serve` starts a local web UI on `http://127.0.0.1:8765` (`--host`,
+`--port`). It manages the same sources and switches as the CLI, from the same database
+(`SOCIAL_TRACKER_DB_PATH`): a sources list with the collection state, add and edit forms that
+adapt to the source type, enable and disable, the system and per-source analysis switches, and a
+delete page that asks for confirmation and says that alerts and derived data are kept. A short
+guide per source type is at `/howto` and in [docs/howto.md](docs/howto.md). The worker status
+panel (GPU and model, stream lag) reads `n/a - no worker running` until the workers exist, and
+there is no alerts view yet.
+
+It is meant for one operator on this machine:
+
+- **Loopback only.** `serve` refuses any other `--host` unless you pass `--allow-non-loopback`,
+  because the UI has no login: anyone who can connect can change your sources. Pages are only
+  served for `localhost`, `127.0.0.1`, `[::1]` and the host you bind (the `Host` header is
+  checked, which defeats DNS rebinding), so binding `0.0.0.0` is reachable only through those
+  names; bind a specific address to use it from elsewhere.
+- **Protected requests.** Every change is a POST that needs a CSRF token tied to your browser
+  session (a `SameSite=Strict` cookie), bodies are limited to 16 KiB, and responses carry a strict
+  `Content-Security-Policy`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and
+  `X-Content-Type-Options: nosniff`. All text is escaped; a name such as `<script>` is shown as
+  text.
+- **Offline and read-only toward the world.** htmx is vendored under the package's `static/`
+  directory (no CDN), the UI makes no outbound request, and it has no publish, share, post or
+  approve action.
+- **No secrets.** Instagram takes a `secret_ref` (`env:NAME`, `keyring:NAME`, `file:NAME`), never
+  a password. The reference is never shown back; leave the box empty on an edit to keep it.
+- **Audited.** Each change is attributed to the actor `web:local` with the reason you give (it
+  defaults to `via web UI`; the row buttons use that default).
+- **Failures stay readable.** A busy database or a source deleted in another tab shows a short
+  message, never a traceback; a switch that fails shows the row as the server holds it.
+
+Pages work without JavaScript; with it, the row buttons update in place.
 
 ## Audit log
 

@@ -364,3 +364,39 @@ def status() -> None:
     with _guard(), closing(build_container()) as services:
         overview, db_path = services.control.overview(), services.db_path
     typer.echo(_render_status(overview, db_path))
+
+
+# ---- web UI ----
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
+
+
+@app.command("serve")
+def serve(
+    host: Annotated[
+        str, typer.Option("--host", help="Address to listen on. Loopback only unless allowed.")
+    ] = DEFAULT_HOST,
+    port: Annotated[int, typer.Option("--port", min=1, max=65535, help="TCP port.")] = DEFAULT_PORT,
+    allow_non_loopback: Annotated[
+        bool,
+        typer.Option(
+            "--allow-non-loopback",
+            help="WARNING: let --host be an address other machines can reach. The UI has no "
+            "login: anyone who can connect can change your sources.",
+        ),
+    ] = False,
+) -> None:
+    """Run the local web UI to manage sources (it never publishes or sends anything)."""
+    # Imported here so the other commands do not load the web stack.
+    from social_tracker.entrypoints.web.security import is_loopback
+    from social_tracker.entrypoints.web.server import run_server
+
+    with _guard():
+        if allow_non_loopback and not is_loopback(host):
+            typer.echo(
+                "warning: the UI has no login; every machine that can reach this address can "
+                "change your sources",
+                err=True,
+            )
+        run_server(host, port, allow_non_loopback=allow_non_loopback)

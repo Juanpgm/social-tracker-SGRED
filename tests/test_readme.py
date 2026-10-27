@@ -20,7 +20,7 @@ from social_tracker.sources.yaml_io import MAX_FILE_BYTES, load_sources
 README = Path(__file__).resolve().parent.parent / "README.md"
 FENCE = re.compile(r"```(\w+)\n(.*?)```", re.DOTALL)
 FLAG = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
-SUBCOMMAND = re.compile(r"\b(?:(sources|analysis) ([a-z]+)|(status))\b")
+SUBCOMMAND = re.compile(r"\b(?:(sources|analysis) ([a-z]+)|(status|serve))\b")
 FILE_SUFFIXES = {"-wal", "-shm"}  # SQLite sidecar files, written like flags in the prose
 CONTINUATION = "\\\n"
 EXECUTABLE = "uv run social-tracker"
@@ -182,3 +182,16 @@ def test_every_flag_named_in_code_anywhere_in_the_readme_is_a_real_option(readme
     named -= FILE_SUFFIXES
     assert {"--reason", "--dry-run", "--output", "--force", "--set", "--source"} <= named
     assert named <= every, sorted(named - every)
+
+
+def test_the_web_ui_section_documents_the_real_defaults(readme: str):
+    from social_tracker.entrypoints.cli import DEFAULT_HOST, DEFAULT_PORT
+    from social_tracker.entrypoints.web.formdata import MAX_BODY_BYTES
+    from social_tracker.entrypoints.web.forms import ACTOR, DEFAULT_REASON
+
+    section = readme.split("## Web UI", 1)[1].split("\n## ", 1)[0]
+    assert f"http://{DEFAULT_HOST}:{DEFAULT_PORT}" in section
+    assert f"`{ACTOR}`" in section
+    assert f"`{DEFAULT_REASON}`" in section
+    assert f"{MAX_BODY_BYTES // 1024} KiB" in section
+    assert "--allow-non-loopback" in section
