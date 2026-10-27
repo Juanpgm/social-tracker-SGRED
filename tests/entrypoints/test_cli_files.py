@@ -324,3 +324,32 @@ def test_exporting_a_registry_with_every_type_works(cli: Cli):
     exported = cli.ok("sources", "export").stdout
     for expected in ("type: news_rss", "type: live_stream", "type: recorded_audio"):
         assert expected in exported
+
+
+def sources_file(prefix: str, count: int) -> str:
+    entries = [
+        f"  - id: {prefix}_{n:02d}\n    type: news_rss\n    name: Feed {n:02d}\n"
+        f"    feed_url: https://example.org/{n}.xml\n"
+        for n in range(count)
+    ]
+    return "sources:\n" + "".join(entries)
+
+
+@pytest.mark.parametrize(
+    ("conflicts", "more"),
+    [(1, None), (20, None), (21, "  and 1 more"), (25, "  and 5 more")],
+)
+def test_at_most_twenty_import_conflicts_are_listed_followed_by_the_remaining_count(
+    cli: Cli, tmp_path: Path, conflicts: int, more: str | None
+):
+    cli.ok("sources", "import", str(write(tmp_path, sources_file("old", 25))), "-r", WHY)
+    # new ids, but the names of the first `conflicts` stored sources: one name conflict each
+    clashing = sources_file("new", conflicts)
+    path = write(tmp_path, clashing, "clash.yaml")
+    lines = assert_clean_failure(cli("sources", "import", str(path), "-r", WHY)).splitlines()
+    assert lines[0] == f"error: import rejected: {conflicts} conflict(s) with existing sources"
+    listed = [line for line in lines[1:] if line.startswith("  entry ")]
+    assert len(listed) == min(conflicts, 20)
+    assert listed[0] == "  entry 0: name is used by another source"
+    assert listed[-1] == f"  entry {min(conflicts, 20) - 1}: name is used by another source"
+    assert lines[1 + len(listed) :] == ([more] if more else [])

@@ -207,12 +207,12 @@ def test_edit_changes_fields_and_audits_what_changed(cli: Cli):
     cli.add()
     result = cli.ok(
         "sources", "edit", "src_news", "--set", "credibility=5",
-        "--set", 'keywords=["flood","fire"]', "--reason", WHY,
+        "--set", 'keywords=["flood","fire"]', "--reason", WHY, "--actor", "alice",
     )  # fmt: skip
     assert result.stdout == "updated src_news\n"
     (detail,) = cli.details(SOURCE_EDITED)
     assert detail["changed"] == ["credibility", "keywords"]
-    assert (detail["actor"], detail["reason"]) == ("tester", WHY)
+    assert (detail["actor"], detail["reason"]) == ("alice", WHY)
     exported = cli.ok("sources", "export").stdout
     assert "credibility: 5" in exported
     assert "- flood" in exported

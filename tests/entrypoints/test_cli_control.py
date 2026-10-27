@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 from typer.testing import CliRunner
 
+from social_tracker.bootstrap import DB_PATH_ENV, build_container
 from social_tracker.control.service import (
     EVENT_GLOBAL_ANALYSIS,
     EVENT_SOURCE_ANALYSIS,
@@ -187,3 +188,21 @@ def test_output_that_the_terminal_cannot_encode_is_escaped_instead_of_crashing(c
     listing = cli.ok("sources", "list")
     assert "Ciudad " + chr(92) + "u57ce" in listing.stdout
     assert listing.stderr == ""
+
+
+def test_status_shows_a_stored_threshold_as_a_plain_decimal(cli: Cli):
+    cli.ok("status")  # creates the database
+    container = build_container({DB_PATH_ENV: str(cli.db_path)})
+    try:
+        container.control.set_alert_min_confidence(0.00001, actor="tester", reason=WHY)
+    finally:
+        container.close()
+    assert "alert threshold: 0.00001\n" in cli.ok("status").stdout
+
+
+@pytest.mark.parametrize("group", [[], ["sources"], ["analysis"]])
+def test_a_command_group_without_a_subcommand_prints_its_help(cli: Cli, group: list[str]):
+    result = cli(*group)
+    assert "Usage:" in result.stdout
+    assert "Commands" in result.stdout
+    assert not cli.db_path.exists()

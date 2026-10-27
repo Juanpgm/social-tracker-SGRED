@@ -42,3 +42,28 @@ def test_the_app_runs_as_a_real_process_with_separate_streams_and_exit_codes(tmp
 
 def _environ(extra: dict[str, str]) -> dict[str, str]:
     return {**os.environ, **extra}
+
+
+def test_an_unexpected_failure_prints_a_traceback_without_local_variables(tmp_path: Path):
+    canary = "canary-" + "local-77"
+    script = f"""
+import social_tracker.entrypoints.cli as cli
+
+def explode():
+    pasted = "{canary}"
+    raise RuntimeError("unexpected")
+
+cli.build_container = explode
+cli.app()
+"""
+    env = {**os.environ, DB_PATH_ENV: str(tmp_path / "x.db")}
+    result = subprocess.run(
+        [sys.executable, "-c", script, "sources", "list"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "RuntimeError" in result.stderr  # a bug is still reported loudly...
+    assert canary not in result.stdout + result.stderr  # ...but never with the values in scope
