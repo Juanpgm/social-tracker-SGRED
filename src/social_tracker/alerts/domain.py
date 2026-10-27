@@ -13,9 +13,14 @@ An alert says that a stored verdict deserves a person's attention. The policy is
   (`AlertSettings`).
 
 The age of an event is the time between the item's publication date and the moment THIS
-application first saw it (`event_age`): the first sighting is the only clock a feed cannot forge,
-and a publication date in the future counts as no age. Both the policy and the age are pure
-functions, so the same verdict always gets the same severity.
+application first saw it (`event_age`). The moment of the first sighting is the application's own
+clock; the publication date is the feed's, which can write anything. So the date can only be
+trusted so far: a date in the future counts as no age, and a date that is missing (the collector
+put the fetch time in its place and flagged the item) means the age is UNKNOWN, and an unknown age
+is never fresh (`UNKNOWN_AGE`, older than any window). A backdated date can only make an event look
+older: at most it lowers a critical contradiction of the catalog to high; it never raises a
+severity. Both the policy and the age are pure functions, so the same verdict always gets the
+same severity.
 
 An alert is a projection of its members (the items that raised it, AL-6): `project` builds it
 from them, so merging a duplicate can only raise the severity (it is the highest of the active
@@ -230,9 +235,18 @@ def qualifies(label: Any, confidence: Any, min_confidence: Any) -> bool:
     return chosen in RISK_LABELS and score >= threshold
 
 
-def event_age(published_at: datetime, first_seen_at: datetime) -> timedelta:
-    """How old the event was when this application first saw it; never negative."""
+UNKNOWN_AGE = timedelta(seconds=10**10)  # "no idea how old": older than any window
+
+
+def event_age(
+    published_at: datetime, first_seen_at: datetime, *, date_known: bool = True
+) -> timedelta:
+    """How old the event was when this application first saw it; never negative. With
+    `date_known` False (the feed gave no usable date, or one from the future) the age is
+    `UNKNOWN_AGE`, so the event is never taken for a fresh one."""
     published, seen = _aware(published_at, "publication time"), _aware(first_seen_at, "time seen")
+    if not date_known:
+        return UNKNOWN_AGE
     return max(timedelta(0), seen - published)
 
 

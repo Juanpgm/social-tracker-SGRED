@@ -7,14 +7,19 @@ The text of an item is untrusted. What an alert keeps of it is:
 - plain: control characters (NUL, escape sequences...), hidden format characters (zero width,
   right-to-left overrides, soft hyphen, BOM), line and paragraph separators and lone surrogates
   are removed; every other run of white space is one space;
-- free of secrets: a link loses its credentials, query and fragment (a query string is where
-  tokens live), and cookies, authorization headers, tokens, passwords and the like are replaced by
-  `[redacted]`.
+- free of secrets: a link loses its credentials (any scheme), query and fragment (a query string
+  is where tokens live) and any token-looking segment of its path; cookies, authorization headers,
+  vendor keys (AWS, GitHub, OpenAI, Slack, Google, Stripe, SendGrid, JWT), `password`, `secret`,
+  `api key`, `token` and `bearer` said in a sentence, and any long random-looking token are replaced
+  by `[redacted]`. The rules are tuned against false positives: ordinary Spanish prose, numbers,
+  magnitudes, dates, hashtags and plain links come out as they went in.
 
 It is stored as text and is NOT HTML-escaped: the template that draws it escapes it.
 """
 
+import math
 import re
+from collections import Counter
 
 from social_tracker.alerts.domain import (
     MAX_EXCERPT_CHARS,
@@ -47,20 +52,111 @@ HIDDEN_RE = re.compile(f"[{_HIDDEN}]")
 _SPACE_CONTROLS = str.maketrans({"\t": " ", "\x0b": " ", "\x0c": " ", "\r": "\n"})
 _SPACES_RE = re.compile(r"\s+")
 
-# A link keeps its scheme, host and path only.
+# A link keeps its scheme, host and path only; the path loses what looks like a token.
 _URL_RE = re.compile(r"(https?://)(?:[^\s/?#@]*@)?([^\s/?#]*)([^\s?#]*)(?:[?#]\S*)?", re.IGNORECASE)
+# Credentials in the address of ANY other scheme (ftp, postgres, redis, amqp, ssh...).
+_USERINFO_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9+.\-]*://)[^\s/?#@]+@")
 _LINE_SECRET_RE = re.compile(
     r"\b(cookie|set-cookie|authorization|proxy-authorization)\s*[:=][^\n]*", re.IGNORECASE
 )
-_PAIR_SECRET_RE = re.compile(
-    r"\b(x-api-key|api[_-]?key|(?:access|refresh|auth|id|session|csrf)[_-]?token|token|"
-    r"(?:client[_-]?)?secret|password|passwd|pwd|session[_-]?id|csrftoken)"
-    r"""\s*[:=]\s*("[^"\n]*"|'[^'\n]*'|[^\s;,&]+)""",
-    re.IGNORECASE,
+_KEYWORDS = (
+    r"x-api-key|api[ _-]?key|(?:access|refresh|auth|id|session|csrf)[_-]?token|token|"
+    r"(?:client[_-]?)?secret|password|passwd|pwd|session[_-]?id|csrftoken"
 )
-_BEARER_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+_VALUE = r"""("[^"\n]*"|'[^'\n]*'|[^\s;,&]+)"""
+# `password: x`, `pwd=x`: said as an assignment, whatever the value.
+_PAIR_SECRET_RE = re.compile(rf"\b({_KEYWORDS})\s*[:=]\s*{_VALUE}", re.IGNORECASE)
+# `my password is hunter2hunter2`, `api key abcd1234`: said in a sentence. The value must be at
+# least 6 characters and look like a secret (a digit, a symbol or mixed case), so that "the
+# password manager is down" and "the token expired" stay as they are.
+_SPOKEN_SECRET_RE = re.compile(
+    rf"\b({_KEYWORDS})\s+(?:(?:is|es)\s+)?(\"[^\"\n]*\"|'[^'\n]*'|[^\s;,&]{{6,}})", re.IGNORECASE
+)
+# `Bearer abc123`: at least 6 characters, with a digit or symbol in them or 10 or more of them (so
+# that "bearer of bad news" and "bearer bonds" stay as they are).
+_BEARER_RE = re.compile(r"\bbearer\s+([A-Za-z0-9._~+/=-]{6,})", re.IGNORECASE)
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*")
 _LONG_HEX_RE = re.compile(r"\b[0-9a-fA-F]{32,}\b")
+_VENDOR_RE = re.compile(
+    "|".join(
+        [
+            r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",  # AWS access key ids
+            r"\bgh[pousr]_[A-Za-z0-9]{20,}",  # GitHub tokens
+            r"\bgithub_pat_[A-Za-z0-9_]{20,}",
+            r"\bsk-[A-Za-z0-9_-]{16,}",  # OpenAI-style keys
+            r"\bxox[abprs]-[A-Za-z0-9-]{10,}",  # Slack tokens
+            r"\bAIza[0-9A-Za-z_-]{30,}",  # Google API keys
+            r"\bya29\.[0-9A-Za-z_-]{20,}",  # Google OAuth tokens
+            r"\b(?:sk|rk|pk)_(?:live|test)_[0-9A-Za-z]{10,}",  # Stripe
+            r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",  # SendGrid
+            r"\bhooks\.slack\.com/services/[A-Za-z0-9/_-]+",  # Slack webhooks
+        ]
+    )
+)
+# A long run of token characters; whether it is a secret is decided by `_random_token`.
+_TOKENISH_RE = re.compile(r"(?<![\w#@])[A-Za-z0-9+/_=-]{24,}(?!\w)")
+_CAMEL_WORDS_RE = re.compile(r"(?:[A-Z][a-z]+|[0-9]+)+")  # TerremotoEnCali2026: words, not a key
+_HEX_RE = re.compile(r"[0-9a-fA-F]{16,}")
+_MIN_PATH_TOKEN = 16
+_MIN_RANDOM_TOKEN = 24
+_MIN_ENTROPY = 3.8  # bits per character; random base64 is ~4.4, prose in CamelCase ~4.0
+
+
+def _classes(token: str) -> int:
+    return (
+        any(c.islower() for c in token)
+        + any(c.isupper() for c in token)
+        + any(c.isdigit() for c in token)
+    )
+
+
+def _entropy(token: str) -> float:
+    counts = Counter(token)
+    total = len(token)
+    return -sum(n / total * math.log2(n / total) for n in counts.values())
+
+
+def _random_token(token: str) -> bool:
+    """A long run of letters of both cases and digits that is not CamelCase words: a key."""
+    return (
+        len(token) >= _MIN_RANDOM_TOKEN
+        and _classes(token) == 3
+        and _CAMEL_WORDS_RE.fullmatch(token) is None
+        and _entropy(token) >= _MIN_ENTROPY
+    )
+
+
+def _path_token(segment: str) -> bool:
+    """A segment of a link path that is a secret rather than a name: 16 or more hex digits with
+    at least a digit and a letter, or letters of both cases mixed with digits."""
+    if len(segment) < _MIN_PATH_TOKEN:
+        return False
+    if _HEX_RE.fullmatch(segment):
+        return any(c.isdigit() for c in segment) and any(c.isalpha() for c in segment)
+    return re.fullmatch(r"[A-Za-z0-9_-]+", segment) is not None and _classes(segment) == 3
+
+
+def _bearer(match: re.Match[str]) -> str:
+    value = match.group(1)
+    if len(value) >= 10 or any(c.isdigit() or c in "._~+/=-" for c in value):
+        return f"Bearer {REDACTED}"
+    return match.group(0)
+
+
+def _link(match: re.Match[str]) -> str:
+    path = "/".join(REDACTED if _path_token(s) else s for s in match.group(3).split("/"))
+    return match.group(1) + match.group(2) + path
+
+
+def _spoken(match: re.Match[str]) -> str:
+    value = match.group(2)
+    quoted = value[:1] in "\"'"
+    secret = quoted or (
+        any(c.isdigit() for c in value)
+        or any(c in "_-+/=@!#$%^&*~" for c in value)
+        or (any(c.isupper() for c in value) and any(c.islower() for c in value))
+    )
+    return f"{match.group(1)}={REDACTED}" if secret else match.group(0)
 
 
 def _visible(raw: str) -> str:
@@ -71,12 +167,16 @@ def _visible(raw: str) -> str:
 
 def redact(text: str) -> str:
     """`text` without credentials in links and without anything that looks like a secret."""
-    text = _URL_RE.sub(lambda m: m.group(1) + m.group(2) + m.group(3), text)
+    text = _URL_RE.sub(_link, text)
+    text = _USERINFO_RE.sub(r"\1", text)
     text = _LINE_SECRET_RE.sub(lambda m: f"{m.group(1)}: {REDACTED}", text)
     text = _PAIR_SECRET_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", text)
-    text = _BEARER_RE.sub(f"Bearer {REDACTED}", text)
+    text = _SPOKEN_SECRET_RE.sub(_spoken, text)
+    text = _BEARER_RE.sub(_bearer, text)
+    text = _VENDOR_RE.sub(REDACTED, text)
     text = _JWT_RE.sub(REDACTED, text)
-    return _LONG_HEX_RE.sub(REDACTED, text)
+    text = _LONG_HEX_RE.sub(REDACTED, text)
+    return _TOKENISH_RE.sub(lambda m: REDACTED if _random_token(m.group(0)) else m.group(0), text)
 
 
 def make_excerpt(title: str, text: str) -> str:

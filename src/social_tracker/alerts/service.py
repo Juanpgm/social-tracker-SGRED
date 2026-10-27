@@ -84,6 +84,8 @@ PARK_AFTER = 5  # failures of one item after which the step stops trying it by i
 BACKOFF_BASE = timedelta(seconds=30)  # doubled after every failure of the same item...
 BACKOFF_CAP = timedelta(hours=1)  # ...up to this
 _ROUTINE = frozenset({AlertEventKind.MERGED, AlertEventKind.UPDATED})
+# item flags that say the publication date is not the feed's own word (A3)
+_UNDATED = frozenset({"published_at_missing", "published_at_future"})
 _LOG = logging.getLogger("social_tracker.alerts")
 _MAX_REASON = 480
 
@@ -288,7 +290,9 @@ class AlertService:
         item = self._items.get(verdict.item_id)
         if item is None:
             return Outcome.SKIPPED
-        age = event_age(item.published_at, item.fetched_at)
+        age = event_age(
+            item.published_at, item.fetched_at, date_known=not _UNDATED.intersection(item.flags)
+        )
         severity = assess(
             verdict.label,
             verdict.confidence,
