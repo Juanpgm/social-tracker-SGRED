@@ -1,8 +1,13 @@
 """The sources list (UI-2), the global switch panel and the worker-status placeholders (UI-9)."""
 
+import re
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 
+from social_tracker.control.domain import MAX_CONSECUTIVE_FAILURES, CollectionState, SourceState
+from social_tracker.persistence.control_repo import SqliteControlRepository
+from social_tracker.persistence.db import Database
 from tests.actors import WHO
 from tests.entrypoints.web.conftest import Web, row_of, visible_text
 
@@ -15,7 +20,7 @@ def test_an_empty_registry_shows_an_empty_state_with_how_to_links(web: Web):
     assert 'href="/sources/new"' in page
 
 
-def test_a_source_row_shows_what_slice_one_knows_and_n_a_for_the_rest(web: Web):
+def test_a_source_row_shows_what_is_known_and_explicit_placeholders_for_the_rest(web: Web):
     web.seed("city_news", name="City News", credibility=4)
     row = visible_text(row_of(web.client.get("/").text, "city_news"))
     assert "City News" in row
@@ -23,7 +28,11 @@ def test_a_source_row_shows_what_slice_one_knows_and_n_a_for_the_rest(web: Web):
     assert "recorded" in row  # mode
     assert "4" in row
     assert "disabled" in row  # collection state of a fresh source
-    assert row.count("n/a") == 2  # last fetch and last error do not exist yet
+    # no collector exists yet, so there is no last fetch or last error: marked, not invented
+    html_row = row_of(web.client.get("/").text, "city_news")
+    assert re.findall(r'<td class="placeholder">([^<]*)</td>', html_row) == ["n/a", "n/a"]
+    headers = re.findall(r'<th scope="col">([^<]+)</th>', web.client.get("/").text)
+    assert headers[-4:-1] == ["Health", "Last fetch", "Last error"]
 
 
 def test_an_enabled_source_shows_idle_and_a_failed_one_shows_failures_and_retry(web: Web):
@@ -77,10 +86,6 @@ def test_a_known_notice_code_is_shown_and_an_unknown_one_is_ignored(web: Web):
 
 
 def test_a_failed_source_shows_its_failures_and_no_retry_time(web: Web):
-    from social_tracker.control.domain import MAX_CONSECUTIVE_FAILURES, CollectionState, SourceState
-    from social_tracker.persistence.control_repo import SqliteControlRepository
-    from social_tracker.persistence.db import Database
-
     web.seed("src_dead", name="Dead Feed")
     web.post("/sources/src_dead/enable")
     failed = SourceState("src_dead", CollectionState.FAILED, MAX_CONSECUTIVE_FAILURES)
@@ -90,3 +95,37 @@ def test_a_failed_source_shows_its_failures_and_no_retry_time(web: Web):
     assert "failed" in row
     assert f"{MAX_CONSECUTIVE_FAILURES} failures" in row
     assert "retry after" not in row
+
+
+def health_cell(web: Web, source_id: str) -> str:
+    html_row = row_of(web.client.get("/").text, source_id)
+    found = re.search(r'<td class="health-[a-z]+">(.*?)</td>', html_row)
+    assert found, source_id
+    return visible_text(found.group(1))
+
+
+def test_health_is_derived_from_the_collection_state_with_the_real_reason(web: Web):
+    for source_id in ("src_off", "src_ok", "src_run", "src_slow", "src_dead"):
+        web.seed(source_id, name=source_id.title())
+    retry = datetime(2031, 5, 6, 7, 8, 9, tzinfo=UTC)
+    with closing(web.services()) as services:
+        for source_id in ("src_ok", "src_run", "src_slow", "src_dead"):
+            services.sources.enable(source_id, **WHO)
+        services.control.start_collection("src_run", **WHO)
+    with Database(Path(web.env["SOCIAL_TRACKER_DB_PATH"])) as db:
+        repo = SqliteControlRepository(db)
+        repo.save_source_state(SourceState("src_slow", CollectionState.BACKOFF, 2, retry))
+        repo.save_source_state(
+            SourceState("src_dead", CollectionState.FAILED, MAX_CONSECUTIVE_FAILURES)
+        )
+    assert health_cell(web, "src_off") == "n/a (the source is disabled)"
+    assert health_cell(web, "src_ok") == "ok"
+    assert health_cell(web, "src_run") == "ok"
+    assert health_cell(web, "src_slow") == f"degraded (2 failures, retry after {retry.isoformat()})"
+    assert health_cell(web, "src_dead") == (
+        f"failed ({MAX_CONSECUTIVE_FAILURES} failures, collection stopped)"
+    )
+    page = web.client.get("/").text
+    assert 'class="health-degraded"' in row_of(page, "src_slow")
+    assert 'class="health-failed"' in row_of(page, "src_dead")
+    assert "retry after" not in health_cell(web, "src_dead")

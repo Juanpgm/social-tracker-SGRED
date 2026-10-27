@@ -6,9 +6,10 @@
 <td>{{ s.credibility }}</td>
 <td>{{ "yes" if s.enabled else "no" }}</td>
 <td>{{ "on" if row.overview.analysis else "off" }}{% if row.overview.effective %} (running){% endif %}</td>
-<td>{{ row.overview.state.value }}{% if row.failures %} ({{ row.failures }} failure{{ "" if row.failures == 1 else "s" }}{% if row.retry_after %}, retry after {{ row.retry_after }}{% endif %}){% endif %}</td>
-<td>n/a</td>
-<td>n/a</td>
+<td>{{ row.overview.state.value }}</td>
+<td class="health-{{ row.health|replace("/", "") }}">{{ row.health }}{% if row.reason %} ({{ row.reason }}){% endif %}</td>
+<td class="placeholder">n/a</td>
+<td class="placeholder">n/a</td>
 <td class="actions">
 {% set action = "disable" if s.enabled else "enable" %}
 <form method="post" action="/sources/{{ s.id }}/{{ action }}" hx-post="/sources/{{ s.id }}/{{ action }}" hx-target="#row-{{ s.id }}" hx-swap="outerHTML" hx-disabled-elt="find button">

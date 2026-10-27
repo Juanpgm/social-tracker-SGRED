@@ -115,14 +115,20 @@ def test_the_framework_documentation_pages_are_not_served(web: Web):
         assert web.client.get(path).status_code == 404, path
 
 
-def test_the_htmx_configuration_swaps_error_answers_and_forbids_script_evaluation(web: Web):
+def test_the_htmx_configuration_swaps_every_answer_but_204_and_forbids_script_evaluation(web: Web):
     import json
 
     page = web.client.get("/").text
     found = re.search(r"<meta name=\"htmx-config\" content='([^']+)'>", page)
     assert found
     config = json.loads(found.group(1))
-    assert config["responseHandling"] == [{"code": ".*", "swap": True}]  # 4xx and 5xx show too
+    # 4xx and 5xx are swapped too: the server answers them with a fragment that either carries
+    # the true row or says `HX-Reswap: none`, and the out-of-band status message needs the swap
+    assert config["responseHandling"] == [
+        {"code": "204", "swap": False},
+        {"code": "[23]..", "swap": True},
+        {"code": "[45]..", "swap": True, "error": True},
+    ]
     assert config["allowEval"] is False
     assert config["allowScriptTags"] is False
     assert config["includeIndicatorStyles"] is False  # no injected <style>: CSP forbids it

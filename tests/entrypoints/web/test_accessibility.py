@@ -85,3 +85,16 @@ def test_the_client_script_reports_an_unreachable_server_in_the_status_region(we
     assert "cannot be reached" in script
     assert "innerHTML" not in script  # text only, never markup
     assert not re.search(r"https?://", script)
+
+
+def test_a_field_level_error_is_announced_as_an_alert_and_tied_to_its_input(web: Web):
+    response = web.post(
+        "/sources/new/news_rss",
+        {"id": "x", "name": "", "credibility": "9", "feed_url": "ftp://x", "reason": "r"},
+    )
+    assert response.status_code == 422
+    errors = re.findall(r'<p class="error" id="(err-[a-z_]+)"([^>]*)>', response.text)
+    assert len(errors) >= 3
+    for ident, rest in errors:
+        assert 'role="alert"' in rest, ident
+        assert f'aria-describedby="{ident}"' in response.text

@@ -20,6 +20,7 @@ from social_tracker.entrypoints.web.pages import (
     WebContext,
     build_environment,
     error_page,
+    is_htmx,
 )
 from social_tracker.entrypoints.web.security import (
     CSRF_COOKIE_NAME,
@@ -37,6 +38,7 @@ _STATUS_TEXT = {
     403: "The request was refused. Reload the page and try again.",
     404: "That page does not exist.",
     405: "That action is not available here.",
+    408: "The request took too long to arrive.",
     413: "The request was too large.",
     415: "The request used an unsupported content type.",
 }
@@ -82,6 +84,8 @@ def create_app(
         request.state.csrf_token = ctx.tokens.token_for(cookie)
         if not host_allowed(request.headers.get("host"), ctx.hosts):
             response: Response = PlainTextResponse("Invalid host header", status_code=400)
+            if is_htmx(request):
+                response.headers["HX-Reswap"] = "none"  # plain text must not replace a row
         else:
             try:
                 response = await call_next(request)

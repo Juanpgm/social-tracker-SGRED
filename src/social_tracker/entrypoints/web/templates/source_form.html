@@ -29,7 +29,7 @@
 {% endif %}
 {% endif %}
 {% if f.spec.hint %}<p class="hint">{{ f.spec.hint }}{% if name == "secret_ref" and has_reference %} A reference is set; leave this blank to keep it.{% endif %}</p>{% endif %}
-{% if f.error %}<p class="error" id="err-{{ name }}">{{ f.error }}</p>{% endif %}
+{% if f.error %}<p class="error" id="err-{{ name }}" role="alert">{{ f.error }}</p>{% endif %}
 </div>
 {% endfor %}
 <p>

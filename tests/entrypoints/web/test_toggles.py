@@ -128,7 +128,8 @@ def test_an_htmx_toggle_returns_the_real_row_and_a_status_message_without_a_redi
     assert response.status_code == 200
     assert 'action="/sources/src_one/disable"' in row_of(response.text, "src_one")
     assert "idle" in visible_text(row_of(response.text, "src_one"))
-    assert 'id="live-region" hx-swap-oob="true"' in response.text
+    assert 'hx-swap-oob="innerHTML:#live-region"' in response.text
+    assert 'id="live-region"' not in response.text  # the region itself stays; only its text moves
     assert "City News is enabled" in visible_text(response.text)
     assert "location" not in response.headers
 

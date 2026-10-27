@@ -6,7 +6,6 @@ or stale submit is an idempotent no-op and the response always shows the state t
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -14,8 +13,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from starlette.exceptions import HTTPException
 
 from social_tracker.bootstrap import Container
-from social_tracker.control.domain import CollectionState
-from social_tracker.control.service import SourceOverview
 from social_tracker.entrypoints.web.formdata import read_form
 from social_tracker.entrypoints.web.forms import (
     ACTOR,
@@ -34,7 +31,14 @@ from social_tracker.entrypoints.web.forms import (
     values_from_source,
     view_fields,
 )
-from social_tracker.entrypoints.web.pages import BUSY_TEXT, WebContext, render
+from social_tracker.entrypoints.web.pages import (
+    BUSY_TEXT,
+    WebContext,
+    is_htmx,
+    render,
+    status_fragment,
+)
+from social_tracker.entrypoints.web.rows import row_for
 from social_tracker.shared.errors import (
     ConflictError,
     NotFoundError,
@@ -69,34 +73,8 @@ NOTICES = {
 }
 
 
-@dataclass(frozen=True)
-class Row:
-    """One source as the list shows it."""
-
-    overview: SourceOverview
-    failures: int
-    retry_after: str | None
-
-
-def _row(ctx: WebContext, overview: SourceOverview) -> Row:
-    failures, retry_after = 0, None
-    if overview.state in (CollectionState.BACKOFF, CollectionState.FAILED):
-        try:
-            with ctx.services() as services:
-                state = services.control.get_state(overview.source.id)
-        except NotFoundError:  # deleted since the overview was read
-            return Row(overview, 0, None)
-        failures = state.consecutive_failures
-        retry_after = state.next_run_at.isoformat() if state.next_run_at else None
-    return Row(overview, failures, retry_after)
-
-
 def _redirect(code: str) -> RedirectResponse:
     return RedirectResponse(f"/?notice={code}", status_code=303)
-
-
-def _is_htmx(request: Request) -> bool:
-    return request.headers.get("hx-request") == "true"
 
 
 def _on(form: dict[str, str]) -> bool:
@@ -114,7 +92,7 @@ def index(request: Request, notice: str = "") -> HTMLResponse:
     return render(
         request,
         "index.html",
-        rows=[_row(ctx, o) for o in overview.sources],
+        rows=[row_for(o) for o in overview.sources],
         global_on=overview.global_analysis,
         notice=NOTICES.get(notice),
         source_types=SOURCE_TYPES,
@@ -134,28 +112,25 @@ def set_global_analysis(request: Request, form: Form) -> Response:
 
 
 def _fragment(
-    request: Request, source_id: str, message: str, *, status: int = 200, refresh: bool = False
+    request: Request, services: Container, source_id: str, message: str, *, status: int = 200
 ) -> Response:
-    """The htmx answer: the row as the server holds it plus the status line for screen readers."""
-    ctx: WebContext = request.app.state.ctx
-    headers = {"HX-Refresh": "true"} if refresh else {}
-    try:
-        with ctx.services() as services:
-            found = [o for o in services.control.overview().sources if o.source.id == source_id]
-    except StorageError:
-        found = []
-    if not found:
-        headers["HX-Reswap"] = "none"  # nothing true to draw: leave the page as it is
-    row = _row(ctx, found[0]) if found else None
-    response = render(request, "_toggle_result.html", status=status, row=row, message=message)
-    response.headers.update(headers)
-    return response
+    """The htmx answer: the row as the server holds it plus the status line for screen readers.
+    One read of the overview (a single snapshot) on the container the request already opened."""
+    found = [o for o in services.control.overview().sources if o.source.id == source_id]
+    row = row_for(found[0]) if found else None
+    return status_fragment(request, message, status=status, row=row)
 
 
 def _gone(request: Request) -> Response:
-    if _is_htmx(request):
-        return _fragment(request, "", GONE_TEXT, status=404, refresh=True)
+    if is_htmx(request):
+        return status_fragment(request, GONE_TEXT, status=404, refresh=True)
     return _redirect("not_found")
+
+
+def _busy(request: Request) -> Response:
+    if is_htmx(request):
+        return status_fragment(request, BUSY_TEXT, status=503)
+    return _redirect("busy")
 
 
 def _switch(
@@ -165,20 +140,29 @@ def _switch(
     act: Callable[[Container, str], str],
     code: str,
 ) -> Response:
-    """Apply one switch; `act` returns the confirmation text. The answer shows the true state."""
+    """Apply one switch; `act` returns the confirmation text. The answer shows the true state.
+
+    One container serves the whole request: the write and, for htmx, the read that draws the row
+    afterwards (also after a failed write, so the row is never left showing a state it lacks).
+    """
     ctx: WebContext = request.app.state.ctx
     if not is_valid_slug(source_id):
         return _gone(request)
     try:
         with ctx.services() as services:
-            message = act(services, reason_of(form))
-    except NotFoundError:
-        return _gone(request)
-    except StorageError:
-        if _is_htmx(request):
-            return _fragment(request, source_id, BUSY_TEXT, status=503)
-        return _redirect("busy")
-    return _fragment(request, source_id, message) if _is_htmx(request) else _redirect(code)
+            try:
+                message = act(services, reason_of(form))
+            except NotFoundError:
+                return _gone(request)
+            except StorageError:
+                if not is_htmx(request):
+                    return _redirect("busy")
+                return _fragment(request, services, source_id, BUSY_TEXT, status=503)
+            if not is_htmx(request):
+                return _redirect(code)
+            return _fragment(request, services, source_id, message)
+    except StorageError:  # the store could not be opened, or the row could not be read back
+        return _busy(request)
 
 
 @router.post("/sources/{source_id}/enable")

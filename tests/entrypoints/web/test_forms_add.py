@@ -41,7 +41,7 @@ def stored(web: Web) -> list[Any]:
 
 def error_of(page: str, field: str) -> str:
     """The inline error shown for one field, as text (empty when there is none)."""
-    found = re.search(rf'<p class="error" id="err-{field}">(.*?)</p>', page, re.DOTALL)
+    found = re.search(rf'<p class="error" id="err-{field}" role="alert">(.*?)</p>', page, re.DOTALL)
     return visible_text(found.group(1)) if found else ""
 
 
