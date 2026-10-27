@@ -23,6 +23,12 @@ What it does, in order:
   and it must never hold the classification back. The refresher itself checks the stop flag
   between catalogs and requests. It follows the global analysis switch like the sources: nothing
   is fetched while it is off. A failure there costs that step and nothing more.
+- AFTER ALL OF THAT, if an escalate hook was given (the composition root passes the LLM
+  escalation, `EscalationService.escalate`), the items the cascade could not settle are sent to
+  the local language model, a bounded batch per pass. It comes last because it is the slowest
+  and the only optional stage: a judge that is down or slow costs this step and nothing else
+  (the CPU verdicts are already stored), and it checks the stop flag between items. It follows
+  the global analysis switch too.
 - STOP (`request_stop`, wired to SIGINT/SIGTERM by the entrypoint): no new collection starts; the
   one in flight is completed and committed, never abandoned half-written (PC-6). The wait for
   it is bounded by the fetcher's deadline (a wall-clock budget enforced inside every connect,
@@ -61,6 +67,7 @@ class PassSummary:
     errors: int = 0
     classification: object | None = None
     catalog: object | None = None
+    escalation: object | None = None
 
 
 def _positive(value: float) -> bool:
@@ -81,6 +88,7 @@ class Worker:
         purge_every_s: float = DEFAULT_PURGE_EVERY_S,
         classify: Callable[[], object] | None = None,
         catalog: Callable[[], object] | None = None,
+        escalate: Callable[[], object] | None = None,
     ) -> None:
         if not _positive(tick_s) or not _positive(purge_every_s):
             raise ValueError("tick_s and purge_every_s must be positive, finite numbers")
@@ -94,6 +102,7 @@ class Worker:
         self._purge_every_s = purge_every_s
         self._classify = classify
         self._catalog = catalog
+        self._escalate = escalate
         self._next_purge: float | None = None
 
     @property
@@ -155,13 +164,41 @@ class Worker:
                 results.append(result)
         classification, failed = self._classify_pending()
         refreshed = self._refresh_catalog()
+        escalation, escalation_failed = self._escalate_queued()
         return PassSummary(
             global_off=False,
             results=tuple(results),
-            errors=errors + failed,
+            errors=errors + failed + escalation_failed,
             classification=classification,
             catalog=refreshed,
+            escalation=escalation,
         )
+
+    def _escalate_queued(self) -> tuple[object | None, int]:
+        """Send the items the cascade could not settle to the language model. Skipped once a stop
+        is requested. A failure costs this step only; the next pass tries again."""
+        if self._escalate is None or self._stop.is_set():
+            return None, 0
+        try:
+            report = self._escalate()
+        except DomainError as exc:
+            _LOG.warning("escalation not done: %s", exc.code)
+            return None, 1
+        except Exception as exc:  # noqa: BLE001 - the optional stage must never stop the worker
+            _LOG.error("unexpected error escalating: %s", type(exc).__name__)
+            return None, 1
+        _LOG.info(
+            "escalation: judged %d, invalid %d, reused %d, skipped %d, failed %d, parked %d, "
+            "dropped %d",
+            getattr(report, "judged", 0),
+            getattr(report, "invalid", 0),
+            getattr(report, "reused", 0),
+            getattr(report, "skipped", 0),
+            getattr(report, "failed", 0),
+            getattr(report, "parked", 0),
+            getattr(report, "dropped", 0),
+        )
+        return report, 0
 
     def _refresh_catalog(self) -> object | None:
         """Refresh the official catalogs that are due (each knows its own interval and backoff).

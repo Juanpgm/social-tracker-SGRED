@@ -295,17 +295,6 @@ class EscalationService:
             _LOG.warning("escalation stopped by a storage error: %s", exc.code)
             tally.storage_errors += 1
         report = tally.report()
-        _LOG.info(
-            "escalation: judged %d, invalid %d, reused %d, skipped %d, failed %d, parked %d, "
-            "dropped %d",
-            report.judged,
-            report.invalid,
-            report.reused,
-            report.skipped,
-            report.failed,
-            report.parked,
-            report.dropped,
-        )
         return report
 
     def _batch(self, limit: int | None) -> int:

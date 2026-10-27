@@ -47,10 +47,26 @@ Environment:
   1800). A blank value means the default. The catalog fetcher is separate from the feed fetcher:
   only `earthquake.usgs.gov` and `www.seismicportal.eu`, https on port 443, no private hosts.
 
+- LLM escalation (a model server on THIS machine only; see the README):
+  `SOCIAL_TRACKER_LLM_BASE_URL` (default `http://127.0.0.1:11434`; only `http://127.0.0.1` or
+  `http://localhost` with an optional port is accepted, anything else stops the start),
+  `SOCIAL_TRACKER_LLM_MODEL` (default
+  `st-gemma4-e4b`), `SOCIAL_TRACKER_LLM_FALLBACK_MODEL` (default `st-qwen35-4b`, or `none`),
+  `SOCIAL_TRACKER_LLM_KEEP_ALIVE_S` (how long the server keeps the model loaded, 1..86400, default
+  300), `SOCIAL_TRACKER_LLM_TIMEOUT_S` (deadline of one call, 1..600, default 60),
+  `SOCIAL_TRACKER_LLM_HOURLY_CAP` (judgments per UTC hour, 1..100000, default 200),
+  `SOCIAL_TRACKER_LLM_QUEUE_MAX` (items waiting; the oldest beyond it are dropped, default 2000),
+  `SOCIAL_TRACKER_LLM_BATCH` (judged per worker pass, 1..1000, default 20),
+  `SOCIAL_TRACKER_LLM_MAX_FAILURES` (item-specific failures before an item is parked, default 3),
+  `SOCIAL_TRACKER_LLM_RETRY_BASE_S` and `SOCIAL_TRACKER_LLM_RETRY_CAP_S` (backoff after a failed
+  call: 60 doubling up to 3600) and `SOCIAL_TRACKER_LLM_PROMPT_CHARS` (item text longer than this
+  is read at both ends, 100..100000, default 6000). A blank value means the default.
+
 `build_container` is for the CLI and the web UI and never creates a network client. `build_worker`
 adds the collector and the HTTP fetcher (the application's only outbound path) for
-`social-tracker run`, and takes the single-worker lock next to the database (see
-`persistence.worker_lock`): a second worker on the same database is refused.
+`social-tracker run` (its escalation reaches the model server on this machine only), and takes
+the single-worker lock next to the database (see `persistence.worker_lock`): a second worker on
+the same database is refused.
 """
 
 import ipaddress
@@ -75,6 +91,16 @@ from social_tracker.collector.worker import DEFAULT_TICK_S, Worker
 from social_tracker.control.service import ControlService
 from social_tracker.items.domain import DEFAULT_RETENTION_DAYS, validate_retention_days
 from social_tracker.items.service import ItemService
+from social_tracker.llm.domain import (
+    DEFAULT_FALLBACK_MODEL,
+    JudgeError,
+    JudgeErrorKind,
+    LlmSettings,
+    parse_loopback_url,
+)
+from social_tracker.llm.ollama import OllamaJudge
+from social_tracker.llm.ports import LlmJudge
+from social_tracker.llm.service import EscalationService
 from social_tracker.persistence.catalog_repo import SqliteCatalogRepository
 from social_tracker.persistence.classification_repo import (
     SqliteClassificationRepository,
@@ -84,6 +110,7 @@ from social_tracker.persistence.classification_repo import (
 from social_tracker.persistence.control_repo import SqliteControlRepository
 from social_tracker.persistence.db import DEFAULT_BUSY_TIMEOUT_MS, Database
 from social_tracker.persistence.items_repo import SqliteItemRepository
+from social_tracker.persistence.llm_repo import SqliteEscalationRepository
 from social_tracker.persistence.sources_repo import SqliteSourceRepository
 from social_tracker.persistence.unit_of_work import SqliteUnitOfWork
 from social_tracker.persistence.worker_lock import WorkerLock
@@ -110,6 +137,18 @@ CATALOG_GLOBAL_MIN_MAGNITUDE_ENV = "SOCIAL_TRACKER_CATALOG_GLOBAL_MIN_MAGNITUDE"
 CATALOG_INTERVAL_ENV = "SOCIAL_TRACKER_CATALOG_INTERVAL_S"
 CATALOG_MAX_AGE_ENV = "SOCIAL_TRACKER_CATALOG_MAX_AGE_S"
 CATALOG_INGEST_GRACE_ENV = "SOCIAL_TRACKER_CATALOG_INGEST_GRACE_S"
+LLM_BASE_URL_ENV = "SOCIAL_TRACKER_LLM_BASE_URL"
+LLM_MODEL_ENV = "SOCIAL_TRACKER_LLM_MODEL"
+LLM_FALLBACK_MODEL_ENV = "SOCIAL_TRACKER_LLM_FALLBACK_MODEL"
+LLM_KEEP_ALIVE_ENV = "SOCIAL_TRACKER_LLM_KEEP_ALIVE_S"
+LLM_TIMEOUT_ENV = "SOCIAL_TRACKER_LLM_TIMEOUT_S"
+LLM_HOURLY_CAP_ENV = "SOCIAL_TRACKER_LLM_HOURLY_CAP"
+LLM_QUEUE_MAX_ENV = "SOCIAL_TRACKER_LLM_QUEUE_MAX"
+LLM_BATCH_ENV = "SOCIAL_TRACKER_LLM_BATCH"
+LLM_MAX_FAILURES_ENV = "SOCIAL_TRACKER_LLM_MAX_FAILURES"
+LLM_RETRY_BASE_ENV = "SOCIAL_TRACKER_LLM_RETRY_BASE_S"
+LLM_RETRY_CAP_ENV = "SOCIAL_TRACKER_LLM_RETRY_CAP_S"
+LLM_PROMPT_CHARS_ENV = "SOCIAL_TRACKER_LLM_PROMPT_CHARS"
 CATALOG_FETCH_LIMITS = FetchLimits(
     timeout_s=10.0, deadline_s=20.0, max_bytes=4 * 1024 * 1024, max_redirects=2
 )
@@ -137,6 +176,8 @@ class Container:
     topics: TopicConfigService
     classifier_settings: ClassifierSettings
     catalog: CatalogCache
+    escalation: EscalationService
+    llm_settings: LlmSettings
     _db: Database
 
     @property
@@ -192,6 +233,26 @@ class CatalogContainer:
 
     def close(self) -> None:
         self.container.close()
+
+
+@dataclass(frozen=True)
+class LlmContainer:
+    """Everything `classify escalate` and `llm status|ping` need: the services plus the
+    escalation wired to the real judge (the model server on this machine). No worker lock: the
+    single in-flight slot of the database keeps a one-shot run and the worker apart."""
+
+    container: Container
+    service: EscalationService
+    judge: LlmJudge
+    settings: LlmSettings
+
+    def close(self) -> None:
+        close = getattr(self.judge, "close", None)
+        try:
+            if callable(close):
+                close()
+        finally:
+            self.container.close()
 
 
 def resolve_db_path(raw: str) -> Path:
@@ -373,6 +434,109 @@ def parse_catalog_settings(env: Mapping[str, str]) -> CatalogSettings:
     )
 
 
+def _bounded(env: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:
+    """A whole number from `low` to `high` in the environment (blank or absent: `default`)."""
+    text = env.get(name, "").strip()
+    if not text:
+        return default
+    if not _LIMIT_DIGITS.fullmatch(text) or not low <= int(text) <= high:
+        raise ValidationError(f"{name} must be a whole number from {low} to {high}")
+    return int(text)
+
+
+def _model_setting(env: Mapping[str, str], name: str, default: str | None) -> str | None:
+    text = env.get(name, "").strip()
+    if not text:
+        return default
+    if name == LLM_FALLBACK_MODEL_ENV and text.lower() == "none":
+        return None
+    try:
+        LlmSettings(model=text)
+    except ValidationError:
+        raise ValidationError(
+            f"{name} must be a model name (1 to 100 letters, digits or . _ : / -)"
+        ) from None
+    return text
+
+
+def parse_llm_settings(env: Mapping[str, str]) -> LlmSettings:
+    """The LLM escalation settings from the environment (blank or absent: the defaults). The
+    address must be the loopback one: anything else stops the start."""
+    defaults = LlmSettings()
+    base_url = env.get(LLM_BASE_URL_ENV, "").strip() or defaults.base_url
+    try:
+        parse_loopback_url(base_url)
+    except ValidationError:
+        message = (
+            f"{LLM_BASE_URL_ENV} must be http://127.0.0.1 or http://localhost, "
+            "optionally with a port"
+        )
+        raise ValidationError(message) from None
+    retry_base = _bounded(env, LLM_RETRY_BASE_ENV, defaults.retry_base_s, 1, 86_400)
+    retry_cap = _bounded(env, LLM_RETRY_CAP_ENV, defaults.retry_cap_s, 1, 604_800)
+    if retry_cap < retry_base:
+        raise ValidationError(f"{LLM_RETRY_CAP_ENV} must not be under {LLM_RETRY_BASE_ENV}")
+    return LlmSettings(
+        base_url=base_url,
+        model=_model_setting(env, LLM_MODEL_ENV, defaults.model) or defaults.model,
+        fallback_model=_model_setting(env, LLM_FALLBACK_MODEL_ENV, DEFAULT_FALLBACK_MODEL),
+        keep_alive_s=_bounded(env, LLM_KEEP_ALIVE_ENV, defaults.keep_alive_s, 1, 86_400),
+        call_deadline_s=float(
+            _bounded(env, LLM_TIMEOUT_ENV, int(defaults.call_deadline_s), 1, 600)
+        ),
+        hourly_cap=_bounded(env, LLM_HOURLY_CAP_ENV, defaults.hourly_cap, 1, 100_000),
+        queue_max=_bounded(env, LLM_QUEUE_MAX_ENV, defaults.queue_max, 1, 1_000_000),
+        batch_limit=_bounded(env, LLM_BATCH_ENV, defaults.batch_limit, 1, 1000),
+        max_prompt_chars=_bounded(
+            env, LLM_PROMPT_CHARS_ENV, defaults.max_prompt_chars, 100, 100_000
+        ),
+        retry_base_s=retry_base,
+        retry_cap_s=retry_cap,
+        max_failures=_bounded(env, LLM_MAX_FAILURES_ENV, defaults.max_failures, 1, 100),
+    )
+
+
+class _UnreachableJudge:
+    """The judge of a container that never talks to a model server: the escalation of the CLI and
+    the web UI can read what was kept, and any attempt to ask is answered "unreachable"."""
+
+    def judge(self, request: object) -> object:
+        raise JudgeError(JudgeErrorKind.UNREACHABLE, "this process has no model server client")
+
+    def list_models(self) -> tuple[str, ...]:
+        raise JudgeError(JudgeErrorKind.UNREACHABLE, "this process has no model server client")
+
+
+def _escalation(
+    items: SqliteItemRepository,
+    control: ControlService,
+    classifications: SqliteClassificationRepository,
+    escalations: SqliteEscalationRepository,
+    uow: SqliteUnitOfWork,
+    clock: SystemClock,
+    judge: LlmJudge,
+    settings: LlmSettings,
+    stop: threading.Event | None,
+) -> EscalationService:
+    return EscalationService(
+        items,
+        control,
+        classifications,
+        escalations,
+        judge,
+        uow,
+        clock,
+        settings=settings,
+        should_stop=stop.is_set if stop is not None else (lambda: False),
+        holder=_holder(),
+    )
+
+
+def _holder() -> str:
+    """Who holds the single in-flight slot: this process, told apart from another by a suffix."""
+    return f"pid{os.getpid()}-{random.randrange(16**6):06x}"
+
+
 def _random_jitter(base_s: float) -> float:
     return random.uniform(0.0, _BACKOFF_JITTER_FRACTION * base_s)
 
@@ -388,12 +552,14 @@ class _Wiring:
     container: Container
     catalog_repo: SqliteCatalogRepository
     catalog_settings: CatalogSettings
+    escalation_repo: SqliteEscalationRepository
 
 
 def _open(env: Mapping[str, str]) -> _Wiring:
     retention_days = parse_retention_days(env.get(RETENTION_DAYS_ENV, ""))
     classifier_settings = parse_classifier_settings(env)
     catalog_settings = parse_catalog_settings(env)
+    llm_settings = parse_llm_settings(env)
     path = resolve_db_path(env.get(DB_PATH_ENV, ""))
     raw_timeout = env.get(BUSY_TIMEOUT_ENV, "").strip()
     timeout = _busy_timeout_ms(raw_timeout) if raw_timeout else DEFAULT_BUSY_TIMEOUT_MS
@@ -410,11 +576,12 @@ def _open(env: Mapping[str, str]) -> _Wiring:
     )
     catalog_repo = SqliteCatalogRepository(db)
     catalog_cache = CatalogCache(catalog_repo, clock, catalog_settings)
+    classification_repo = SqliteClassificationRepository(db)
     classifier = ClassifierService(
         items,
         sources,
         control_service,
-        SqliteClassificationRepository(db),
+        classification_repo,
         SqliteSignatureRepository(db),
         topics,
         uow,
@@ -422,6 +589,11 @@ def _open(env: Mapping[str, str]) -> _Wiring:
         catalog=CachedCatalogCheck(catalog_repo, clock, catalog_settings),
         settings=classifier_settings,
     )
+    escalation_repo = SqliteEscalationRepository(db)
+    escalation = _escalation(
+        items, control_service, classification_repo, escalation_repo, uow, clock,
+        _UnreachableJudge(), llm_settings, None,
+    )  # fmt: skip
     container = Container(
         SourceRegistry(sources, control, uow, clock),
         control_service,
@@ -430,11 +602,14 @@ def _open(env: Mapping[str, str]) -> _Wiring:
         topics,
         classifier_settings,
         catalog_cache,
+        escalation,
+        llm_settings,
         db,
     )
     return _Wiring(
-        db, sources, control, items, uow, clock, container, catalog_repo, catalog_settings
-    )
+        db, sources, control, items, uow, clock, container, catalog_repo, catalog_settings,
+        escalation_repo,
+    )  # fmt: skip
 
 
 def _purge_everything(container: Container) -> Callable[[], object]:
@@ -486,6 +661,27 @@ def _refresher(
     )
 
 
+def _worker_escalation(
+    wiring: _Wiring,
+    container: Container,
+    stop: threading.Event,
+    judge: LlmJudge | None,
+    *,
+    replaced: bool,
+) -> Callable[[], object] | None:
+    """The escalation hook of the worker: the real model server by default, a given judge for
+    tests, nothing when the HTTP client was replaced and no judge was given."""
+    if judge is None and replaced:
+        return None
+    settings = container.llm_settings
+    service = _escalation(
+        wiring.items, container.control, SqliteClassificationRepository(wiring.db),
+        wiring.escalation_repo, wiring.uow, wiring.clock,
+        judge if judge is not None else OllamaJudge(settings), settings, stop,
+    )  # fmt: skip
+    return service.escalate
+
+
 def build_catalog(
     environ: Mapping[str, str] | None = None, *, fetcher: Fetcher | None = None
 ) -> CatalogContainer:
@@ -500,6 +696,28 @@ def build_catalog(
         raise
 
 
+def build_llm(
+    environ: Mapping[str, str] | None = None,
+    *,
+    judge: LlmJudge | None = None,
+    stop: threading.Event | None = None,
+) -> LlmContainer:
+    """Wire the escalation for the one-shot commands. `judge` replaces the Ollama adapter (tests,
+    tooling). `stop` is the flag the run checks between items."""
+    wiring = _open(os.environ if environ is None else environ)
+    try:
+        settings = wiring.container.llm_settings
+        chosen = judge if judge is not None else OllamaJudge(settings)
+        service = _escalation(
+            wiring.items, wiring.container.control, SqliteClassificationRepository(wiring.db),
+            wiring.escalation_repo, wiring.uow, wiring.clock, chosen, settings, stop,
+        )  # fmt: skip
+        return LlmContainer(wiring.container, service, chosen, settings)
+    except BaseException:
+        wiring.db.close()
+        raise
+
+
 def build_worker(
     environ: Mapping[str, str] | None = None,
     *,
@@ -507,9 +725,11 @@ def build_worker(
     stop: threading.Event | None = None,
     sleeper: Callable[[float], object] | None = None,
     tick_s: float = DEFAULT_TICK_S,
+    judge: LlmJudge | None = None,
 ) -> WorkerContainer:
     """Wire the collector and its worker. `fetcher` replaces the HTTP client (tests, tooling);
-    a replaced fetcher also leaves the catalogs unfetched, so no test or tool reaches them."""
+    a replaced fetcher also leaves the catalogs unfetched and the escalation off (unless a `judge`
+    is given), so no test or tool reaches them or a model server."""
     env = os.environ if environ is None else environ
     private_hosts = parse_private_hosts(env.get(ALLOW_PRIVATE_HOSTS_ENV, ""))
     allowed_ports = parse_allowed_ports(env.get(ALLOWED_PORTS_ENV, ""))
@@ -537,6 +757,9 @@ def build_worker(
             limits=ingest_limits,
         )
         stop_event = stop or threading.Event()
+        escalate = _worker_escalation(
+            wiring, container, stop_event, judge, replaced=fetcher is not None
+        )
         worker = Worker(
             collector,
             container.control,
@@ -549,6 +772,7 @@ def build_worker(
             catalog=_refresher(wiring, _catalog_fetcher(wiring.clock), stop_event.is_set).refresh
             if fetcher is None
             else None,
+            escalate=escalate,
         )
     except BaseException:
         wiring.db.close()
