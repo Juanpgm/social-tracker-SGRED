@@ -213,7 +213,15 @@ def test_the_hourly_housekeeping_purges_the_catalog_even_when_earlier_steps_fail
         def purge_expired(self):
             calls.append("catalog purged")
 
-    fake = type("C", (), {"items": Fails(), "classifier": Fails(), "catalog": CatalogSpy()})()
+    class AlertSpy:
+        def purge_expired(self):
+            calls.append("alerts purged")
+
+    fake = type(
+        "C",
+        (),
+        {"items": Fails(), "classifier": Fails(), "catalog": CatalogSpy(), "alerts": AlertSpy()},
+    )()
     with pytest.raises(RuntimeError):
         _purge_everything(fake)()
-    assert calls == ["catalog purged"]
+    assert calls == ["catalog purged", "alerts purged"]

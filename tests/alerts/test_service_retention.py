@@ -97,6 +97,15 @@ def test_the_retention_can_be_shorter(tmp_path):
         world.close()
 
 
+def test_a_forgotten_item_is_not_raised_even_when_it_is_asked_for_by_name(w):
+    item = w.put("a", confidence=0.9, fetched=age_of(w, 181))
+    w.refresh()
+    assert w.service.purge_expired() == 1
+    assert w.service.sync_item(item.id).value == "skipped"
+    assert w.alerts() == []
+    assert w.repo.member(item.id) is None
+
+
 # ---- retention 0: keep only until it has been looked at ----
 
 

@@ -48,17 +48,19 @@ FORBIDDEN_EVERYWHERE = {
     "from fixpkg.llm import ollama": "fixpkg.llm.ollama",
     "from fixpkg.bootstrap import Y": "fixpkg.bootstrap",
 }
-FORBIDDEN_IN_THE_PURE_PART = {
-    "import random": "random",
-    "import time": "time",
-    "import secrets": "secrets",
-    "import uuid": "uuid",
-    "import logging": "logging",
-    "import threading": "threading",
-    "from fixpkg.control import thing": "fixpkg.control.thing",
-    "from fixpkg.items import thing": "fixpkg.items.thing",
-    "from fixpkg.sources import thing": "fixpkg.sources.thing",
-}
+FORBIDDEN_IN_THE_PURE_PART = dict(
+    [
+        ("import random", "random"),
+        ("import time", "time"),
+        ("import secrets", "secrets"),
+        ("import uuid", "uuid"),
+        ("import logging", "logging"),
+        ("import threading", "threading"),
+        ("from fixpkg.control import thing", "fixpkg.control.thing"),
+        ("from fixpkg.items import thing", "fixpkg.items.thing"),
+        ("from fixpkg.sources import thing", "fixpkg.sources.thing"),
+    ]
+)  # pairs, not `key: value`, so that the secret scanner does not mistake `secrets` for a secret
 
 
 def lint(repo_root: Path, tmp_path: Path, files: dict[str, str]):

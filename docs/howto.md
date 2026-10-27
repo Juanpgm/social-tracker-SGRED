@@ -117,3 +117,54 @@ hourly budget is not used up by a server that does not answer. Only a failure th
 item's own (and only while the model is answering other items) counts towards parking it;
 a parked item returns to the queue after a day, or when you run `social-tracker llm requeue-parked`.
 `classify show ITEM_ID` prints when, and which model and prompt version judged an item.
+
+## Alerts
+
+An alert is a stored verdict that deserves a person's attention. Alerts live in the local database
+and are shown by the web UI (`/alerts`) and `social-tracker alerts list`; **nothing is ever sent
+anywhere**: there are no external notifications, no webhooks, no e-mail, no draft replies and no
+approval flow.
+
+**When one is raised.** A verdict that is `unintentional_rumor`, `deliberate_disinformation` or
+`recycled_content` with a confidence of at least the alert threshold (0.5 unless you changed it
+with `social-tracker alerts threshold set VALUE --reason "..."`). The worker does it after every
+pass; `social-tracker alerts refresh` does it now, and `social-tracker alerts rebuild` evaluates
+everything again with the threshold in force (it withdraws alerts that no longer qualify and
+never deletes one).
+
+**Severity.** `critical` for deliberate disinformation at 0.85 or more, or for a claim the
+official catalogs contradict about an event at most 24 hours old at 0.8 or more; `high` from 0.7,
+`medium` from 0.5, `low` otherwise. Copies seen within 24 hours are one alert with an occurrence
+count; its severity can rise and never falls.
+
+**Statuses.** A new alert is `new`. Mark it `seen` or `dismiss` it, and `reopen` a dismissed one
+(`social-tracker alerts seen|dismiss|reopen ALERT_ID --reason "..."`, or the buttons on the page).
+Each change is audited with who and why. Doing the same thing twice changes nothing. An alert
+whose verdict later stops qualifying (the model cleared it, or it fell under the threshold) is
+withdrawn with a reason instead of deleted, and comes back by itself if the verdict returns.
+
+**What you see.** The label, severity, confidence, the source (an alert keeps the name of a source
+you deleted and says `source removed`), a short plain-text excerpt (at most 500 characters, with
+links stripped of their query strings and anything that looks like a cookie or a token redacted),
+the evidence (the stage that decided, what the catalogs said, the signals, the model and prompt
+version when the model judged it) and the tags, among them `secretariat_attribution` for a claim
+attributed to the Secretaria de Gestion del Riesgo de Emergencias y Desastres de Cali (formerly
+DAGRD) with no link to it. Alerts are kept 180 days after their latest occurrence
+(`SOCIAL_TRACKER_ALERT_RETENTION_DAYS`).
+
+## Labeling texts and calibrating
+
+To see how well the classifier does, label some texts yourself: the **gold set**. It is stored in
+the local database, never in the repository, and may hold real text, so do not commit an export.
+
+- `social-tracker gold add --label no_risk --text-file text.txt --note "official bulletin"` labels
+  a text from a file; `--item ITEM_ID` takes a collected item instead (see
+  `social-tracker items list --ids`). `social-tracker gold label --text-file text.txt` asks for the
+  label and the note on the terminal.
+- `social-tracker gold list`, `gold show ID`, `gold remove ID` and `gold export -o gold.yaml`.
+- `social-tracker classify calibrate` measures the CPU cascade against the set: accuracy,
+  precision and recall per label, the confusion matrix, how many texts would go to the model and
+  which alert threshold would have worked best. It only reports: it changes nothing. Add
+  `--file tests/data/gold_examples.yaml` to run it on the synthetic examples of the repository,
+  and `--with-llm` (never the default) to also ask the local model about the texts the cascade
+  would escalate.

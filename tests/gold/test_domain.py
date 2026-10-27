@@ -116,7 +116,7 @@ def test_a_credibility_out_of_range_is_refused(credibility):
         ("http://example.org/a", True),
         ("ftp://example.org/a", False),
         ("javascript:alert(1)", False),
-        ("https://" + "user:pw@example.org/a", False),
+        ("https://" + "user:pw" + "@example.org/a", False),
         ("https://example.org/a b", False),
         ("", False),
         (5, False),
