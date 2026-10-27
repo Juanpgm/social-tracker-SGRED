@@ -71,10 +71,11 @@ def _make_package(root: Path, name: str, files: dict[str, str]) -> None:
         if not init.exists():
             init.write_text("")
         target.write_text(textwrap.dedent(body))
-    # The entrypoints contract names its source package literally (so a rename cannot silently
-    # disable it), hence every fixture package has one, empty unless a test fills it.
-    (pkg / "entrypoints").mkdir(exist_ok=True)
+    # The entrypoints and web contracts name their source packages literally (so a rename cannot
+    # silently disable them), hence every fixture package has both, empty unless a test fills them.
+    (pkg / "entrypoints" / "web").mkdir(parents=True, exist_ok=True)
     (pkg / "entrypoints" / "__init__.py").touch()
+    (pkg / "entrypoints" / "web" / "__init__.py").touch()
 
 
 def _retarget_config(repo_root: Path, dest: Path, root_package: str) -> Path:
@@ -225,6 +226,49 @@ def test_entrypoints_may_use_the_composition_root_that_imports_storage(
             "persistence/thing.py": "Y = 2\n",
             "bootstrap.py": "from fixpkg.persistence import thing\nimport sqlite3\n",
             "entrypoints/cli.py": "from fixpkg import bootstrap\n",
+        },
+    )
+    config = _retarget_config(repo_root, tmp_path, "fixpkg")
+    result = _run(["--config", str(config)], cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+NETWORK_CLIENTS = [
+    "import httpx",
+    "import requests",
+    "import aiohttp",
+    "import websockets",
+    "import http.client",
+    "import socket",
+    "import smtplib",
+    "import ftplib",
+]
+WEB_OUTBOUND_CONTRACT = "The web UI must not make outbound network calls"
+
+
+@pytest.mark.parametrize("statement", NETWORK_CLIENTS)
+@pytest.mark.parametrize("module_path", ["entrypoints/web/app.py", "entrypoints/web/sub/views.py"])
+def test_the_web_ui_may_not_import_a_network_client(
+    repo_root: Path, tmp_path: Path, module_path: str, statement: str
+):
+    _make_package(tmp_path, "fixpkg", {"domain/model.py": "X = 1\n", module_path: statement + "\n"})
+    config = _retarget_config(repo_root, tmp_path, "fixpkg")
+    result = _run(["--config", str(config)], cwd=tmp_path)
+    assert result.returncode != 0, result.stdout
+    assert WEB_OUTBOUND_CONTRACT in result.stdout
+    assert "BROKEN" in result.stdout
+
+
+def test_the_web_ui_may_parse_urls_and_the_cli_may_use_the_network_modules(
+    repo_root: Path, tmp_path: Path
+):
+    _make_package(
+        tmp_path,
+        "fixpkg",
+        {
+            "domain/model.py": "X = 1\n",
+            "entrypoints/web/app.py": "from urllib.parse import parse_qsl\n",
+            "entrypoints/cli.py": "import socket\n",
         },
     )
     config = _retarget_config(repo_root, tmp_path, "fixpkg")

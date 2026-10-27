@@ -70,3 +70,23 @@ forbidden_modules =
     social_tracker.persistence
     sqlite3
 allow_indirect_imports = True
+
+# The web UI only ever answers requests: it must not open connections of its own (G-1). Only the
+# modules of this package are checked, so the server (uvicorn) may still listen. `urllib` cannot be
+# listed (import-linter only names top-level external packages and the UI needs `urllib.parse`);
+# tests/entrypoints/web/test_no_outbound.py forbids `urllib.request` for the web package.
+[importlinter:contract:web-no-outbound-network]
+name = The web UI must not make outbound network calls
+type = forbidden
+source_modules =
+    social_tracker.entrypoints.web
+forbidden_modules =
+    httpx
+    requests
+    aiohttp
+    http
+    socket
+    websockets
+    smtplib
+    ftplib
+allow_indirect_imports = True
