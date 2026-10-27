@@ -39,14 +39,13 @@ Environment:
   (`lat,lon`, default `3.4516,-76.5320`, Cali), `SOCIAL_TRACKER_CATALOG_RADIUS_KM` (default
   300), `SOCIAL_TRACKER_CATALOG_MIN_MAGNITUDE` (regional floor, default 2.5),
   `SOCIAL_TRACKER_CATALOG_GLOBAL_MIN_MAGNITUDE` (floor of the felt-elsewhere window, default
-  5.5), `SOCIAL_TRACKER_CATALOG_INTERVAL_S` (worker refresh interval, 60..86400, default 600)
+  5.5), `SOCIAL_TRACKER_CATALOG_INTERVAL_S` (worker refresh interval, 60..86400, default 600),
   `SOCIAL_TRACKER_CATALOG_MAX_AGE_S` (a cache whose last good refresh is older is stale
   and the check says `unavailable`; from the interval up, default 7200) and
   `SOCIAL_TRACKER_CATALOG_INGEST_GRACE_S` (how long the catalogs may take to publish a quake; a
   claim newer than the last refresh minus this is never called a mismatch; 0..86400, default
   1800). A blank value means the default. The catalog fetcher is separate from the feed fetcher:
-  only
-  `earthquake.usgs.gov` and `www.seismicportal.eu`, https on port 443, no private hosts.
+  only `earthquake.usgs.gov` and `www.seismicportal.eu`, https on port 443, no private hosts.
 
 `build_container` is for the CLI and the web UI and never creates a network client. `build_worker`
 adds the collector and the HTTP fetcher (the application's only outbound path) for
