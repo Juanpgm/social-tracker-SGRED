@@ -22,6 +22,16 @@ IGNORED = [
     "local.db",
     "risk.sqlite",
     "risk.sqlite3",
+    "risk.db-wal",
+    "risk.db-shm",
+    "risk.db-journal",
+    "var/state/risk.db-wal",
+    "risk.sqlite-wal",
+    "risk.sqlite-shm",
+    "risk.sqlite-journal",
+    "risk.sqlite3-wal",
+    "risk.sqlite3-shm",
+    "risk.sqlite3-journal",
     "cookies.txt",
     "cookies_tiktok.json",
     "auth/storage_state.json",
@@ -44,6 +54,10 @@ NOT_IGNORED = [
     "src/social_tracker/domain/keys.py",
     "tests/test_smoke.py",
     "docs/cookies_policy.md",
+    "docs/db-wal.md",
+    "notes/db-journal.txt",
+    "src/social_tracker/persistence/db.py",
+    "src/social_tracker/persistence/migrations/0001_init.sql",
 ]
 
 
