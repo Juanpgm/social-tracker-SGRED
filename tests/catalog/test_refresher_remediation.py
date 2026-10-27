@@ -431,3 +431,10 @@ def test_a_good_catalog_never_removes_the_events_of_the_other_one(world):
     world.fetcher.on("emsc", emsc_payload({"id": "em1"}))
     world.refresher.refresh(force=True)
     assert "us-only" in world.ids(USGS)
+
+
+def test_a_dry_run_counts_only_the_events_of_the_catalog_it_reports(world):
+    put(world, "em-only", source=EMSC, at=NOW - timedelta(hours=2))
+    report = world.refresher.refresh(dry_run=True)
+    assert world.outcome(report, USGS).removed == 0
+    assert world.outcome(report, EMSC).removed == 1
