@@ -773,14 +773,17 @@ def _render_refresh(report: RefreshReport) -> str:
     lines = []
     for r in report.results:
         name = r.source.value
+        removed = f", {r.removed} removed" if r.removed else ""
+        cut = " [CUT SHORT: the answer reached the limit]" if r.truncated else ""
         if r.outcome is Outcome.REFRESHED:
             lines.append(
                 f"{name}: refreshed ({r.new} new, {r.updated} updated, {r.unchanged} unchanged, "
-                f"{r.discarded} discarded)"
+                f"{r.discarded} discarded{removed}){cut}"
             )
         elif r.outcome is Outcome.DRY_RUN:
             lines.append(
-                f"{name}: dry run ({r.new} new, {r.unchanged} unchanged, {r.discarded} discarded)"
+                f"{name}: dry run ({r.new} new, {r.unchanged} unchanged, "
+                f"{r.discarded} discarded{removed}){cut}"
             )
         elif r.outcome is Outcome.FAILED:
             lines.append(f"{name}: failed ({escape_unprintable(r.error or 'unknown')})")
@@ -821,7 +824,8 @@ def _render_catalog_status(status: CatalogStatus) -> str:
     newest = status.newest_event_at.isoformat() if status.newest_event_at else "none"
     lines = [
         f"available: {'yes' if status.available else 'no'}",
-        f"complete: {'yes' if status.complete else 'no'} (every catalog refreshed recently)",
+        f"complete: {'yes' if status.complete else 'no'} "
+        "(every catalog refreshed recently and answered in full)",
         f"newest event: {newest}",
     ]
     for s in status.sources:
@@ -836,6 +840,8 @@ def _render_catalog_status(status: CatalogStatus) -> str:
             line += f"; last error: {escape_unprintable(s.last_error)}"
         if s.stale:
             line += " [STALE]"
+        if s.truncated:
+            line += " [CUT SHORT]"
         lines.append(line)
     return "\n".join(lines)
 

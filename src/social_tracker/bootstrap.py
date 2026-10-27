@@ -473,7 +473,9 @@ def _catalog_fetcher(clock: SystemClock) -> HttpFetcher:
     )
 
 
-def _refresher(wiring: _Wiring, fetcher: Fetcher) -> CatalogRefresher:
+def _refresher(
+    wiring: _Wiring, fetcher: Fetcher, should_stop: Callable[[], bool] | None = None
+) -> CatalogRefresher:
     return CatalogRefresher(
         fetcher,
         wiring.catalog_repo,
@@ -481,6 +483,7 @@ def _refresher(wiring: _Wiring, fetcher: Fetcher) -> CatalogRefresher:
         wiring.clock,
         wiring.catalog_settings,
         jitter=_random_jitter,
+        should_stop=should_stop,
     )
 
 
@@ -534,16 +537,17 @@ def build_worker(
             retention_days=container.items.retention_days,
             limits=ingest_limits,
         )
+        stop_event = stop or threading.Event()
         worker = Worker(
             collector,
             container.control,
             wiring.clock,
-            stop or threading.Event(),
+            stop_event,
             sleeper=sleeper,
             tick_s=tick_s,
             purge=_purge_everything(container),
             classify=container.classifier.classify_pending,
-            catalog=_refresher(wiring, _catalog_fetcher(wiring.clock)).refresh
+            catalog=_refresher(wiring, _catalog_fetcher(wiring.clock), stop_event.is_set).refresh
             if fetcher is None
             else None,
         )

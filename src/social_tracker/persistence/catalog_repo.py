@@ -19,8 +19,9 @@ from social_tracker.shared.errors import DomainError, StorageError
 _EVENT_COLUMNS = "source, external_id, origin_time, latitude, longitude, magnitude, place"
 _STATE_COLUMNS = (
     "source, last_success_at, last_attempt_at, consecutive_failures, next_attempt_at, "
-    "claimed_until, last_error"
+    "claimed_until, last_error, last_truncated"
 )
+_DELETE_BATCH = 500  # well under SQLite's bound-variable limit
 
 
 def _event(row: sqlite3.Row) -> CatalogEvent:
@@ -52,6 +53,7 @@ def _state(row: sqlite3.Row) -> RefreshState:
             _optional(row["next_attempt_at"]),
             _optional(row["claimed_until"]),
             row["last_error"],
+            bool(row["last_truncated"]),
         )
     except DomainError:
         raise StorageError("a stored catalog state is invalid") from None
@@ -111,6 +113,20 @@ class SqliteCatalogRepository:
         rows = self._db.query("SELECT source, count(*) FROM catalog_events GROUP BY source")
         return {CatalogSource(row[0]): row[1] for row in rows}
 
+    def delete_events(self, source: CatalogSource, external_ids: Sequence[str]) -> int:
+        name = CatalogSource(source).value
+        removed = 0
+        unique = list(dict.fromkeys(external_ids))
+        with self._db.transaction() as conn:
+            for start in range(0, len(unique), _DELETE_BATCH):
+                batch = unique[start : start + _DELETE_BATCH]
+                marks = ", ".join("?" * len(batch))
+                removed += conn.execute(
+                    f"DELETE FROM catalog_events WHERE source = ? AND external_id IN ({marks})",
+                    (name, *batch),
+                ).rowcount
+        return removed
+
     def purge_before(self, cutoff: datetime) -> int:
         with self._db.transaction() as conn:
             return conn.execute(
@@ -146,16 +162,20 @@ class SqliteCatalogRepository:
                 (CatalogSource(source).value,),
             )
 
-    def record_success(self, source: CatalogSource, at: datetime) -> None:
+    def record_success(
+        self, source: CatalogSource, at: datetime, *, truncated: bool = False
+    ) -> None:
         stamp = format_utc(at)
         with self._db.transaction() as conn:
             conn.execute(
-                "INSERT INTO catalog_refresh_state (source, last_success_at, last_attempt_at) "
-                "VALUES (?, ?, ?) ON CONFLICT (source) DO UPDATE SET "
+                "INSERT INTO catalog_refresh_state "
+                "(source, last_success_at, last_attempt_at, last_truncated) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (source) DO UPDATE SET "
                 "last_success_at = excluded.last_success_at, "
                 "last_attempt_at = excluded.last_attempt_at, consecutive_failures = 0, "
-                "next_attempt_at = NULL, claimed_until = NULL, last_error = NULL",
-                (CatalogSource(source).value, stamp, stamp),
+                "next_attempt_at = NULL, claimed_until = NULL, last_error = NULL, "
+                "last_truncated = excluded.last_truncated",
+                (CatalogSource(source).value, stamp, stamp, 1 if truncated else 0),
             )
 
     def record_failure(

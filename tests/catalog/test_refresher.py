@@ -162,8 +162,8 @@ def test_a_failing_catalog_is_recorded_and_the_other_is_unaffected(world, name):
 
 @pytest.mark.parametrize(
     "payload",
-    [b"", b"{", b"not json", b"<html>503</html>", b'{"features": "x"}', b"\xff\xfe", b"[]"],
-    ids=["empty", "truncated", "text", "html", "bad-shape", "bad-utf8", "list"],
+    [b"{", b"not json", b"<html>503</html>", b'{"features": "x"}', b"\xff\xfe", b"[]"],
+    ids=["truncated", "text", "html", "bad-shape", "bad-utf8", "list"],
 )
 def test_an_unreadable_answer_is_a_failure_not_a_crash(world, payload):
     world.fetcher.on("emsc", payload)

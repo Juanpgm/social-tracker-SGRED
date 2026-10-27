@@ -148,7 +148,9 @@ class CatalogSettings:
 @dataclass(frozen=True)
 class RefreshState:
     """The bookkeeping of one catalog: the last good refresh, the failures since, when to try
-    again, and a claim that keeps two refreshers from fetching the same catalog at once."""
+    again, and a claim that keeps two refreshers from fetching the same catalog at once.
+    `truncated` says that the last good answer reached the request limit and may be missing
+    events."""
 
     source: CatalogSource
     last_success_at: datetime | None = None
@@ -157,9 +159,12 @@ class RefreshState:
     next_attempt_at: datetime | None = None
     claimed_until: datetime | None = None
     last_error: str | None = None
+    truncated: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source", CatalogSource(self.source))
+        if not isinstance(self.truncated, bool):
+            raise ValidationError("the truncated mark is true or false")
         for name in ("last_success_at", "last_attempt_at", "next_attempt_at", "claimed_until"):
             value = getattr(self, name)
             if value is not None:

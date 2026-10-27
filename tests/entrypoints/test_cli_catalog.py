@@ -150,9 +150,8 @@ def test_a_failing_catalog_exits_1_and_the_other_is_still_refreshed(
         FetchError(FetchErrorKind.HOST_NOT_ALLOWED),
         RuntimeError("boom with a secret"),
         b"not json at all",
-        b"",
     ],
-    ids=["429", "503", "dns", "redirect", "crash", "garbage", "empty"],
+    ids=["429", "503", "dns", "redirect", "crash", "garbage"],
 )
 def test_no_failure_of_a_catalog_is_ever_a_traceback(cli: Cli, fetcher: ScriptedFetcher, outcome):
     analysis_on(cli)
@@ -176,3 +175,34 @@ def test_a_catalog_being_refreshed_elsewhere_is_reported_and_not_an_error(
     assert "usgs: skipped, another refresh is running" in result.output
     assert fetcher.calls_to("usgs") == []
     assert "emsc: refreshed" in result.output
+
+
+def test_an_empty_answer_is_a_quiet_day_and_exits_0(cli: Cli, fetcher: ScriptedFetcher):
+    analysis_on(cli)
+    fetcher.on("emsc", b"")
+    result = cli("catalog", "refresh")
+    assert result.exit_code == 0
+    assert "emsc: refreshed (0 new, 0 updated, 0 unchanged, 0 discarded)" in result.output
+
+
+def test_events_a_catalog_stopped_listing_are_reported_as_removed(
+    cli: Cli, fetcher: ScriptedFetcher
+):
+    analysis_on(cli)
+    cli.ok("catalog", "refresh")
+    fetcher.on("usgs", usgs_payload({"id": "us2", "time": datetime.now(UTC) - timedelta(hours=1)}))
+    out = cli.ok("catalog", "refresh").output
+    assert "usgs: refreshed (1 new, 0 updated, 0 unchanged, 0 discarded, 1 removed)" in out
+    assert "removed" not in out.splitlines()[1]
+
+
+def test_the_status_flags_a_catalog_whose_last_answer_was_cut_short(cli: Cli):
+    now = datetime.now(UTC)
+    with Database(cli.db_path) as db:
+        repo = SqliteCatalogRepository(db)
+        repo.record_success(CatalogSource.USGS, now, truncated=True)
+        repo.record_success(CatalogSource.EMSC, now)
+    lines = cli.ok("catalog", "status").output.splitlines()
+    assert "complete: no" in lines[1]
+    assert "[CUT SHORT]" in lines[3]
+    assert "[CUT SHORT]" not in lines[4]

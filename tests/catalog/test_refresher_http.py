@@ -191,3 +191,50 @@ def test_a_conditional_status_without_having_asked_is_not_a_good_answer(make):
 def test_a_utf8_bom_in_the_body_is_tolerated(make):
     s = make(lambda r: reply(200, content=b"\xef\xbb\xbf" + usgs_payload({"id": "us1"})))
     assert s.results()[USGS].outcome is Outcome.REFRESHED
+
+
+# ---- R2: the FDSN services answer 204 No Content when nothing matches ----
+
+
+def test_a_204_from_both_services_is_a_quiet_day_not_a_failure(make):
+    s = make(lambda r: reply(204))
+    results = s.results()
+    assert {r.outcome for r in results.values()} == {Outcome.REFRESHED}
+    assert {r.error for r in results.values()} == {None}
+    assert len(s.net.requests) == 4
+    for source in CatalogSource:
+        assert s.repo.get_state(source).consecutive_failures == 0
+
+
+@pytest.mark.parametrize("host", ["earthquake.usgs.gov", "www.seismicportal.eu"])
+def test_a_204_for_one_request_keeps_the_good_sibling_of_that_service(make, host):
+    def handler(request):
+        if request.headers["host"] != host:
+            return answer(request)
+        is_regional = "lat" in request.url.query.decode()
+        if is_regional:
+            return reply(204)
+        content = usgs_payload({"id": "kept"}) if "usgs" in host else emsc_payload({"id": "kept"})
+        return reply(200, content=content)
+
+    s = make(handler)
+    results = s.results()
+    assert {r.outcome for r in results.values()} == {Outcome.REFRESHED}
+    stored = {e.external_id for e in s.repo.events_between(NOW - timedelta(days=1), NOW)}
+    assert "kept" in stored
+
+
+def test_a_204_with_a_content_length_of_zero_is_the_same(make):
+    s = make(lambda r: reply(204, headers={"content-length": "0"}))
+    assert {r.outcome for r in s.results().values()} == {Outcome.REFRESHED}
+
+
+def test_a_200_with_an_empty_body_is_also_a_quiet_day(make):
+    s = make(lambda r: reply(200, content=b""))
+    assert {r.outcome for r in s.results().values()} == {Outcome.REFRESHED}
+
+
+@pytest.mark.parametrize("status", [205, 206])
+def test_other_empty_2xx_statuses_are_read_the_same_way(make, status):
+    s = make(lambda r: reply(status))
+    assert {r.outcome for r in s.results().values()} == {Outcome.REFRESHED}

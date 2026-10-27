@@ -31,6 +31,11 @@ class CatalogRepository(Protocol):
 
     def count_by_source(self) -> dict[CatalogSource, int]: ...
 
+    def delete_events(self, source: CatalogSource, external_ids: Sequence[str]) -> int:
+        """Forget the named events of `source` (a catalog stopped listing them); returns how many
+        existed. Writes belong inside the caller's transaction."""
+        ...
+
     def purge_before(self, cutoff: datetime) -> int:
         """Forget events whose origin time is strictly before `cutoff`; returns how many."""
         ...
@@ -48,8 +53,11 @@ class CatalogRepository(Protocol):
 
     def release_claim(self, source: CatalogSource) -> None: ...
 
-    def record_success(self, source: CatalogSource, at: datetime) -> None:
-        """A good refresh: remember it, forget failures, backoff and the claim."""
+    def record_success(
+        self, source: CatalogSource, at: datetime, *, truncated: bool = False
+    ) -> None:
+        """A good refresh: remember it, forget failures, backoff and the claim; `truncated`
+        marks an answer that reached the request limit."""
         ...
 
     def record_failure(

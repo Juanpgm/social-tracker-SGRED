@@ -4,10 +4,14 @@ Both services are asked for `format=geojson` / `format=json`, so the only parser
 `json` module (no XML, hence no entity expansion). A payload that is not what was asked for
 (not UTF-8, not JSON, not a feature collection, nested too deep, too many features, JSON constants
 such as `NaN`, or one in which no feature is readable) is a `CatalogFormatError`: the caller treats
-the catalog as unavailable and writes nothing. A single damaged feature (no magnitude, impossible
-coordinates, an id with odd characters, an origin time in the future or too old) is dropped and
-counted. Text fields are bounded and stripped of control and format characters; the place is data,
-bound as a parameter where it is stored and escaped where it is shown.
+the catalog as unavailable and writes nothing. An EMPTY body (the FDSN services answer `204 No
+Content` when nothing matches) is a quiet day: no events. A single damaged feature (no magnitude,
+impossible coordinates, an id with odd characters, an origin time in the future or too old, a
+number or a time that overflows) is dropped and counted; so is an event that is not an earthquake
+(a quarry blast, an explosion), counted apart as `not_earthquake`. An answer that reaches the
+requested `limit` may have been cut short and is reported `truncated`. Text fields are bounded
+and stripped of control and format characters; the place is data, bound as a parameter where it
+is stored and escaped where it is shown.
 """
 
 import json
@@ -37,8 +41,13 @@ class CatalogFormatError(DomainError):
 
 @dataclass(frozen=True)
 class ParseResult:
+    """`discarded` counts every feature dropped, `not_earthquake` those dropped for not being an
+    earthquake (a subset), `truncated` an answer that reached the requested limit."""
+
     events: tuple[CatalogEvent, ...]
     discarded: int
+    not_earthquake: int = 0
+    truncated: bool = False
 
 
 def _reject_constant(_name: str) -> Any:
@@ -48,6 +57,8 @@ def _reject_constant(_name: str) -> Any:
 def _load(body: bytes) -> dict[str, Any]:
     try:
         text = body.decode("utf-8-sig")
+        if not text.strip():
+            return {"features": []}  # 204 No Content: nothing matched
         document = json.loads(text, parse_constant=_reject_constant)
     except (UnicodeDecodeError, ValueError, RecursionError, TypeError, AttributeError):
         raise CatalogFormatError from None
@@ -61,7 +72,10 @@ def _load(body: bytes) -> dict[str, Any]:
 def _number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value)
+    try:
+        return float(value)
+    except OverflowError:  # an integer of hundreds of digits
+        return None
 
 
 def _clean(value: object) -> str:
@@ -98,9 +112,9 @@ def _emsc_time(value: object) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError):  # "0001-01-01T00:00:00+14:00" has no UTC equivalent
         return None
-    return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
 
 
 def _coordinates(feature: dict[str, Any]) -> tuple[float, float] | None:
@@ -114,10 +128,33 @@ def _coordinates(feature: dict[str, Any]) -> tuple[float, float] | None:
     return latitude, longitude
 
 
-def _event(feature: Any, source: CatalogSource, now: datetime) -> CatalogEvent | None:
+_NOT_AN_EARTHQUAKE: Final = object()
+_EMSC_EARTHQUAKES: Final = frozenset({"ke", "se", "eq", "earthquake"})
+
+
+def _is_earthquake(properties: dict[str, Any], source: CatalogSource) -> bool | None:
+    """True when the event is an earthquake or does not say what it is, False when it says it is
+    something else (USGS `type`, EMSC `evtype`: a quarry blast, an explosion...), None when the
+    field is not text."""
+    key = "type" if source is CatalogSource.USGS else "evtype"
+    kind = properties.get(key)
+    if kind is None:
+        return True
+    if not isinstance(kind, str):
+        return None
+    kind = kind.strip().lower()
+    return kind == "earthquake" if source is CatalogSource.USGS else kind in _EMSC_EARTHQUAKES
+
+
+def _event(feature: Any, source: CatalogSource, now: datetime) -> CatalogEvent | object | None:
     if not isinstance(feature, dict) or not isinstance(feature.get("properties"), dict):
         return None
     properties = feature["properties"]
+    earthquake = _is_earthquake(properties, source)
+    if earthquake is None:
+        return None
+    if not earthquake:
+        return _NOT_AN_EARTHQUAKE
     identifier = _identifier(feature, source)
     when = (_usgs_time if source is CatalogSource.USGS else _emsc_time)(properties.get("time"))
     magnitude = _number(properties.get("mag"))
@@ -141,21 +178,32 @@ def _event(feature: Any, source: CatalogSource, now: datetime) -> CatalogEvent |
         return None
 
 
-def parse_catalog(source: CatalogSource, body: bytes, now: datetime) -> ParseResult:
+def parse_catalog(
+    source: CatalogSource, body: bytes, now: datetime, *, limit: int | None = None
+) -> ParseResult:
     """The events of one answer. Raises `CatalogFormatError` for an unreadable answer; a feature
-    that cannot be read is dropped (and counted) instead. When the answer has features and none
-    is readable it is a format error too, so a changed format is never mistaken for a quiet day.
-    The same id twice keeps the last one."""
+    that cannot be read is dropped (and counted) instead, and so is an event that is not an
+    earthquake. When the answer has features and none is readable it is a format error too, so a
+    changed format is never mistaken for a quiet day (an answer of only non-earthquakes is a
+    quiet day: the format was understood). An empty body is an empty answer. With `limit`, an
+    answer of that many features or more is reported `truncated`. The same id twice keeps the
+    last one."""
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+        raise ValueError("the limit must be a positive whole number")
     current = ensure_utc(now)
     features = _load(body)["features"]
     kept: dict[str, CatalogEvent] = {}
-    discarded = 0
+    discarded = not_earthquake = 0
     for feature in features:
         event = _event(feature, CatalogSource(source), current)
-        if event is None:
+        if event is _NOT_AN_EARTHQUAKE:
+            discarded += 1
+            not_earthquake += 1
+        elif event is None:
             discarded += 1
         else:
-            kept[event.external_id] = event
-    if features and not kept:
+            kept[event.external_id] = event  # type: ignore[union-attr]
+    if features and not kept and not not_earthquake:
         raise CatalogFormatError
-    return ParseResult(tuple(kept.values()), discarded)
+    truncated = limit is not None and len(features) >= limit
+    return ParseResult(tuple(kept.values()), discarded, not_earthquake, truncated)

@@ -210,8 +210,6 @@ def test_a_place_that_is_not_text_becomes_empty(place):
 @pytest.mark.parametrize(
     "payload",
     [
-        b"",
-        b"   ",
         b"not json",
         b"[1, 2, 3]",
         b'"text"',

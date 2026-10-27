@@ -14,13 +14,15 @@ What it does, in order:
   global analysis is on, every due source is collected, one at a time and in id order
   (concurrency 1), through `CollectorService.collect_once`. A source that fails, or a storage
   error, costs that source or that pass and nothing more.
-- AFTER THE COLLECTION, if a catalog hook was given (the composition root passes the refresher
-  of the USGS and EMSC catalogs), the catalogs that are due are refreshed, so the cascade
-  below reads a fresh cache. It follows the global analysis switch like the sources: nothing
-  is fetched while it is off. A failure there costs that step and nothing more.
-- AFTER THAT, if a classify hook was given (the composition root passes
+- AFTER THE COLLECTION, if a classify hook was given (the composition root passes
   `ClassifierService.classify_pending`), the cascade runs over the pending items of the eligible
   sources: the CPU stages only, in batches. A failure there costs that step and nothing more.
+- LAST, if a catalog hook was given (the composition root passes the refresher of the USGS and
+  EMSC catalogs), the catalogs that are due are refreshed for the NEXT pass. They run after the
+  classification on purpose: a refresh is network I/O of up to two catalogs times two requests,
+  and it must never hold the classification back. The refresher itself checks the stop flag
+  between catalogs and requests. It follows the global analysis switch like the sources: nothing
+  is fetched while it is off. A failure there costs that step and nothing more.
 - STOP (`request_stop`, wired to SIGINT/SIGTERM by the entrypoint): no new collection starts; the
   one in flight is completed and committed, never abandoned half-written (PC-6). The wait for
   it is bounded by the fetcher's deadline (a wall-clock budget enforced inside every connect,
@@ -151,8 +153,8 @@ class Worker:
                 errors += 1
             else:
                 results.append(result)
-        refreshed = self._refresh_catalog()
         classification, failed = self._classify_pending()
+        refreshed = self._refresh_catalog()
         return PassSummary(
             global_off=False,
             results=tuple(results),

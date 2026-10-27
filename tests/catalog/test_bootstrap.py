@@ -1,5 +1,6 @@
 """Catalog settings from the environment and the wiring of the cache, the check and the worker."""
 
+import threading
 from datetime import timedelta
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from social_tracker.bootstrap import (
     parse_catalog_settings,
 )
 from social_tracker.catalog.domain import CATALOG_HOSTS, CatalogSettings
-from social_tracker.catalog.service import CachedCatalogCheck, CatalogCache
+from social_tracker.catalog.service import CachedCatalogCheck, CatalogCache, Outcome
 from social_tracker.collector.http_fetcher import HttpFetcher
 from social_tracker.shared.errors import ValidationError
 from tests.catalog.support import ScriptedFetcher
@@ -163,6 +164,18 @@ def test_the_worker_refreshes_the_catalogs_with_its_own_confined_fetcher(tmp_pat
         assert built.worker._catalog is not None
         assert isinstance(built.fetcher, HttpFetcher)
         assert built.fetcher._allowed_hosts is None  # the feed fetcher is not the catalog one
+    finally:
+        built.close()
+
+
+def test_the_worker_catalog_refresh_follows_the_workers_stop_flag(tmp_path: Path):
+    """R14: a stop requested while the worker is busy must not wait for the catalog requests."""
+    stop = threading.Event()
+    built = build_worker({DB_PATH_ENV: str(tmp_path / "w.db")}, stop=stop)
+    try:
+        stop.set()  # the stop check comes before any request, so nothing reaches the network
+        report = built.worker._catalog()
+        assert {r.outcome for r in report.results} == {Outcome.STOPPED}
     finally:
         built.close()
 

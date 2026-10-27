@@ -156,3 +156,37 @@ def test_an_extreme_publication_time_never_raises(world, published):
         "unavailable",
     }
     assert world.status("sismo M5.5 a las 3 pm", published) in {"no_claim", "unavailable"}
+
+
+# ---- an answer cut short is not a complete cache ----
+
+
+def test_a_truncated_catalog_makes_an_absent_event_prove_nothing(world):
+    world.repo.record_success(USGS, NOW, truncated=True)
+    world.repo.record_success(EMSC, NOW)
+    world.add(at=NOW - timedelta(hours=9), magnitude=2.9)  # outside the window: no event in it
+    published = NOW - timedelta(hours=2)
+    assert world.status(BREAKING.replace("hace un momento", "hoy"), published) == "unavailable"
+    world.repo.record_success(USGS, NOW)  # the next answer fitted in the limit
+    assert world.status(BREAKING.replace("hace un momento", "hoy"), published) == "mismatch"
+
+
+def test_a_truncated_catalog_still_confirms_an_event_it_has(world):
+    world.repo.record_success(USGS, NOW, truncated=True)
+    world.repo.record_success(EMSC, NOW)
+    world.add(at=NOW - timedelta(hours=2, minutes=1), magnitude=7.4)
+    assert world.status(BREAKING, NOW - timedelta(hours=2)) == "consistent"
+
+
+def test_the_status_is_not_complete_while_an_answer_is_cut_short(world):
+    from social_tracker.catalog.service import CatalogCache
+
+    cache = CatalogCache(world.repo, world.clock, CatalogSettings())
+    world.fresh()
+    world.add()
+    assert cache.status().complete is True
+    world.repo.record_success(EMSC, NOW, truncated=True)
+    status = cache.status()
+    assert status.complete is False
+    assert status.available is True
+    assert {s.source: s.truncated for s in status.sources} == {USGS: False, EMSC: True}

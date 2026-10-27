@@ -39,7 +39,7 @@ def world() -> World:
     return memory_world(FakeFetcher())
 
 
-def test_a_pass_refreshes_the_catalogs_after_collecting_and_before_classifying(world):
+def test_a_pass_refreshes_the_catalogs_after_collecting_and_classifying(world):
     world.ready()
     order = []
     original = world.collector.collect_once
@@ -52,7 +52,8 @@ def test_a_pass_refreshes_the_catalogs_after_collecting_and_before_classifying(w
         classify=lambda: (order.append("classify"), "report")[1],
     )
     summary = worker.run_pass()
-    assert order == ["collect", "catalog", "classify"]
+    # R14: a slow catalog refresh must never hold the classification back
+    assert order == ["collect", "classify", "catalog"]
     assert summary.catalog == "refreshed"
     assert summary.classification == "report"
 
@@ -108,3 +109,39 @@ def test_a_stop_requested_during_collection_skips_the_refresh(world):
     summary = make(world, recorder, stop=stop).run_pass()
     assert recorder.calls == 0
     assert summary.catalog is None
+
+
+def test_a_failing_classification_does_not_prevent_the_refresh(world):
+    world.ready()
+    refresh = Recorder("refreshed")
+    summary = make(world, refresh, classify=Recorder(error=RuntimeError("boom"))).run_pass()
+    assert refresh.calls == 1
+    assert summary.catalog == "refreshed"
+    assert summary.errors == 1
+
+
+def test_a_stop_requested_during_classification_skips_the_refresh(world):
+    world.ready()
+    stop = threading.Event()
+    refresh = Recorder("x")
+
+    def classify():
+        stop.set()
+        return "report"
+
+    summary = make(world, refresh, classify=classify, stop=stop).run_pass()
+    assert refresh.calls == 0
+    assert (summary.classification, summary.catalog) == ("report", None)
+
+
+def test_the_classification_is_already_done_when_the_refresh_starts(world):
+    world.ready()
+    seen = []
+
+    def refresh():
+        seen.append(classify.calls)
+        return "x"
+
+    classify = Recorder("report")
+    make(world, refresh, classify=classify).run_pass()
+    assert seen == [1]
