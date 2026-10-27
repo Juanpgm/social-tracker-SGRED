@@ -346,6 +346,33 @@ class ControlRepositoryContract:
         repo.save_source_state(ghost)
         assert repo.get_source_state("src_ghost") == ghost
 
+    # ---- list_source_states (one query for the whole table: the CLI listing avoids N+1) ----
+
+    def test_no_source_states_initially(self, repo: ControlRepository):
+        assert repo.list_source_states() == []
+
+    def test_list_source_states_returns_every_state_sorted_by_source_id(
+        self, repo: ControlRepository
+    ):
+        backoff = SourceState("src_b", CollectionState.BACKOFF, 2, AT + timedelta(seconds=120))
+        failed = SourceState("src_c", CollectionState.FAILED, 5)
+        idle = SourceState("src_a", CollectionState.IDLE)
+        for state in (backoff, failed, idle):  # saved out of order on purpose
+            repo.save_source_state(state)
+        assert repo.list_source_states() == [idle, backoff, failed]
+
+    def test_list_source_states_follows_upserts_and_deletes(self, repo: ControlRepository):
+        repo.save_source_state(SourceState("src_a", CollectionState.IDLE))
+        repo.save_source_state(SourceState("src_b", CollectionState.IDLE))
+        repo.save_source_state(SourceState("src_a", CollectionState.COLLECTING))
+        repo.delete_source_state("src_b")
+        assert repo.list_source_states() == [SourceState("src_a", CollectionState.COLLECTING)]
+
+    def test_the_state_listing_is_a_copy(self, repo: ControlRepository):
+        repo.save_source_state(SourceState("src_a", CollectionState.IDLE))
+        repo.list_source_states().clear()
+        assert len(repo.list_source_states()) == 1
+
     # ---- delete_source_state (SR-9 cleanup, called by the service when a source is deleted) ----
 
     def test_delete_source_state_removes_only_that_state(self, repo: ControlRepository):
@@ -478,6 +505,7 @@ class ControlRepositoryContract:
             "delete_setting",
             "list_settings",
             "get_source_state",
+            "list_source_states",
             "save_source_state",
             "delete_source_state",
             "append_control_event",

@@ -256,6 +256,16 @@ def test_a_malformed_stored_state_is_a_storage_error(repo, db, overrides):
     with pytest.raises(StorageError) as info:
         repo.get_source_state(row["source_id"])
     assert info.value.code == "storage_error"
+    with pytest.raises(StorageError) as info:
+        repo.list_source_states()
+    assert info.value.code == "storage_error"
+
+
+def test_one_malformed_stored_state_fails_the_whole_listing_not_just_its_row(repo, db):
+    repo.save_source_state(SourceState("src_a", CollectionState.IDLE))
+    insert_raw(db, "source_state", source_id="src_b", state="paused", consecutive_failures=0)
+    with pytest.raises(StorageError):
+        repo.list_source_states()
 
 
 # ---- control events ----

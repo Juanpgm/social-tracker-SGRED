@@ -44,6 +44,11 @@ class ControlRepository(Protocol):
 
     def get_source_state(self, source_id: str) -> SourceState | None: ...
 
+    def list_source_states(self) -> list[SourceState]:
+        """Every stored source state, sorted by source id, in a single query (a source without a
+        row is simply absent: callers treat it as disabled). The result is a copy."""
+        ...
+
     def save_source_state(self, state: SourceState) -> None:
         """Insert or replace the state of `state.source_id`."""
         ...

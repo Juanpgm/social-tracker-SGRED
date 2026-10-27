@@ -45,6 +45,7 @@ from social_tracker.control.domain import (
     DEFAULT_ALERT_MIN_CONFIDENCE,
     SETTING_ALERT_MIN_CONFIDENCE,
     SETTING_GLOBAL_ANALYSIS_ENABLED,
+    SETTING_SOURCE_ANALYSIS_PREFIX,
     CollectionState,
     ControlEvent,
     Event,
@@ -71,6 +72,7 @@ from social_tracker.shared.errors import (
 )
 from social_tracker.shared.ids import is_valid_slug
 from social_tracker.shared.uow import UnitOfWork
+from social_tracker.sources.domain import Source
 from social_tracker.sources.ports import SourceRepository
 
 EVENT_GLOBAL_ANALYSIS = "global_analysis_changed"
@@ -108,6 +110,23 @@ class CollectionChange:
 class ThresholdChange:
     value: float
     changed: bool
+
+
+@dataclass(frozen=True)
+class SourceOverview:
+    """One source with its collection state, analysis flag and whether analysis really runs."""
+
+    source: Source
+    state: CollectionState
+    analysis: bool
+    effective: bool
+
+
+@dataclass(frozen=True)
+class SystemOverview:
+    global_analysis: bool
+    alert_min_confidence: float
+    sources: tuple[SourceOverview, ...]  # sorted by source id
 
 
 def _require_bool(on: Any) -> bool:
@@ -249,6 +268,25 @@ class ControlService:
         source = self._sources.get(_check_source_id(source_id))
         flag = _stored_flag(self._control.get_setting(source_analysis_key(source_id)))
         return analysis_effective(self._global_state(), flag, source_enabled=source.enabled)
+
+    def overview(self) -> SystemOverview:
+        """Everything an operator listing needs in a fixed number of queries (sources, states,
+        flags, two settings), however many sources exist. The reads are not one snapshot: a
+        concurrent writer may land between them."""
+        global_state = self._global_state()
+        states = {s.source_id: s.state for s in self._control.list_source_states()}
+        flags = {
+            key.removeprefix(SETTING_SOURCE_ANALYSIS_PREFIX): _stored_flag(value)
+            for key, value in self._control.list_settings(SETTING_SOURCE_ANALYSIS_PREFIX).items()
+        }
+        rows: list[SourceOverview] = []
+        for source in self._sources.list():
+            flag = flags.get(source.id, False)
+            effective = analysis_effective(global_state, flag, source_enabled=source.enabled)
+            state = states.get(source.id, CollectionState.DISABLED)
+            rows.append(SourceOverview(source, state, flag, effective))
+        threshold = self.alert_min_confidence()
+        return SystemOverview(global_state is GlobalState.ACTIVE, threshold, tuple(rows))
 
     # ---- collection state machine ----
 

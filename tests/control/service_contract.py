@@ -35,6 +35,7 @@ from social_tracker.control.service import (
     CollectionChange,
     ControlService,
     FlagChange,
+    SourceOverview,
     ThresholdChange,
 )
 from social_tracker.shared.clock import FixedClock
@@ -90,6 +91,24 @@ class OnlyExists:
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"a whole source must not be loaded just to check it exists: {name}")
+
+
+class NoPerSourceLookups:
+    """A control repository that fails the test on any per-source query: an overview must read
+    the states and the flags in bulk, never once per source (N+1)."""
+
+    def __init__(self, inner: ControlRepository) -> None:
+        self._inner = inner
+
+    def get_source_state(self, source_id: str) -> SourceState | None:
+        raise AssertionError("overview must not query one source state at a time")
+
+    def get_setting(self, key: str) -> str | None:
+        assert not key.startswith("source_analysis."), "overview must not query one flag at a time"
+        return self._inner.get_setting(key)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
 
 
 @dataclass
@@ -938,3 +957,55 @@ class ControlServiceContract:
         assert EVENT_GLOBAL_ANALYSIS == "global_analysis_changed"
         assert EVENT_SOURCE_ANALYSIS == "source_analysis_changed"
         assert EVENT_ALERT_THRESHOLD == "alert_threshold_changed"
+
+    # ---- overview (one consistent read model for the CLI listing and status) ----
+
+    def test_the_overview_of_a_fresh_system_is_paused_with_no_sources(self):
+        env = self.make_env()
+        overview = env.service.overview()
+        assert overview.global_analysis is False
+        assert overview.alert_min_confidence == 0.5
+        assert overview.sources == ()
+
+    def test_the_overview_reports_state_flag_and_effective_analysis_per_source(self, env: Env):
+        env.add_source("src_two")
+        env.add_source("src_three")
+        env.enable_source("src_one")  # idle, analysis off
+        env.enable_source("src_two")
+        env.control.save_source_state(SourceState("src_two", CollectionState.COLLECTING))
+        env.service.set_source_analysis("src_two", True, **WHO)
+        env.service.set_source_analysis("src_three", True, **WHO)  # disabled source, flag on
+        env.service.set_global_analysis(True, **WHO)
+
+        overview = env.service.overview()
+
+        assert overview.global_analysis is True
+        assert [(o.source.id, o.state, o.analysis, o.effective) for o in overview.sources] == [
+            ("src_one", CollectionState.IDLE, False, False),
+            ("src_three", CollectionState.DISABLED, True, False),
+            ("src_two", CollectionState.COLLECTING, True, True),
+        ]
+        assert all(isinstance(o, SourceOverview) for o in overview.sources)
+
+    def test_the_overview_follows_the_global_switch_and_the_threshold(self, env: Env):
+        env.enable_source("src_one")
+        env.service.set_source_analysis("src_one", True, **WHO)
+        env.service.set_alert_min_confidence(0.8, **WHO)
+        assert env.service.overview().sources[0].effective is False  # system paused
+        assert env.service.overview().alert_min_confidence == 0.8
+        env.service.set_global_analysis(True, **WHO)
+        assert env.service.overview().sources[0].effective is True
+
+    def test_the_overview_reads_states_and_flags_in_bulk(self, env: Env):
+        for source_id in ("src_two", "src_three"):
+            env.add_source(source_id)
+            env.enable_source(source_id)
+            env.service.set_source_analysis(source_id, True, **WHO)
+        bulk = env.service_with(control=NoPerSourceLookups(env.control))
+        assert [o.source.id for o in bulk.overview().sources] == ["src_one", "src_three", "src_two"]
+        assert [o.analysis for o in bulk.overview().sources] == [False, True, True]
+
+    def test_the_overview_of_a_corrupt_stored_flag_is_a_storage_error(self, env: Env):
+        self.corrupt_setting(env, source_analysis_key("src_one"), "maybe")
+        with pytest.raises(StorageError):
+            env.service.overview()

@@ -47,6 +47,10 @@ class InMemoryControlRepository:
         with self._lock:
             return self._states.get(source_id)
 
+    def list_source_states(self) -> list[SourceState]:
+        with self._lock:
+            return [self._states[key] for key in sorted(self._states)]
+
     def save_source_state(self, state: SourceState) -> None:
         with self._lock:
             self._states[state.source_id] = state

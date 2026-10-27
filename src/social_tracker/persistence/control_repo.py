@@ -101,6 +101,13 @@ class SqliteControlRepository:
         )
         return _state_from_row(rows[0]) if rows else None
 
+    def list_source_states(self) -> list[SourceState]:
+        rows = self._db.query(
+            "SELECT source_id, state, consecutive_failures, next_run_at "
+            "FROM source_state ORDER BY source_id"
+        )
+        return [_state_from_row(row) for row in rows]
+
     def save_source_state(self, state: SourceState) -> None:
         if not isinstance(state, SourceState):
             raise ValidationError("state must be a SourceState")
