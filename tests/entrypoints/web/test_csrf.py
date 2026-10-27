@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from social_tracker.entrypoints.web.app import create_app
 from social_tracker.entrypoints.web.formdata import MAX_BODY_BYTES, MAX_FIELDS
 from social_tracker.entrypoints.web.routes import router
-from social_tracker.entrypoints.web.security import CSRF_COOKIE_NAME, CSRF_FIELD
+from social_tracker.entrypoints.web.security import CSRF_COOKIE_NAME, CSRF_FIELD, CsrfTokens
 from tests.entrypoints.web.conftest import BASE, TOKEN_FIELD, Web
 
 SOURCE_ID = "src_one"
@@ -206,3 +206,27 @@ def test_every_form_on_every_page_carries_the_token(web: Web):
         assert page.count("<form") == page.count('name="csrf_token"'), path
     confirm = web.client.get("/sources/src_one/delete").text
     assert confirm.count("<form") == confirm.count('name="csrf_token"') == 1
+
+
+def test_a_malformed_cookie_never_counts_even_with_the_token_computed_for_it(web: Web):
+    secret = b"k" * 32
+    app = create_app(web.services, host="127.0.0.1", secret=secret)
+    client = TestClient(app, base_url=BASE)
+    client.cookies.set(CSRF_COOKIE_NAME, "short")
+    forged = CsrfTokens(secret).token_for("short")
+    response = client.post("/analysis", data={CSRF_FIELD: forged, "on": "1"})
+    assert response.status_code == 403
+    assert web.events() == []
+    assert "short" not in response.headers["set-cookie"]  # the bad cookie is replaced, not kept
+
+
+@pytest.mark.parametrize("length", ["abc", "-5", "1.5", ""])
+def test_a_garbled_content_length_is_a_400(web: Web, length: str):
+    token = web.csrf()
+    response = web.client.post(
+        "/analysis",
+        content=f"{CSRF_FIELD}={token}&on=1".encode(),
+        headers={**FORM, "content-length": length},
+    )
+    assert response.status_code in (400, 413)
+    assert web.events() == []

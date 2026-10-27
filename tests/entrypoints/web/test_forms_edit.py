@@ -168,3 +168,13 @@ def test_unchecking_a_box_on_edit_turns_the_option_off(web: Web):
     assert web.post(EDIT, form).status_code == 303
     source = current(web)
     assert (source.include_posts, source.include_stories) == (True, False)
+
+
+def test_the_edit_starting_values_never_include_the_secret_reference(web: Web):
+    from social_tracker.entrypoints.web.forms import values_from_source
+
+    web.seed(type_="instagram")
+    values, checked = values_from_source(current(web))
+    assert "secret_ref" not in values
+    assert values["handle"] == "some.handle"
+    assert checked == {"include_stories": True, "include_posts": True}

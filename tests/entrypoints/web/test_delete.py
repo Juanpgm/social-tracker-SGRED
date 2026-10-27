@@ -123,3 +123,11 @@ def test_the_analysis_flag_and_state_go_with_the_source_and_a_new_source_starts_
     with closing(web.services()) as services:
         (only,) = services.control.overview().sources
     assert (only.state.value, only.analysis) == ("disabled", False)
+
+
+def test_deleting_a_malformed_id_is_a_not_found_notice_and_never_a_validation_page(web: Web):
+    for bad in ("UPPER", "x", "a" * 200):
+        response = web.post(f"/sources/{bad}/delete")
+        assert response.status_code == 303, bad
+        assert response.headers["location"] == "/?notice=not_found"
+    assert web.events("source_deleted") == []

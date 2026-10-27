@@ -209,7 +209,8 @@ def values_from_source(source: Source) -> tuple[dict[str, str], dict[str, bool]]
         if name == REF_FIELD or value is None:
             continue
         if isinstance(value, bool):
-            checked[name] = value
+            if name in CHECKBOXES:
+                checked[name] = value
         elif isinstance(value, tuple):
             values[name] = "\n".join(value)
         else:

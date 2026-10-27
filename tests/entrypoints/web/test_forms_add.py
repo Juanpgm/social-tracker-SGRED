@@ -350,3 +350,60 @@ def test_the_reason_is_validated_and_markup_in_it_is_inert(web: Web):
     assert stored(web) == []
     echoed = add(web, reason=XSS, name="")
     assert "<script>alert(1)" not in echoed.text
+
+
+def test_markup_in_keywords_is_inert_in_the_edit_form_textarea(web: Web):
+    payload = "</textarea><script>alert(1)</script>"
+    assert add(web, keywords=payload).status_code == 303
+    page = web.client.get("/sources/city_news/edit").text
+    assert "<script>alert(1)" not in page
+    assert "&lt;/textarea&gt;&lt;script&gt;" in page
+    again = add(web, id="second_one", name="", keywords=payload)  # and after a failed submit
+    assert again.status_code == 422
+    assert "<script>alert(1)" not in again.text
+
+
+def test_error_messages_are_escaped_even_if_a_message_ever_carried_markup(web: Web):
+    """The domain never echoes input today; the template must not rely on that."""
+    from social_tracker.shared.errors import ConflictError, ValidationError
+
+    markup = "<img src=x onerror=alert(1)>"
+
+    for error in (
+        ValidationError(f"name: {markup}; <b>general</b>", ("name",)),
+        ConflictError(f"a source with this name {markup}"),
+    ):
+        response = _with_failing_add(web, error)
+        assert response.status_code in (409, 422)
+        assert markup not in response.text
+        assert "&lt;img src=x" in response.text
+
+
+def _with_failing_add(web: Web, error: Exception) -> Any:
+    import dataclasses
+
+    from fastapi.testclient import TestClient
+
+    from social_tracker.bootstrap import Container
+    from social_tracker.entrypoints.web.app import create_app
+    from tests.entrypoints.web.conftest import BASE, TOKEN_FIELD
+
+    class Raises:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        def add(self, *args: Any, **kwargs: Any) -> Any:
+            raise error
+
+    def factory() -> Container:
+        real = web.services()
+        return dataclasses.replace(real, sources=Raises(real.sources))  # type: ignore[arg-type]
+
+    client = TestClient(create_app(factory, host="127.0.0.1"), base_url=BASE)
+    found = TOKEN_FIELD.search(client.get("/").text)
+    assert found
+    form = {**BASE_FORM, **VALID["news_rss"], "csrf_token": found.group(1)}
+    return client.post("/sources/new/news_rss", data=form)

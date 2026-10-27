@@ -248,3 +248,13 @@ def test_row_buttons_work_without_script_and_update_in_place_with_it(web: Web):
         assert action == hx_post
         assert 'hx-target="#row-src_one"' in rest
         assert 'hx-swap="outerHTML"' in rest
+
+
+def test_the_per_source_analysis_flag_can_be_turned_off_again(web: Web):
+    web.seed()
+    web.post("/sources/src_one/analysis", {"on": "1"})
+    off = web.post("/sources/src_one/analysis", {"on": "0"})
+    assert off.headers["location"] == "/?notice=analysis_off"
+    with closing(web.services()) as services:
+        assert services.control.overview().sources[0].analysis is False
+    assert [d["to"] for d in details(web, "source_analysis_changed")] == ["on", "off"]
