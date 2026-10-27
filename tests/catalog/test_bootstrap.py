@@ -170,3 +170,25 @@ def test_the_catalog_fetch_limits_are_bounded():
     assert CATALOG_FETCH_LIMITS.max_bytes <= 8 * 1024 * 1024
     assert CATALOG_FETCH_LIMITS.deadline_s <= 30
     assert timedelta(seconds=CATALOG_FETCH_LIMITS.deadline_s) < timedelta(seconds=120)
+
+
+def test_the_hourly_housekeeping_purges_the_catalog_even_when_earlier_steps_fail():
+    from social_tracker.bootstrap import _purge_everything
+
+    calls = []
+
+    class Fails:
+        def purge_expired(self):
+            raise RuntimeError("items")
+
+        def prune_history(self):
+            raise RuntimeError("history")
+
+    class CatalogSpy:
+        def purge_expired(self):
+            calls.append("catalog purged")
+
+    fake = type("C", (), {"items": Fails(), "classifier": Fails(), "catalog": CatalogSpy()})()
+    with pytest.raises(RuntimeError):
+        _purge_everything(fake)()
+    assert calls == ["catalog purged"]
