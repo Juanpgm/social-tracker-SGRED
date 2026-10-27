@@ -49,14 +49,12 @@ from social_tracker.sources.service import (
     SOURCE_EDITED,
     SOURCE_ENABLED,
 )
+from tests.actors import ACTOR, WHO, WHY
 from tests.fakes.flaky_control import FlakyControl
 from tests.sources.factories import CANARY, payload
 
 START = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
 MINUTE = timedelta(minutes=1)
-ACTOR = "operator"
-WHY = "scheduled maintenance"
-WHO = {"actor": ACTOR, "reason": WHY}
 COLLECTION_KINDS = frozenset(COLLECTION_EVENT_KINDS.values())
 REGISTRY_STATE_KINDS = frozenset({SOURCE_ADDED, SOURCE_EDITED, SOURCE_ENABLED, SOURCE_DISABLED})
 
