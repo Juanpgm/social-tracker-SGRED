@@ -699,3 +699,27 @@ class ControlServiceContract:
         env.service.disable_collection("src_one", **WHO)
         assert_log_reproduces_state(env)
         assert_chains_are_consistent(env)
+
+    def test_a_bool_is_never_taken_for_a_threshold_even_when_it_equals_the_current_value(
+        self, env: Env
+    ):
+        env.service.set_alert_min_confidence(1.0, **WHO)
+        with pytest.raises(ValidationError):
+            env.service.set_alert_min_confidence(True, **WHO)
+        env.service.set_alert_min_confidence(0.0, **WHO)
+        with pytest.raises(ValidationError):
+            env.service.set_alert_min_confidence(False, **WHO)
+        assert env.kinds() == [EVENT_ALERT_THRESHOLD] * 2
+
+    def test_the_reported_threshold_is_always_a_positive_float(self, env: Env):
+        assert type(env.service.set_alert_min_confidence(1, **WHO).value) is float
+        assert type(env.service.set_alert_min_confidence(0, **WHO).value) is float
+        noop = env.service.set_alert_min_confidence(-0.0, **WHO)
+        assert noop.changed is False
+        assert math.copysign(1.0, noop.value) == 1.0
+
+    def test_astral_characters_in_actor_and_reason_still_fit_in_an_event(self, env: Env):
+        emoji = chr(0x1F600)
+        env.service.set_global_analysis(True, actor=emoji * MAX_ACTOR, reason=emoji * MAX_REASON)
+        _, _, detail = env.events()[0]
+        assert (detail["actor"], detail["reason"]) == (emoji * MAX_ACTOR, emoji * MAX_REASON)

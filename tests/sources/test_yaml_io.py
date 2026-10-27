@@ -554,3 +554,51 @@ def test_long_values_stay_on_one_line_so_the_file_is_diff_friendly():
     text = dump_sources([src(name=long_name, feed_url=long_url)])
     assert f"name: {long_name}" + chr(10) in text
     assert f"feed_url: {long_url}" + chr(10) in text
+
+
+# ---- guards found by mutation testing ---------------------------------------------------
+
+
+def test_two_documents_are_rejected_with_the_specific_message():
+    (problem,) = problems_of("sources: []\n---\nsources: []\n")
+    assert problem.message == "multiple YAML documents are not allowed"
+
+
+def test_long_values_with_spaces_are_never_folded_across_lines():
+    name = " ".join(["word"] * 19)  # 94 characters, over the default fold width of 80
+    url = "https://example.org/" + "a" * 300
+    text = dump_sources([src(name=name, feed_url=url)])
+    assert f"name: {name}" + chr(10) in text
+    assert f"feed_url: {url}" + chr(10) in text
+
+
+@pytest.mark.parametrize("naive", [datetime(2026, 1, 1), "2026-01-01", 5])  # noqa: DTZ001
+def test_an_invalid_default_timestamp_is_a_caller_error_not_a_file_problem(naive: Any):
+    with pytest.raises(ValidationError) as caught:
+        load_sources(dump_sources([src()]), default_timestamp=naive)
+    assert not isinstance(caught.value, SourceFileError)
+
+
+def test_the_summary_says_one_more_when_exactly_one_problem_is_hidden():
+    entries = [
+        payload("news_rss", id=f"src_{i:02d}", name=f"N{i}", credibility=9) for i in range(11)
+    ]
+    exc = pytest.raises(SourceFileError, load_sources, doc(*entries)).value
+    assert len(exc.problems) == 11
+    assert exc.message.count("entry ") == 10
+    assert exc.message.endswith("and 1 more")
+
+
+def test_ten_problems_are_all_listed_without_a_more_suffix():
+    entries = [
+        payload("news_rss", id=f"src_{i:02d}", name=f"N{i}", credibility=9) for i in range(10)
+    ]
+    exc = pytest.raises(SourceFileError, load_sources, doc(*entries)).value
+    assert exc.message.count("entry ") == 10
+    assert "more" not in exc.message
+
+
+def test_impossible_calendar_dates_are_a_generic_yaml_problem():
+    text = "sources:\n- id: src_one\n  created_at: 2026-13-45\n"
+    (problem,) = problems_of(text)
+    assert (problem.index, problem.message) == (None, "malformed or unsupported YAML document")

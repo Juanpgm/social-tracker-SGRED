@@ -30,7 +30,6 @@ MAX_SOURCES = 500
 MAX_EVENTS = 100_000  # parser events: bounds work even for a file that fits in MAX_FILE_BYTES
 MAX_DEPTH = 8  # mapping -> sources list -> entry -> keywords list is 4; the rest is headroom
 _ROOT_KEY = "sources"
-_BOM = "﻿"
 _CODE_INVALID = "validation_error"
 _CODE_DUPLICATE = "duplicate"
 _MAX_MESSAGE_PROBLEMS = 10
@@ -77,10 +76,11 @@ class _Rejected(Exception):  # noqa: N818 - internal control flow, never leaves 
 
 
 class _StrictLoader(yaml.SafeLoader):
-    """SafeLoader that refuses duplicate keys and does not expand merge keys (`<<`)."""
+    """SafeLoader that refuses duplicate keys.
 
-    def flatten_mapping(self, node: yaml.MappingNode) -> None:
-        return None
+    Merge keys (`<<`) are rejected too: there is no constructor for the merge tag, so building
+    the key node below fails before any merge could happen.
+    """
 
     def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
         seen: set[Any] = set()
@@ -174,7 +174,6 @@ def load_sources(text: str, *, default_timestamp: datetime | None = None) -> lis
         default_timestamp = ensure_utc(default_timestamp)
     if not isinstance(text, str):
         raise SourceFileError([_file_problem("source file must be text")])
-    text = text.removeprefix(_BOM)
     if len(text) > MAX_FILE_BYTES or len(text.encode("utf-8", "surrogatepass")) > MAX_FILE_BYTES:
         raise SourceFileError([_file_problem(f"file is larger than {MAX_FILE_BYTES} bytes")])
     entries, problems = _check_root(_parse_document(text))
@@ -221,8 +220,6 @@ def _entry_of(source: Source) -> dict[str, Any]:
     data = {k: v for k, v in source.model_dump().items() if v is not None}
     for key in _TAIL_FIELDS:
         data[key] = data[key].isoformat()
-    if "keywords" in data:
-        data["keywords"] = list(data["keywords"])
     middle = [k for k in data if k not in _HEAD_FIELDS and k not in _TAIL_FIELDS]
     return {k: data[k] for k in (*_HEAD_FIELDS, *middle, *_TAIL_FIELDS) if k in data}
 

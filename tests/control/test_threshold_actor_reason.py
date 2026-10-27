@@ -209,3 +209,15 @@ def test_errors_never_echo_the_offending_value(check, field, limit):
     with pytest.raises(ValidationError) as caught:
         check(CANARY + "\x00")
     assert CANARY not in caught.value.message
+
+
+def test_the_stored_threshold_text_limit_is_inclusive():
+    at_limit = "0." + "0" * 398
+    assert len(at_limit) == 400
+    assert parse_confidence(at_limit) == 0.0
+    with pytest.raises(ValidationError):
+        parse_confidence(at_limit + "0")
+
+
+def test_the_documented_limits_are_pinned():
+    assert (MAX_ACTOR, MAX_REASON) == (100, 500)

@@ -145,3 +145,13 @@ def test_a_garbage_stored_threshold_is_a_storage_error_with_any_repository():
     with pytest.raises(StorageError) as caught:
         service.alert_min_confidence()
     assert "not-a-number" not in caught.value.message
+
+
+class _NothingStored:
+    def get_setting(self, key: str) -> str | None:
+        return None
+
+
+def test_without_any_stored_value_the_threshold_is_the_default_half():
+    service = ControlService(_NothingStored(), None, None, FixedClock(START))  # type: ignore[arg-type]
+    assert service.alert_min_confidence() == 0.5

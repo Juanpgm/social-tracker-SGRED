@@ -290,7 +290,7 @@ def validate_confidence(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise _bad_confidence("alert_min_confidence must be a number between 0 and 1")
     number = float(value)
-    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+    if not 0.0 <= number <= 1.0:  # a chained comparison is False for NaN, so NaN is rejected
         raise _bad_confidence("alert_min_confidence must be a number between 0 and 1")
     return number + 0.0  # turns -0.0 into 0.0
 
