@@ -71,6 +71,19 @@ Environment:
   call: 60 doubling up to 3600) and `SOCIAL_TRACKER_LLM_PROMPT_CHARS` (item text longer than this
   is read at both ends, 100..100000, default 6000). A blank value means the default.
 
+- Alerts (stored and shown on this machine only, never sent anywhere):
+  `SOCIAL_TRACKER_ALERT_RETENTION_DAYS` (an alert is kept this long after its latest occurrence,
+  0..3650, default 180; 0 keeps an alert only until it has been seen or dismissed),
+  `SOCIAL_TRACKER_ALERT_DEDUP_HOURS` (copies seen within this many hours of each other are one
+  alert, 1..720, default 24), `SOCIAL_TRACKER_ALERT_CRITICAL_WINDOW_HOURS` (how fresh an event is
+  for a catalog contradiction to be critical, 1..720, default 24) and the confidences from which
+  a verdict is `critical` (`SOCIAL_TRACKER_ALERT_CRITICAL_DELIBERATE`, 0.85, and
+  `SOCIAL_TRACKER_ALERT_CRITICAL_CATALOG`, 0.8), `high` (`SOCIAL_TRACKER_ALERT_HIGH`, 0.7) and
+  `medium` (`SOCIAL_TRACKER_ALERT_MEDIUM`, 0.5): decimals from 0 to 1 with at most four
+  decimals, the critical ones above 0, medium not above high. The minimum confidence that raises
+  an alert at all is not an environment variable but the audited setting `alerts threshold set`.
+  A blank value means the default.
+
 `build_container` is for the CLI and the web UI and never creates a network client. `build_worker`
 adds the collector and the HTTP fetcher (the application's only outbound path) for
 `social-tracker run` (its escalation reaches the model server on this machine only), and takes
@@ -85,8 +98,12 @@ import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
+from social_tracker.alerts.domain import MAX_RETENTION_DAYS as ALERT_MAX_RETENTION_DAYS
+from social_tracker.alerts.domain import AlertSettings
+from social_tracker.alerts.service import AlertService
 from social_tracker.catalog.domain import CATALOG_HOSTS, CatalogSettings
 from social_tracker.catalog.service import CachedCatalogCheck, CatalogCache, CatalogRefresher
 from social_tracker.classification.domain import ClassifierSettings
@@ -110,6 +127,7 @@ from social_tracker.llm.domain import (
 from social_tracker.llm.ollama import OllamaJudge
 from social_tracker.llm.ports import LlmJudge
 from social_tracker.llm.service import EscalationService
+from social_tracker.persistence.alerts_repo import SqliteAlertRepository
 from social_tracker.persistence.catalog_repo import SqliteCatalogRepository
 from social_tracker.persistence.classification_repo import (
     SqliteClassificationRepository,
@@ -163,6 +181,13 @@ LLM_NUM_CTX_ENV = "SOCIAL_TRACKER_LLM_NUM_CTX"
 LLM_PASS_BUDGET_ENV = "SOCIAL_TRACKER_LLM_PASS_BUDGET_S"
 LLM_PARKED_TTL_ENV = "SOCIAL_TRACKER_LLM_PARKED_TTL_S"
 LLM_SOURCE_SHARE_ENV = "SOCIAL_TRACKER_LLM_SOURCE_SHARE"
+ALERT_RETENTION_DAYS_ENV = "SOCIAL_TRACKER_ALERT_RETENTION_DAYS"
+ALERT_DEDUP_WINDOW_ENV = "SOCIAL_TRACKER_ALERT_DEDUP_HOURS"
+ALERT_CRITICAL_WINDOW_ENV = "SOCIAL_TRACKER_ALERT_CRITICAL_WINDOW_HOURS"
+ALERT_CRITICAL_DELIBERATE_ENV = "SOCIAL_TRACKER_ALERT_CRITICAL_DELIBERATE"
+ALERT_CRITICAL_CATALOG_ENV = "SOCIAL_TRACKER_ALERT_CRITICAL_CATALOG"
+ALERT_HIGH_ENV = "SOCIAL_TRACKER_ALERT_HIGH"
+ALERT_MEDIUM_ENV = "SOCIAL_TRACKER_ALERT_MEDIUM"
 CATALOG_FETCH_LIMITS = FetchLimits(
     timeout_s=10.0, deadline_s=20.0, max_bytes=4 * 1024 * 1024, max_redirects=2
 )
@@ -192,6 +217,8 @@ class Container:
     catalog: CatalogCache
     escalation: EscalationService
     llm_settings: LlmSettings
+    alerts: AlertService
+    alert_settings: AlertSettings
     _db: Database
 
     @property
@@ -458,6 +485,47 @@ def _bounded(env: Mapping[str, str], name: str, default: int, low: int, high: in
     return int(text)
 
 
+def _unit_setting(env: Mapping[str, str], name: str, default: float) -> float:
+    """A decimal from 0 to 1 with at most four decimals (blank or absent: `default`)."""
+    text = env.get(name, "").strip()
+    if not text:
+        return default
+    if not _THRESHOLD.fullmatch(text) or not 0 <= float(text) <= 1:
+        raise ValidationError(f"{name} must be a decimal from 0 to 1 (at most four decimals)")
+    return float(text)
+
+
+def parse_alert_settings(env: Mapping[str, str]) -> AlertSettings:
+    """The alert policy's numbers from the environment (blank or absent: the defaults)."""
+    defaults = AlertSettings()
+    retention_text = env.get(ALERT_RETENTION_DAYS_ENV, "").strip()
+    retention = defaults.retention_days
+    if retention_text:
+        in_range = _RETENTION_DIGITS.fullmatch(retention_text) and (
+            0 <= int(retention_text) <= ALERT_MAX_RETENTION_DAYS
+        )
+        if not in_range:
+            message = f"{ALERT_RETENTION_DAYS_ENV} must be a whole number of days (0..3650)"
+            raise ValidationError(message)
+        retention = int(retention_text)
+    try:
+        return AlertSettings(
+            critical_disinformation=_unit_setting(
+                env, ALERT_CRITICAL_DELIBERATE_ENV, defaults.critical_disinformation
+            ),
+            critical_catalog=_unit_setting(
+                env, ALERT_CRITICAL_CATALOG_ENV, defaults.critical_catalog
+            ),
+            high=_unit_setting(env, ALERT_HIGH_ENV, defaults.high),
+            medium=_unit_setting(env, ALERT_MEDIUM_ENV, defaults.medium),
+            critical_window=timedelta(hours=_bounded(env, ALERT_CRITICAL_WINDOW_ENV, 24, 1, 720)),
+            dedup_window=timedelta(hours=_bounded(env, ALERT_DEDUP_WINDOW_ENV, 24, 1, 720)),
+            retention_days=retention,
+        )
+    except ValidationError as exc:
+        raise ValidationError(f"alert settings: {exc.message}") from None
+
+
 def _model_setting(env: Mapping[str, str], name: str, default: str | None) -> str | None:
     text = env.get(name, "").strip()
     if not text:
@@ -596,6 +664,7 @@ def _open(env: Mapping[str, str]) -> _Wiring:
     classifier_settings = parse_classifier_settings(env)
     catalog_settings = parse_catalog_settings(env)
     llm_settings = parse_llm_settings(env)
+    alert_settings = parse_alert_settings(env)
     path = resolve_db_path(env.get(DB_PATH_ENV, ""))
     raw_timeout = env.get(BUSY_TIMEOUT_ENV, "").strip()
     timeout = _busy_timeout_ms(raw_timeout) if raw_timeout else DEFAULT_BUSY_TIMEOUT_MS
@@ -630,6 +699,17 @@ def _open(env: Mapping[str, str]) -> _Wiring:
         items, control_service, classification_repo, escalation_repo, uow, clock,
         _UnreachableJudge(), llm_settings, None,
     )  # fmt: skip
+    alerts = AlertService(
+        SqliteAlertRepository(db),
+        classification_repo,
+        items,
+        sources,
+        escalation_repo,
+        control_service,
+        uow,
+        clock,
+        settings=alert_settings,
+    )
     container = Container(
         SourceRegistry(sources, control, uow, clock),
         control_service,
@@ -640,6 +720,8 @@ def _open(env: Mapping[str, str]) -> _Wiring:
         catalog_cache,
         escalation,
         llm_settings,
+        alerts,
+        alert_settings,
         db,
     )
     return _Wiring(
@@ -651,7 +733,8 @@ def _open(env: Mapping[str, str]) -> _Wiring:
 def _purge_everything(container: Container) -> Callable[[], object]:
     """The worker's hourly housekeeping: the raw items past their retention, then the verdicts
     (and error counters) of items that no longer exist and are older than their own retention.
-    Then the cached catalog events past theirs. Each step runs even when an earlier one
+    Then the cached catalog events past theirs and, last, the alerts past theirs (they clean up
+    after the verdicts the earlier steps forgot). Each step runs even when an earlier one
     fails, and a failure is raised after."""
 
     def purge() -> object:
@@ -661,7 +744,10 @@ def _purge_everything(container: Container) -> Callable[[], object]:
             try:
                 container.classifier.prune_history()
             finally:
-                container.catalog.purge_expired()
+                try:
+                    container.catalog.purge_expired()
+                finally:
+                    container.alerts.purge_expired()
 
     return purge
 
@@ -809,6 +895,7 @@ def build_worker(
             if fetcher is None
             else None,
             escalate=escalate,
+            alerts=container.alerts.refresh,
         )
     except BaseException:
         wiring.db.close()

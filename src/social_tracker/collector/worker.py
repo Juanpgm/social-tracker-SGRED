@@ -32,6 +32,11 @@ What it does, in order:
   it checks the stop flag between items and between the two calls of one judgment. A judge that
   failed rests (doubling, capped) across passes: the hook returns at once until it is over. It
   follows the global analysis switch too.
+- LAST OF ALL, if an alerts hook was given (the composition root passes the alert step,
+  `AlertService.refresh`), the verdicts that are new or changed since their alert was last looked
+  at are turned into alerts: it reads only what is stored (nothing is sent anywhere), and it comes
+  after the model so that a verdict the model just settled reaches its alert in the same pass. A
+  failure there costs that step and nothing more.
 - STOP (`request_stop`, wired to SIGINT/SIGTERM by the entrypoint): no new collection starts; the
   one in flight is completed and committed, never abandoned half-written (PC-6). The wait for
   it is bounded by the fetcher's deadline (a wall-clock budget enforced inside every connect,
@@ -71,6 +76,7 @@ class PassSummary:
     classification: object | None = None
     catalog: object | None = None
     escalation: object | None = None
+    alerts: object | None = None
 
 
 def _positive(value: float) -> bool:
@@ -92,6 +98,7 @@ class Worker:
         classify: Callable[[], object] | None = None,
         catalog: Callable[[], object] | None = None,
         escalate: Callable[[], object] | None = None,
+        alerts: Callable[[], object] | None = None,
     ) -> None:
         if not _positive(tick_s) or not _positive(purge_every_s):
             raise ValueError("tick_s and purge_every_s must be positive, finite numbers")
@@ -106,6 +113,7 @@ class Worker:
         self._classify = classify
         self._catalog = catalog
         self._escalate = escalate
+        self._alerts = alerts
         self._next_purge: float | None = None
 
     @property
@@ -168,14 +176,40 @@ class Worker:
         classification, failed = self._classify_pending()
         refreshed = self._refresh_catalog()
         escalation, escalation_failed = self._escalate_queued()
+        alerted, alerts_failed = self._refresh_alerts()
         return PassSummary(
             global_off=False,
             results=tuple(results),
-            errors=errors + failed + escalation_failed,
+            errors=errors + failed + escalation_failed + alerts_failed,
             classification=classification,
             catalog=refreshed,
             escalation=escalation,
+            alerts=alerted,
         )
+
+    def _refresh_alerts(self) -> tuple[object | None, int]:
+        """Turn the new and changed verdicts into alerts. Skipped once a stop is requested. A
+        failure costs this step only; the next pass tries again."""
+        if self._alerts is None or self._stop.is_set():
+            return None, 0
+        try:
+            report = self._alerts()
+        except DomainError as exc:
+            _LOG.warning("alerts not refreshed: %s", exc.code)
+            return None, 1
+        except Exception as exc:  # noqa: BLE001 - the alert step must never stop the worker
+            _LOG.error("unexpected error refreshing the alerts: %s", type(exc).__name__)
+            return None, 1
+        _LOG.info(
+            "alerts: created %d, merged %d, updated %d, withdrawn %d, reactivated %d, errors %d",
+            getattr(report, "created", 0),
+            getattr(report, "merged", 0),
+            getattr(report, "updated", 0),
+            getattr(report, "withdrawn", 0),
+            getattr(report, "reactivated", 0),
+            getattr(report, "errors", 0),
+        )
+        return report, 0
 
     def _escalate_queued(self) -> tuple[object | None, int]:
         """Send the items the cascade could not settle to the language model. Skipped once a stop

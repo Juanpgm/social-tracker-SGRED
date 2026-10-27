@@ -194,10 +194,18 @@ def test_the_verdict_history_is_pruned_even_when_the_item_purge_fails(tmp_path):
         def purge_expired(self):
             calls.append("catalog purged")
 
+    class AlertSpy:
+        def purge_expired(self):
+            calls.append("alerts purged")
+
     try:
-        fake = type("C", (), {"items": Boom(), "classifier": Spy(), "catalog": CatalogSpy()})()
+        fake = type(
+            "C",
+            (),
+            {"items": Boom(), "classifier": Spy(), "catalog": CatalogSpy(), "alerts": AlertSpy()},
+        )()
         with pytest.raises(RuntimeError):
             _purge_everything(fake)()
-        assert calls == ["pruned", "catalog purged"]
+        assert calls == ["pruned", "catalog purged", "alerts purged"]
     finally:
         container.close()
