@@ -41,6 +41,7 @@ FORBIDDEN_EXTERNALS = [
 ]
 COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy", "service", "worker")
 CLASSIFICATION_CORE_MODULES = ("domain", "text", "links", "topics", "rules", "similarity")
+LLM_MODULES = ("domain", "schema", "prompt", "ports", "service", "ollama")
 FORBIDDEN_LAYERS = ["adapters", "persistence", "entrypoints", "infrastructure", "storage"]
 
 
@@ -89,6 +90,11 @@ def _make_package(root: Path, name: str, files: dict[str, str]) -> None:
     (pkg / "classification" / "__init__.py").touch()
     for module in CLASSIFICATION_CORE_MODULES:
         (pkg / "classification" / f"{module}.py").touch()
+    # And the LLM escalation contracts (its core and its loopback-only adapter).
+    (pkg / "llm").mkdir(exist_ok=True)
+    (pkg / "llm" / "__init__.py").touch()
+    for module in LLM_MODULES:
+        (pkg / "llm" / f"{module}.py").touch()
 
 
 def _retarget_config(repo_root: Path, dest: Path, root_package: str) -> Path:

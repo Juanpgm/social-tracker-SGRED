@@ -62,8 +62,10 @@ class _Verdict(BaseModel):
     evidence: list[_Evidence] = Field(max_length=MAX_EVIDENCE_ITEMS)
 
 
-def _invalid(why: str) -> JudgeError:
-    return JudgeError(JudgeErrorKind.INVALID_OUTPUT, why)
+def _invalid(why: str, raw: object = "") -> JudgeError:
+    return JudgeError(
+        JudgeErrorKind.INVALID_OUTPUT, why, raw_output=raw if isinstance(raw, str) else ""
+    )
 
 
 def _no_constant(name: str) -> Any:
@@ -81,19 +83,19 @@ def parse_judge_output(raw: object, *, model: str) -> JudgeResponse:
     """The verdict in `raw`, or `JudgeError(INVALID_OUTPUT)`. The message names the kind of
     problem and never repeats what the model wrote."""
     if not isinstance(raw, str) or not raw.strip():
-        raise _invalid("empty or non-text output")
+        raise _invalid("empty or non-text output", raw)
     if len(raw) > MAX_OUTPUT_CHARS:
-        raise _invalid("output too large")
+        raise _invalid("output too large", raw)
     try:
         document = json.loads(raw, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
     except (ValueError, RecursionError):
-        raise _invalid("not a single JSON document") from None
+        raise _invalid("not a single JSON document", raw) from None
     if not isinstance(document, dict):
-        raise _invalid("not a JSON object")
+        raise _invalid("not a JSON object", raw)
     try:
         verdict = _Verdict.model_validate(document)
     except ValidationError:
-        raise _invalid("does not match the schema") from None
+        raise _invalid("does not match the schema", raw) from None
     rationale = sanitize_text(verdict.rationale, RATIONALE_CHARS) or FALLBACK_RATIONALE
     evidence = tuple(
         cleaned

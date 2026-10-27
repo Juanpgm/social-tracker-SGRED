@@ -193,3 +193,18 @@ def test_hostile_text_in_the_rationale_cannot_change_anything_but_the_rationale(
     assert answer.label is Label.UNINTENTIONAL_RUMOR
     assert answer.confidence == 0.72
     assert answer.rationale == hostile
+
+
+def test_an_invalid_output_carries_its_text_truncated_for_the_audit_but_not_in_the_message():
+    text = "garbage " + "z" * 5000
+    with pytest.raises(JudgeError) as caught:
+        parse_judge_output(text, model="m")
+    assert caught.value.raw_output == text[:2048]
+    assert "garbage" not in str(caught.value)
+    assert "garbage" not in repr(caught.value)
+
+
+def test_a_non_text_body_has_an_empty_audit_text():
+    with pytest.raises(JudgeError) as caught:
+        parse_judge_output(None, model="m")
+    assert caught.value.raw_output == ""

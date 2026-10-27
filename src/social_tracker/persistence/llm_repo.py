@@ -31,7 +31,7 @@ _JUDGMENT_COLUMNS = (
     "item_id, outcome, label, confidence, rationale, evidence, llm_model, prompt_version, "
     "raw_output, prior_label, prior_confidence, prior_stage, reused_from, judged_at"
 )
-_STATE_COLUMNS = "item_id, state, attempts, next_attempt_at, last_error, updated_at"
+_STATE_COLUMNS = "item_id, state, attempts, item_failures, next_attempt_at, last_error, updated_at"
 _QUEUE = (
     "SELECT c.item_id, c.priority, c.classified_at FROM classifications c "
     "JOIN items i ON i.id = c.item_id "
@@ -76,6 +76,7 @@ def _state_from_row(row: sqlite3.Row) -> EscalationState:
             item_id=row["item_id"],
             state=row["state"],
             attempts=row["attempts"],
+            item_failures=row["item_failures"],
             next_attempt_at=parse_utc(wait) if wait is not None else None,
             last_error=row["last_error"],
             updated_at=parse_utc(row["updated_at"]),
@@ -156,14 +157,16 @@ class SqliteEscalationRepository:
         wait = format_utc(state.next_attempt_at) if state.next_attempt_at is not None else None
         with self._db.transaction() as conn:
             conn.execute(
-                f"INSERT INTO llm_escalations ({_STATE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?) "
+                f"INSERT INTO llm_escalations ({_STATE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (item_id) DO UPDATE SET state = excluded.state, "
-                "attempts = excluded.attempts, next_attempt_at = excluded.next_attempt_at, "
+                "attempts = excluded.attempts, item_failures = excluded.item_failures, "
+                "next_attempt_at = excluded.next_attempt_at, "
                 "last_error = excluded.last_error, updated_at = excluded.updated_at",
                 (
                     state.item_id,
                     state.state,
                     state.attempts,
+                    state.item_failures,
                     wait,
                     state.last_error,
                     format_utc(state.updated_at),

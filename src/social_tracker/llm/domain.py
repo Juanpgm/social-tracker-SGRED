@@ -230,9 +230,12 @@ class JudgeError(DomainError):
     listening, no model) say nothing about the item. The message is a fixed phrase: never item
     text, never model output."""
 
-    def __init__(self, kind: JudgeErrorKind, detail: str = "") -> None:
+    def __init__(self, kind: JudgeErrorKind, detail: str = "", *, raw_output: str = "") -> None:
         super().__init__(detail or kind.value)
         self.kind = kind
+        self.raw_output = raw_output[
+            :MAX_RAW_OUTPUT_CHARS
+        ]  # for the audit; not part of the message
         self.code = f"llm_{kind.value}"
 
     @property
@@ -411,10 +414,11 @@ def judged(prior: Classification, answer: JudgeResponse, alert_min: float) -> Cl
     )
 
 
-def kept_after_invalid(prior: Classification) -> Classification:
-    """RC-9: the model answered twice with something that is not a valid verdict. The judgment
-    contributes nothing (it is `unclassified`): the verdict of the earlier stage stays as it was,
-    out of the queue and flagged low confidence."""
+def left_unjudged(prior: Classification) -> Classification:
+    """The verdict of the earlier stage, out of the queue and flagged low confidence, because no
+    judgment will come: RC-9 (the model answered twice with something that is not a valid verdict,
+    so its judgment is `unclassified` and contributes nothing), an item parked after repeated
+    failures, or one dropped from a full queue."""
     return replace(prior, needs_llm=False, low_confidence=True, priority=0.0)
 
 
@@ -543,7 +547,8 @@ class Judgment:
 class EscalationState:
     """Bookkeeping of an item that did not get a judgment (yet): `escalation_failed` (retry after
     `next_attempt_at`), `parked` (gave up for good) or `dropped` (pushed out of a full queue).
-    `last_error` is a fixed code, never text."""
+    `attempts` counts every failure in a row (it sets the backoff), `item_failures` those that may
+    be the fault of the item (it sets the parking). `last_error` is a fixed code, never text."""
 
     item_id: str
     state: str
@@ -551,10 +556,13 @@ class EscalationState:
     next_attempt_at: datetime | None
     last_error: str | None
     updated_at: datetime
+    item_failures: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, str) or _SLUG_RE.fullmatch(self.item_id) is None:
             raise ValidationError("a state needs an item id")
+        if not _whole(self.item_failures, 0, 1_000_000):
+            raise ValidationError("item failures must be a whole number")
         if self.state not in ESCALATION_STATES:
             raise ValidationError("unknown escalation state")
         if not _whole(self.attempts, 0, 1_000_000):

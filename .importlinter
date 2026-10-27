@@ -95,12 +95,15 @@ forbidden_modules =
     smtplib
     ftplib
     social_tracker.collector
+    social_tracker.llm.ollama
 allow_indirect_imports = True
 
-# The one outbound path (G-1): the collector's fetcher adapter is the only module of the
-# application allowed to import an HTTP client or sockets, and it may use only httpx2, httpcore2
-# (the connection layer under httpx2) and socket.
-# Everything else, the composition root included, reaches the network through the Fetcher port.
+# The outbound paths (G-1): the collector's fetcher adapter is the only module that reaches the
+# internet, and it may use only httpx2, httpcore2 (the connection layer under httpx2) and socket.
+# The one other client is the Ollama adapter of the LLM escalation, which talks to this machine
+# only (see `llm-adapter-loopback-only`) and may import httpx2 and nothing else of this list.
+# Everything else, the composition root included, reaches the network through the Fetcher and
+# LlmJudge ports.
 # Indirect imports are allowed so that the composition root can wire the adapter.
 [importlinter:contract:outbound-only-in-fetcher]
 name = Only the fetcher adapter may open network connections
@@ -236,3 +239,74 @@ forbidden_modules =
     os
     pathlib
     typer
+
+# The LLM escalation (RC-7, RC-9, RC-12). Its logic (vocabulary, strict output schema, prompt, the
+# service and the ports) does no I/O of its own and is deterministic: no storage, no network, no
+# files, no processes, no randomness and no wall clock. The model server is reached through the
+# LlmJudge port and the verdicts through repository ports, both injected.
+[importlinter:contract:llm-core-no-io]
+name = The LLM escalation core must do no I/O of its own
+type = forbidden
+source_modules =
+    social_tracker.llm.domain
+    social_tracker.llm.schema
+    social_tracker.llm.prompt
+    social_tracker.llm.ports
+    social_tracker.llm.service
+forbidden_modules =
+    social_tracker.persistence
+    social_tracker.entrypoints
+    social_tracker.bootstrap
+    social_tracker.collector
+    social_tracker.llm.ollama
+    sqlite3
+    socket
+    ssl
+    subprocess
+    httpx
+    httpx2
+    httpcore2
+    requests
+    aiohttp
+    urllib
+    http
+    os
+    pathlib
+    typer
+    yaml
+    random
+    time
+
+# The Ollama adapter is the only plain-http client of the application and it may talk to this
+# machine only: which address is accepted is decided in `llm.domain.parse_loopback_url`
+# (tests/llm pin it, and that the adapter source names no other host). It may use httpx2 and the
+# standard library; it never touches storage, other clients, sockets of its own or the collector.
+[importlinter:contract:llm-adapter-loopback-only]
+name = The Ollama adapter must stay a loopback-only HTTP client
+type = forbidden
+source_modules =
+    social_tracker.llm.ollama
+forbidden_modules =
+    social_tracker.persistence
+    social_tracker.entrypoints
+    social_tracker.bootstrap
+    social_tracker.collector
+    social_tracker.control
+    social_tracker.items
+    social_tracker.sources
+    social_tracker.catalog
+    sqlite3
+    socket
+    ssl
+    subprocess
+    httpx
+    httpcore2
+    requests
+    aiohttp
+    urllib
+    http
+    os
+    pathlib
+    typer
+    yaml
+    random

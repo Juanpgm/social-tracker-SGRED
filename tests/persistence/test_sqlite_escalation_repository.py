@@ -86,9 +86,9 @@ def test_a_judgment_row_that_breaks_a_constraint_is_refused_by_the_database(db: 
         "INSERT INTO llm_budget VALUES ('2026-03-01T12:30:00+00:00', 1)",  # not on the hour
         "INSERT INTO llm_budget VALUES ('2026-03-01T12:00:00+00:00', -1)",
         "INSERT INTO llm_lease VALUES (2, 'a', '2026-03-01T12:00:00+00:00')",  # one slot only
-        "INSERT INTO llm_escalations VALUES ('itm_00000001', 'weird', 0, NULL, NULL, "
+        "INSERT INTO llm_escalations VALUES ('itm_00000001', 'weird', 0, 0, NULL, NULL, "
         "'2026-03-01T12:00:00+00:00')",
-        "INSERT INTO llm_escalations VALUES ('X', 'parked', 0, NULL, NULL, "
+        "INSERT INTO llm_escalations VALUES ('X', 'parked', 0, 0, NULL, NULL, "
         "'2026-03-01T12:00:00+00:00')",
     ],
 )

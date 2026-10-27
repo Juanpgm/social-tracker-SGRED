@@ -131,7 +131,11 @@ class OllamaJudge:
         body = self._exchange("POST", _CHAT, payload, deadline)
         content, truncated = self._content_of(body)
         if truncated:
-            raise _error(JudgeErrorKind.INVALID_OUTPUT, "the answer was cut by the token limit")
+            raise JudgeError(
+                JudgeErrorKind.INVALID_OUTPUT,
+                "the answer was cut by the token limit",
+                raw_output=content,
+            )
         return parse_judge_output(content, model=model)
 
     @staticmethod

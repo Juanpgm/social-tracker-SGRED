@@ -16,8 +16,9 @@
 --   model output is kept truncated to 2048 characters, for the audit only: it is never logged.
 --
 -- llm_escalations: bookkeeping of an item that has NO judgment (yet): 'escalation_failed' (the
---   call failed; retry after next_attempt_at, doubling per failure), 'parked' (item-specific
---   failures reached the limit: it stays as the CPU stages left it) or 'dropped' (pushed out of
+--   call failed; retry after next_attempt_at, doubling per failure: `attempts` counts every
+--   failure in a row, `item_failures` only those that may be the fault of the item), 'parked'
+--   (item_failures reached the limit: it stays as the CPU stages left it) or 'dropped' (pushed out of
 --   a full queue, the oldest first, and counted). last_error is a fixed code, never text.
 --
 -- llm_budget: judgments started per UTC hour (the hourly cap).
@@ -64,6 +65,7 @@ CREATE TABLE llm_escalations (
         CHECK (length(item_id) BETWEEN 3 AND 64 AND item_id NOT GLOB '*[^a-z0-9_]*'),
     state           TEXT NOT NULL CHECK (state IN ('escalation_failed', 'parked', 'dropped')),
     attempts        INTEGER NOT NULL CHECK (attempts BETWEEN 0 AND 1000000),
+    item_failures   INTEGER NOT NULL DEFAULT 0 CHECK (item_failures BETWEEN 0 AND 1000000),
     next_attempt_at TEXT
         CHECK (next_attempt_at IS NULL OR next_attempt_at GLOB '????-??-??T??:??:??*+00:00'),
     last_error      TEXT CHECK (last_error IS NULL OR length(last_error) <= 64),

@@ -18,7 +18,7 @@ from social_tracker.llm.domain import (
     evidence_of,
     hour_start,
     judged,
-    kept_after_invalid,
+    left_unjudged,
     llm_low_confidence,
     prompt_text,
     released_duplicate,
@@ -245,7 +245,7 @@ def test_a_prior_that_was_low_confidence_is_not_flagged_after_a_confident_judgme
 
 def test_an_invalid_judgment_keeps_the_rules_verdict_and_clears_the_queue_flag():
     prior = verdict(label=Label.UNINTENTIONAL_RUMOR, confidence=0.55)
-    result = kept_after_invalid(prior)
+    result = left_unjudged(prior)
     assert (result.label, result.confidence, result.stage, result.rationale) == (
         prior.label,
         prior.confidence,
