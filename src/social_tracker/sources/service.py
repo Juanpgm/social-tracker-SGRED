@@ -21,7 +21,7 @@ the running collection is not interrupted by this service, and the detail of the
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from social_tracker.control.domain import (
@@ -47,6 +47,7 @@ SOURCE_DELETED = "source_deleted"
 SOURCES_IMPORTED = "sources_imported"
 
 _CODE_CONFLICT = "conflict"
+_PLACEHOLDER_TIME = datetime(1970, 1, 1, tzinfo=UTC)
 _IMMUTABLE_FIELDS = ("id", "type", "enabled", "created_at", "updated_at")
 _VIA_IMPORT = {"via": "import"}
 _ID_CONFLICT = "a source with this id already exists"
@@ -175,9 +176,9 @@ class SourceRegistry:
         who = _who(actor, reason)
         if not isinstance(data, Mapping):
             raise ValidationError("source data must be a mapping")
-        now = self._clock.now()
-        source = parse_source({**data, "created_at": now, "updated_at": now})
         with self._uow.transaction():
+            now = self._clock.now()
+            source = parse_source({**data, "created_at": now, "updated_at": now})
             self._ensure_free(source)
             try:
                 self._sources.add(source)
@@ -196,8 +197,8 @@ class SourceRegistry:
         for field in _IMMUTABLE_FIELDS:
             if field in changes:
                 raise ValidationError(f"{field} cannot be edited", (field,))
-        now = self._clock.now()
         with self._uow.transaction():
+            now = self._clock.now()
             current = self._require(source_id)
             if any(key not in type(current).model_fields for key in changes):
                 raise ValidationError(_UNKNOWN_FIELD)  # never echo a user-supplied key
@@ -221,8 +222,8 @@ class SourceRegistry:
     def _set_enabled(
         self, source_id: str, *, enabled: bool, who: Mapping[str, str]
     ) -> SourceChange:
-        now = self._clock.now()
         with self._uow.transaction():
+            now = self._clock.now()
             current = self._require(source_id)
             if current.enabled is enabled:
                 return SourceChange(current, changed=False)
@@ -234,8 +235,8 @@ class SourceRegistry:
 
     def delete(self, source_id: str, *, actor: str, reason: str) -> None:
         who = _who(actor, reason)
-        now = self._clock.now()
         with self._uow.transaction():
+            now = self._clock.now()
             current = self._require(source_id)
             state = self._control.get_source_state(current.id)
             self._sources.delete(current.id)
@@ -269,9 +270,11 @@ class SourceRegistry:
         the clock. Importing a file therefore does not preserve history from another registry.
         """
         who = _who(actor, reason) if not dry_run else {}
-        now = self._clock.now()
-        incoming = load_sources(text, default_timestamp=now)
+        # Timestamps in the file are never used (see above), so parsing needs only a placeholder;
+        # it happens before the write lock is taken and the real time is read inside it.
+        incoming = load_sources(text, default_timestamp=_PLACEHOLDER_TIME)
         with self._uow.transaction():
+            now = self._clock.now()
             plan = self._plan_import(incoming, now)
             report = ImportReport(
                 tuple(s.id for s in plan.added),

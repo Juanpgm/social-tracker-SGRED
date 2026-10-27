@@ -174,8 +174,8 @@ class ControlService:
     def set_global_analysis(self, on: bool, *, actor: str, reason: str) -> FlagChange:
         target = GlobalState.ACTIVE if _require_bool(on) else GlobalState.PAUSED
         actor, reason = validate_actor(actor), validate_reason(reason)
-        now = self._clock.now()
         with self._uow.transaction():
+            now = self._clock.now()
             current = self._global_state()
             if not apply_global(current, target).changed:
                 return FlagChange(on, changed=False)
@@ -203,8 +203,8 @@ class ControlService:
     ) -> FlagChange:
         _require_bool(on)
         actor, reason = validate_actor(actor), validate_reason(reason)
-        now = self._clock.now()
         with self._uow.transaction():
+            now = self._clock.now()
             self._known_source(source_id)
             key = source_analysis_key(source_id)
             current = _stored_flag(self._control.get_setting(key))
@@ -242,8 +242,8 @@ class ControlService:
         """Apply one state machine event to a source, auditing it when it changes something."""
         actor, reason = validate_actor(actor), validate_reason(reason)
         domain_event = _coerce_event(event)
-        now = self._clock.now()
         with self._uow.transaction():
+            now = self._clock.now()
             self._known_source(source_id)
             stored = self._control.get_source_state(source_id)
             current = stored or SourceState(source_id, CollectionState.DISABLED)
@@ -306,8 +306,8 @@ class ControlService:
     def set_alert_min_confidence(self, value: float, *, actor: str, reason: str) -> ThresholdChange:
         actor, reason = validate_actor(actor), validate_reason(reason)
         new = validate_confidence(value)
-        now = self._clock.now()
         with self._uow.transaction():
+            now = self._clock.now()
             current = self.alert_min_confidence()
             if new == current:
                 return ThresholdChange(new, changed=False)
