@@ -147,6 +147,16 @@ def content_hash(title: str, text: str) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
+def text_identity(title: str, text: str) -> str:
+    """A digest of the exact stored text of an item (title and body, byte for byte). A verdict of
+    the language model is shared with a copy only when this is equal: case, punctuation, spacing,
+    a hidden character, a look-alike letter or a changed address each make a different text,
+    which the model must read for itself. (`content_hash` ignores case and whitespace and is only
+    good for finding candidates.)"""
+    joined = f"{title}\x00{text}".encode("utf-8", "surrogatepass")
+    return hashlib.sha256(joined).hexdigest()
+
+
 def item_id(source_id: str, external_id: str) -> str:
     digest = hashlib.sha256(f"{validate_slug(source_id)}\0{external_id}".encode()).hexdigest()
     return "itm_" + digest[:32]

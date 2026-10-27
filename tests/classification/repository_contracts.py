@@ -197,6 +197,126 @@ class ClassificationRepositoryContract:
         assert [c.item_id for c in repo.awaiting(item(9))] == [item(6)]
         assert repo.awaiting(item(7)) == []
 
+    # ---- settling, reopening and releasing (the remediation round) ----
+
+    def test_a_settlement_keeps_its_time_and_reason(self, repo):
+        repo.add(verdict(1, needs_llm=True, priority=0.6))
+        settled = replace(
+            verdict(1),
+            label=Label.NO_RISK,
+            stage=Stage.LLM,
+            needs_llm=False,
+            priority=0.0,
+            settled_at=NOW + timedelta(minutes=3, microseconds=7),
+            settle_reason="llm",
+        )
+        assert repo.settle(settled) is True
+        got = repo.get(item(1))
+        assert got == settled
+        assert (got.settled_at, got.settle_reason) == (settled.settled_at, "llm")
+
+    def test_a_verdict_nobody_settled_has_no_settlement(self, repo):
+        repo.add(verdict(1))
+        got = repo.get(item(1))
+        assert (got.settled_at, got.settle_reason) == (None, None)
+
+    def test_a_copy_that_must_be_judged_on_its_own_is_requeued_by_settling_it(self, repo):
+        repo.add(verdict(1, needs_llm=True))
+        waiting = verdict(2, duplicate_of=item(1), stage=Stage.DEDUP, awaiting_original=True)
+        repo.add(waiting)
+        own = replace(
+            waiting,
+            duplicate_of=None,
+            near_of=item(1),
+            awaiting_original=False,
+            needs_llm=True,
+            priority=0.4,
+        )
+        assert repo.settle(own) is True
+        got = repo.get(item(2))
+        assert (got.duplicate_of, got.near_of, got.needs_llm, got.priority) == (
+            None,
+            item(1),
+            True,
+            0.4,
+        )
+        assert [c.item_id for c in repo.awaiting(item(1))] == []
+
+    @pytest.mark.parametrize("reason", ["invalid", "parked"])
+    def test_a_settled_verdict_can_be_reopened_only_if_it_was_parked(self, repo, reason):
+        stamp = NOW + timedelta(minutes=1)
+        repo.add(verdict(1, needs_llm=False, settled_at=stamp, settle_reason=reason))
+        reopened = repo.reopen(item(1), 0.1)
+        assert reopened is (reason == "parked")
+        got = repo.get(item(1))
+        if reason == "parked":
+            assert (got.needs_llm, got.priority, got.settled_at, got.settle_reason) == (
+                True,
+                0.1,
+                None,
+                None,
+            )
+        else:
+            assert (got.needs_llm, got.settle_reason) == (False, "invalid")
+
+    def test_reopening_something_that_is_not_settled_changes_nothing(self, repo):
+        repo.add(verdict(1, needs_llm=True, priority=0.8))
+        repo.add(verdict(2, needs_llm=False))
+        assert repo.reopen(item(1), 0.1) is False
+        assert repo.reopen(item(2), 0.1) is False
+        assert repo.reopen(item(9), 0.1) is False
+        assert repo.get(item(1)).priority == 0.8
+        assert repo.get(item(2)).needs_llm is False
+
+    @pytest.mark.parametrize("priority", [-0.1, 1.1, True, "high"])
+    def test_a_bad_reopen_priority_is_refused(self, repo, priority):
+        stamp = NOW + timedelta(minutes=1)
+        repo.add(verdict(1, needs_llm=False, settled_at=stamp, settle_reason="parked"))
+        with pytest.raises(ValidationError):
+            repo.reopen(item(1), priority)
+
+    def test_forgetting_an_original_releases_its_waiting_copies_into_the_queue(self, repo):
+        repo.add(verdict(1, needs_llm=True, priority=0.7))
+        for n in (2, 3):
+            repo.add(verdict(n, duplicate_of=item(1), stage=Stage.DEDUP, awaiting_original=True))
+        repo.add(verdict(4, duplicate_of=item(1), stage=Stage.DEDUP))  # already settled
+        assert repo.delete(item(1)) is True
+        for n in (2, 3):
+            got = repo.get(item(n))
+            assert (got.awaiting_original, got.duplicate_of, got.needs_llm) == (False, None, True)
+            assert got.priority == 0.7  # the priority its original had
+        assert repo.get(item(4)).duplicate_of == item(1)  # a settled copy keeps its link
+        assert repo.stats().awaiting_original == 0
+        assert repo.stats().orphaned_awaiting == 0
+
+    def test_forgetting_many_originals_releases_their_copies_with_a_floor_priority(self, repo):
+        repo.add(verdict(1, needs_llm=False))  # an original that was settled meanwhile
+        repo.add(verdict(2, needs_llm=True, priority=0.5))
+        repo.add(verdict(3, duplicate_of=item(1), stage=Stage.DEDUP, awaiting_original=True))
+        repo.add(verdict(4, duplicate_of=item(2), stage=Stage.DEDUP, awaiting_original=True))
+        repo.add(verdict(5, duplicate_of=item(9), stage=Stage.DEDUP, awaiting_original=True))
+        assert repo.delete_many([item(1), item(2), item(9)]) == 2
+        assert repo.get(item(3)).priority == 0.1
+        assert repo.get(item(4)).priority == 0.5
+        assert repo.get(item(5)).needs_llm is True
+        assert all(not repo.get(item(n)).awaiting_original for n in (3, 4, 5))
+
+    def test_forgetting_a_copy_with_its_original_leaves_nothing_behind(self, repo):
+        repo.add(verdict(1, needs_llm=True))
+        repo.add(verdict(2, duplicate_of=item(1), stage=Stage.DEDUP, awaiting_original=True))
+        assert repo.delete_many([item(1), item(2)]) == 2
+        assert repo.get(item(2)) is None
+
+    def test_statistics_do_not_count_a_copy_whose_original_is_gone_as_waiting(self, repo):
+        repo.add(verdict(1, needs_llm=True))
+        repo.add(verdict(2, duplicate_of=item(1), stage=Stage.DEDUP, awaiting_original=True))
+        repo.add(verdict(3, duplicate_of=item(8), stage=Stage.DEDUP, awaiting_original=True))
+        repo.add(verdict(4, needs_llm=False))
+        repo.add(verdict(5, duplicate_of=item(4), stage=Stage.DEDUP, awaiting_original=True))
+        stats = repo.stats()
+        assert stats.awaiting_original == 1  # only the copy of an original that still waits
+        assert stats.orphaned_awaiting == 2  # no original to wait for: released on the next pass
+
     def test_old_verdicts_are_listed_oldest_first_strictly_before_the_cutoff(self, repo):
         for n, days in ((1, -10), (2, -5), (3, -5), (4, 0)):
             repo.add(verdict(n, classified_at=NOW + timedelta(days=days)))
@@ -285,7 +405,7 @@ class ClassificationRepositoryContract:
         assert (stats.near_duplicates, stats.awaiting_original, stats.failed) == (0, 0, 0)
 
     def test_statistics_count_near_copies_and_waiting_duplicates(self, repo):
-        repo.add(verdict(1))
+        repo.add(verdict(1, needs_llm=True))
         repo.add(verdict(2, near_of=item(1)))
         repo.add(verdict(3, duplicate_of=item(1), stage=Stage.DEDUP, awaiting_original=True))
         repo.add(verdict(4, duplicate_of=item(1), stage=Stage.DEDUP))

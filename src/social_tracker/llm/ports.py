@@ -27,6 +27,12 @@ class LlmJudge(Protocol):
 
     def list_models(self) -> tuple[str, ...]: ...
 
+    def identify(self) -> None:
+        """Check that what answers at the address is the model server it should be, before any
+        item text is sent. Raises `JudgeError` (`not_ollama` for something else, `unreachable`
+        for nothing)."""
+        ...
+
 
 @runtime_checkable
 class EscalationRepository(Protocol):
@@ -40,17 +46,53 @@ class EscalationRepository(Protocol):
         and not those that wait out a backoff or are parked/dropped."""
         ...
 
-    def queued_count(self) -> int:
-        """Items waiting for the judge, wherever they come from."""
+    def queued_count(self, *, source_ids: Collection[str], now: datetime) -> int:
+        """Items the queue could serve now: waiting, classified, from one of `source_ids`, and not
+        waiting out a backoff or parked/dropped. This is what the queue bound counts."""
         ...
 
-    def oldest_queued(self, limit: int) -> list[str]:
-        """Up to `limit` waiting items, oldest classified first (then by id)."""
+    def queued_by_source(self, *, source_ids: Collection[str], now: datetime) -> dict[str, int]:
+        """The same items, counted per source (sources with none are absent)."""
+        ...
+
+    def drop_candidates(
+        self,
+        *,
+        source_ids: Collection[str],
+        now: datetime,
+        limit: int,
+        source_id: str | None = None,
+    ) -> list[str]:
+        """Up to `limit` (1..1000) of the same items in the order they are dropped from a full
+        queue: the LOWEST priority first, then the oldest classified, then by id, so an older
+        high-priority item never goes before a newer low-priority one. `source_id` limits it to
+        one source."""
         ...
 
     def reserve_call(self, hour: datetime, cap: int) -> bool:
         """Count one judgment started in the budget hour unless `cap` have been: True if there
         was room. Atomic across processes."""
+        ...
+
+    def release_call(self, hour: datetime) -> None:
+        """Give one reservation of the hour back (the call failed before the model gave
+        anything). Never goes below zero."""
+        ...
+
+    def judged_since(self, since: datetime) -> int:
+        """How many valid judgments (outcome `judged`) were made at or after `since`."""
+        ...
+
+    def parked(self, *, before: datetime | None, limit: int) -> list[EscalationState]:
+        """Up to `limit` (1..1000) parked items, the longest parked first. With `before`, only
+        those parked at or before that moment."""
+        ...
+
+    def orphaned_copies(self, *, source_ids: Collection[str], limit: int) -> list[str]:
+        """Up to `limit` (1..1000) ids of exact copies (of a source in `source_ids`, classified)
+        that wait for an original which will never be judged: its verdict or item is gone, it is
+        not classified any more, it no longer waits, or its source is not in `source_ids`. An
+        original that merely waits out a backoff is not one. By id."""
         ...
 
     def calls_in_hour(self, hour: datetime) -> int: ...

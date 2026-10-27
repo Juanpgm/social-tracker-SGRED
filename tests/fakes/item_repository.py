@@ -135,7 +135,10 @@ class InMemoryItemRepository:
             ]
         return sorted(found, key=lambda i: (i.published_at, i.id))[:limit]
 
-    def purge_fetched_before(self, cutoff: datetime) -> int:
+    def purge_fetched_before(
+        self, cutoff: datetime, *, purge_queued_fetched_before: datetime | None = None
+    ) -> int:
+        # The in-memory reference has no verdicts: nothing waits for the model here.
         limit = ensure_utc(cutoff)
         with self._lock:
             doomed = [i for i in self._items.values() if i.fetched_at < limit]
@@ -144,7 +147,12 @@ class InMemoryItemRepository:
                 del self._items[item.id]
         return len(doomed)
 
-    def purge_classified(self, *, out_of_scope_fetched_before: datetime | None = None) -> int:
+    def purge_classified(
+        self,
+        *,
+        out_of_scope_fetched_before: datetime | None = None,
+        purge_queued_fetched_before: datetime | None = None,
+    ) -> int:
         grace = (
             None if out_of_scope_fetched_before is None else ensure_utc(out_of_scope_fetched_before)
         )

@@ -58,6 +58,10 @@ _USAGE = (
     "SELECT count(*), COALESCE(SUM(length(CAST(title AS BLOB)) + length(CAST(text AS BLOB)) "
     "+ length(CAST(raw_payload AS BLOB))), 0) FROM items WHERE source_id = ?"
 )
+# The item has a verdict that still waits for the language model (migration 0008 and later).
+_WAITING_FOR_LLM = (
+    "EXISTS (SELECT 1 FROM classifications c WHERE c.item_id = items.id AND c.needs_llm = 1)"
+)
 _UNDATED_FLAG = (
     "EXISTS (SELECT 1 FROM json_each(items.flags) WHERE json_each.value = 'published_at_missing')"
 )
@@ -254,21 +258,56 @@ class SqliteItemRepository:
                 > 0
             )
 
-    def purge_fetched_before(self, cutoff: datetime) -> int:
-        text = format_utc(cutoff)  # raises ValidationError for a naive or non-datetime value
-        with self._db.transaction() as conn:
-            self._remember(conn, f"fetched_at < ? AND {_UNDATED_FLAG}", (text,))
-            return conn.execute("DELETE FROM items WHERE fetched_at < ?", (text,)).rowcount
+    @staticmethod
+    def _spare_waiting(horizon: datetime | None) -> tuple[str, tuple[Any, ...]]:
+        """The clause that keeps an item whose verdict still waits for the language model: not
+        purged merely for being old, only once fetched strictly before `horizon` (none: never)."""
+        if horizon is None:
+            return f" AND NOT {_WAITING_FOR_LLM}", ()
+        return f" AND (NOT {_WAITING_FOR_LLM} OR fetched_at < ?)", (format_utc(horizon),)
 
-    def purge_classified(self, *, out_of_scope_fetched_before: datetime | None = None) -> int:
+    @staticmethod
+    def _forget_llm_records(conn: sqlite3.Connection, condition: str, params: tuple[Any, ...]):
+        """What the model said about the items `condition` selects goes with them: the audit
+        record (its raw output and evidence) and the bookkeeping. Runs before the delete."""
+        doomed = f"SELECT id FROM items WHERE {condition}"
+        conn.execute(f"DELETE FROM llm_judgments WHERE item_id IN ({doomed})", params)
+        conn.execute(f"DELETE FROM llm_escalations WHERE item_id IN ({doomed})", params)
+
+    def _purge(self, conn: sqlite3.Connection, condition: str, params: tuple[Any, ...]) -> int:
+        self._remember(conn, condition, params)
+        self._forget_llm_records(conn, condition, params)
+        return conn.execute(f"DELETE FROM items WHERE {condition}", params).rowcount
+
+    def purge_fetched_before(
+        self, cutoff: datetime, *, purge_queued_fetched_before: datetime | None = None
+    ) -> int:
+        text = format_utc(cutoff)  # raises ValidationError for a naive or non-datetime value
+        spare, spare_params = self._spare_waiting(purge_queued_fetched_before)
+        with self._db.transaction() as conn:
+            self._remember(
+                conn, f"fetched_at < ? AND {_UNDATED_FLAG}{spare}", (text, *spare_params)
+            )
+            condition = f"fetched_at < ?{spare}"
+            self._forget_llm_records(conn, condition, (text, *spare_params))
+            return conn.execute(
+                f"DELETE FROM items WHERE {condition}", (text, *spare_params)
+            ).rowcount
+
+    def purge_classified(
+        self,
+        *,
+        out_of_scope_fetched_before: datetime | None = None,
+        purge_queued_fetched_before: datetime | None = None,
+    ) -> int:
         params: tuple[Any, ...] = (ItemStatus.CLASSIFIED.value, ItemStatus.OUT_OF_SCOPE.value)
         condition = "(status = ? OR status = ?)"
         if out_of_scope_fetched_before is not None:
             condition = "(status = ? OR (status = ? AND fetched_at < ?))"
             params = (*params, format_utc(out_of_scope_fetched_before))
+        spare, spare_params = self._spare_waiting(purge_queued_fetched_before)
         with self._db.transaction() as conn:
-            self._remember(conn, condition, params)
-            return conn.execute(f"DELETE FROM items WHERE {condition}", params).rowcount
+            return self._purge(conn, f"{condition}{spare}", (*params, *spare_params))
 
     def count_by_status(self, status: ItemStatus) -> int:
         rows = self._db.query(

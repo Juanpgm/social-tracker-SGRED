@@ -45,6 +45,22 @@ _WAITING = (
     "FROM classifications c JOIN items i ON i.id = c.item_id "
     "WHERE c.needs_llm = 1 AND i.status = 'classified'"
 )
+# What the queue could serve now: the `_QUEUE` conditions without the ordering and the limit.
+_SERVABLE = (
+    "FROM classifications c JOIN items i ON i.id = c.item_id "
+    "LEFT JOIN llm_escalations e ON e.item_id = c.item_id "
+    "WHERE c.needs_llm = 1 AND i.status = 'classified' AND i.source_id IN ({marks}) "
+    "AND (e.item_id IS NULL OR (e.state = 'escalation_failed' "
+    "AND (e.next_attempt_at IS NULL OR e.next_attempt_at <= ?)))"
+)
+_ORPHANS = (
+    "SELECT c.item_id FROM classifications c JOIN items i ON i.id = c.item_id "
+    "LEFT JOIN classifications o ON o.item_id = c.duplicate_of "
+    "LEFT JOIN items oi ON oi.id = o.item_id "
+    "WHERE c.awaiting_original = 1 AND i.status = 'classified' AND i.source_id IN ({marks}) "
+    "AND (o.item_id IS NULL OR oi.id IS NULL OR oi.status <> 'classified' OR o.needs_llm = 0 "
+    "OR oi.source_id NOT IN ({marks})) ORDER BY c.item_id LIMIT ?"
+)
 
 
 def _judgment_from_row(row: sqlite3.Row) -> Judgment:
@@ -111,14 +127,56 @@ class SqliteEscalationRepository:
             for r in rows
         ]
 
-    def queued_count(self) -> int:
-        return int(self._db.query(f"SELECT count(*) {_WAITING}")[0][0])
+    def queued_count(self, *, source_ids: Collection[str], now: datetime) -> int:
+        sources = sorted(source_ids)
+        moment = format_utc(now)
+        if not sources:
+            return 0
+        sql = f"SELECT count(*) {_SERVABLE.format(marks=', '.join('?' * len(sources)))}"
+        return int(self._db.query(sql, (*sources, moment))[0][0])
 
-    def oldest_queued(self, limit: int) -> list[str]:
-        validate_limit(limit)
+    def queued_by_source(self, *, source_ids: Collection[str], now: datetime) -> dict[str, int]:
+        sources = sorted(source_ids)
+        moment = format_utc(now)
+        if not sources:
+            return {}
+        servable = _SERVABLE.format(marks=", ".join("?" * len(sources)))
         rows = self._db.query(
-            f"SELECT c.item_id {_WAITING} ORDER BY c.classified_at, c.item_id LIMIT ?", (limit,)
+            f"SELECT i.source_id, count(*) {servable} GROUP BY i.source_id", (*sources, moment)
         )
+        return {str(r[0]): int(r[1]) for r in rows}
+
+    def drop_candidates(
+        self,
+        *,
+        source_ids: Collection[str],
+        now: datetime,
+        limit: int,
+        source_id: str | None = None,
+    ) -> list[str]:
+        validate_limit(limit)
+        sources = sorted(source_ids)
+        moment = format_utc(now)
+        if not sources:
+            return []
+        servable = _SERVABLE.format(marks=", ".join("?" * len(sources)))
+        params: list[object] = [*sources, moment]
+        if source_id is not None:
+            servable += " AND i.source_id = ?"
+            params.append(source_id)
+        rows = self._db.query(
+            f"SELECT c.item_id {servable} ORDER BY c.priority, c.classified_at, c.item_id LIMIT ?",
+            (*params, limit),
+        )
+        return [str(r[0]) for r in rows]
+
+    def orphaned_copies(self, *, source_ids: Collection[str], limit: int) -> list[str]:
+        validate_limit(limit)
+        sources = sorted(source_ids)
+        if not sources:
+            return []
+        marks = ", ".join("?" * len(sources))
+        rows = self._db.query(_ORPHANS.format(marks=marks), (*sources, *sources, limit))
         return [str(r[0]) for r in rows]
 
     # ---- the budget ----
@@ -137,6 +195,14 @@ class SqliteEscalationRepository:
                 > 0
             )
 
+    def release_call(self, hour: datetime) -> None:
+        start = _budget_hour(hour)
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE llm_budget SET calls = calls - 1 WHERE hour_start = ? AND calls > 0",
+                (start,),
+            )
+
     def calls_in_hour(self, hour: datetime) -> int:
         rows = self._db.query(
             "SELECT calls FROM llm_budget WHERE hour_start = ?", (_budget_hour(hour),)
@@ -144,6 +210,23 @@ class SqliteEscalationRepository:
         return int(rows[0][0]) if rows else 0
 
     # ---- bookkeeping and judgments ----
+
+    def judged_since(self, since: datetime) -> int:
+        rows = self._db.query(
+            "SELECT count(*) FROM llm_judgments WHERE outcome = 'judged' AND judged_at >= ?",
+            (format_utc(since),),
+        )
+        return int(rows[0][0])
+
+    def parked(self, *, before: datetime | None, limit: int) -> list[EscalationState]:
+        validate_limit(limit)
+        sql = f"SELECT {_STATE_COLUMNS} FROM llm_escalations WHERE state = 'parked'"
+        params: list[object] = []
+        if before is not None:
+            sql += " AND updated_at <= ?"
+            params.append(format_utc(before))
+        rows = self._db.query(f"{sql} ORDER BY updated_at, item_id LIMIT ?", (*params, limit))
+        return [_state_from_row(r) for r in rows]
 
     def get_state(self, item_id: str) -> EscalationState | None:
         rows = self._db.query(

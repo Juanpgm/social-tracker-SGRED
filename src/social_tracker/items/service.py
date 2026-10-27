@@ -7,6 +7,10 @@ been processed by the classifier is removed: `classified` ones at once, `out_of_
 once they were fetched more than `OUT_OF_SCOPE_GRACE` (24 hours) ago, so that a vocabulary change
 in the first day can still bring an off-topic item back (`classify reclassify`). Items parked as
 `classification_failed` stay until a retry or the time-based retention.
+An item whose verdict still waits for the language model is not purged merely for being old:
+it goes only when it was fetched more than TWICE the retention ago (twice the grace, with a
+retention of 0), so a judge that is down for a while does not make the queue lose its items.
+What the model said about a purged item (the audit record with its raw output) goes with it.
 Alerts are a different store and are never touched here.
 
 Nothing here publishes or sends anything (G-1).
@@ -57,11 +61,17 @@ class ItemService:
         return self._items.search(query, limit=limit)
 
     def purge_expired(self) -> PurgeReport:
+        now = self._clock.now()
         with self._uow.transaction():
             if self.retention_days == 0:
-                grace = self._clock.now() - OUT_OF_SCOPE_GRACE
-                deleted = self._items.purge_classified(out_of_scope_fetched_before=grace)
+                deleted = self._items.purge_classified(
+                    out_of_scope_fetched_before=now - OUT_OF_SCOPE_GRACE,
+                    purge_queued_fetched_before=now - 2 * OUT_OF_SCOPE_GRACE,
+                )
             else:
-                cutoff = retention_cutoff(self._clock.now(), self.retention_days)
-                deleted = self._items.purge_fetched_before(cutoff)
+                cutoff = retention_cutoff(now, self.retention_days)
+                deleted = self._items.purge_fetched_before(
+                    cutoff,
+                    purge_queued_fetched_before=now - 2 * timedelta(days=self.retention_days),
+                )
         return PurgeReport(deleted, self.retention_days)

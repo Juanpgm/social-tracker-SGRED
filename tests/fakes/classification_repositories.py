@@ -52,11 +52,36 @@ class InMemoryClassificationRepository:
             recycled=sum(r.recycled_of is not None for r in rows),
             truncated=sum(r.truncated for r in rows),
             near_duplicates=sum(r.near_of is not None for r in rows),
-            awaiting_original=sum(r.awaiting_original for r in rows),
+            awaiting_original=sum(
+                r.awaiting_original and self._original_waits(r.duplicate_of, rows) for r in rows
+            ),
+            orphaned_awaiting=sum(
+                r.awaiting_original and not self._original_waits(r.duplicate_of, rows) for r in rows
+            ),
         )
+
+    @staticmethod
+    def _original_waits(original_id: str | None, rows: list[Classification]) -> bool:
+        return any(o.item_id == original_id and o.needs_llm for o in rows)
+
+    def _release_copies(self, gone: set[str]) -> None:
+        """Copies that waited for an original that is forgotten become normal queued items."""
+        for row in list(self._rows.values()):
+            if not (row.awaiting_original and row.duplicate_of in gone):
+                continue
+            original = self._rows.get(row.duplicate_of)
+            priority = max(0.1, original.priority if original is not None else 0.1)
+            self._rows[row.item_id] = replace(
+                row,
+                awaiting_original=False,
+                duplicate_of=None,
+                needs_llm=True,
+                priority=priority,
+            )
 
     def delete(self, item_id: str) -> bool:
         with self._lock:
+            self._release_copies({item_id})
             self._failures.pop(item_id, None)
             return self._rows.pop(item_id, None) is not None
 
@@ -73,6 +98,7 @@ class InMemoryClassificationRepository:
     def delete_many(self, item_ids: Sequence[str]) -> int:
         with self._lock:
             removed = 0
+            self._release_copies(set(item_ids))
             for item_id in item_ids:
                 self._failures.pop(item_id, None)
                 removed += self._rows.pop(item_id, None) is not None
@@ -105,6 +131,26 @@ class InMemoryClassificationRepository:
                 needs_llm=classification.needs_llm,
                 awaiting_original=classification.awaiting_original,
                 priority=classification.priority,
+                duplicate_of=classification.duplicate_of,
+                near_of=classification.near_of,
+                settled_at=classification.settled_at,
+                settle_reason=classification.settle_reason,
+            )
+            return True
+
+    def reopen(self, item_id: str, priority: float) -> bool:
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int | float)
+            or not 0.0 <= priority <= 1.0
+        ):
+            raise ValidationError("a priority is a number from 0 to 1")
+        with self._lock:
+            stored = self._rows.get(item_id)
+            if stored is None or stored.needs_llm or stored.settle_reason != "parked":
+                return False
+            self._rows[item_id] = replace(
+                stored, needs_llm=True, priority=priority, settled_at=None, settle_reason=None
             )
             return True
 

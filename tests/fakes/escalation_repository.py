@@ -75,13 +75,74 @@ class InMemoryEscalationRepository:
         found.sort(key=lambda e: (-e.priority, e.classified_at, e.item_id))
         return found[:limit]
 
-    def queued_count(self) -> int:
-        return len(self._waiting())
+    def _servable(self, source_ids: Collection[str], now: datetime) -> list[tuple[Any, Any]]:
+        moment = ensure_utc(now)
+        eligible = set(source_ids)
+        with self._lock:
+            states = dict(self._states)
+        found = []
+        for row, item in self._waiting():
+            if item.source_id not in eligible:
+                continue
+            state = states.get(row.item_id)
+            if state is not None and (
+                state.state != "escalation_failed"
+                or (state.next_attempt_at is not None and state.next_attempt_at > moment)
+            ):
+                continue
+            found.append((row, item))
+        return found
 
-    def oldest_queued(self, limit: int) -> list[str]:
+    def queued_count(self, *, source_ids: Collection[str], now: datetime) -> int:
+        return len(self._servable(source_ids, now))
+
+    def queued_by_source(self, *, source_ids: Collection[str], now: datetime) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for _, item in self._servable(source_ids, now):
+            counts[item.source_id] = counts.get(item.source_id, 0) + 1
+        return counts
+
+    def drop_candidates(
+        self,
+        *,
+        source_ids: Collection[str],
+        now: datetime,
+        limit: int,
+        source_id: str | None = None,
+    ) -> list[str]:
         validate_limit(limit)
-        ordered = sorted((row.classified_at, row.item_id) for row, _ in self._waiting())
-        return [item_id for _, item_id in ordered[:limit]]
+        rows = [
+            row
+            for row, item in self._servable(source_ids, now)
+            if source_id is None or item.source_id == source_id
+        ]
+        rows.sort(key=lambda r: (r.priority, r.classified_at, r.item_id))
+        return [row.item_id for row in rows[:limit]]
+
+    def orphaned_copies(self, *, source_ids: Collection[str], limit: int) -> list[str]:
+        validate_limit(limit)
+        eligible = set(source_ids)
+        found = []
+        for row in list(self._peers.classifications._rows.values()):
+            if not row.awaiting_original:
+                continue
+            item = self._peers.items.get(row.item_id)
+            if item is None or item.status is not ItemStatus.CLASSIFIED:
+                continue
+            if item.source_id not in eligible:
+                continue
+            original = self._peers.classifications._rows.get(row.duplicate_of)
+            original_item = self._peers.items.get(row.duplicate_of) if original else None
+            alive = (
+                original is not None
+                and original_item is not None
+                and original_item.status is ItemStatus.CLASSIFIED
+                and original.needs_llm
+                and original_item.source_id in eligible
+            )
+            if not alive:
+                found.append(row.item_id)
+        return sorted(found)[:limit]
 
     # ---- the budget ----
 
@@ -96,6 +157,12 @@ class InMemoryEscalationRepository:
             self._budget[start] = used + 1
             return True
 
+    def release_call(self, hour: datetime) -> None:
+        start = self._whole_hour(hour)
+        with self._lock:
+            if self._budget.get(start, 0) > 0:
+                self._budget[start] -= 1
+
     def calls_in_hour(self, hour: datetime) -> int:
         with self._lock:
             return self._budget.get(self._whole_hour(hour), 0)
@@ -108,6 +175,27 @@ class InMemoryEscalationRepository:
         return start
 
     # ---- bookkeeping and judgments ----
+
+    def judged_since(self, since: datetime) -> int:
+        moment = ensure_utc(since)
+        with self._lock:
+            return sum(
+                1
+                for j in self._judgments.values()
+                if j.outcome == "judged" and j.judged_at >= moment
+            )
+
+    def parked(self, *, before: datetime | None, limit: int) -> list[EscalationState]:
+        validate_limit(limit)
+        limit_at = None if before is None else ensure_utc(before)
+        with self._lock:
+            found = [
+                s
+                for s in self._states.values()
+                if s.state == "parked" and (limit_at is None or s.updated_at <= limit_at)
+            ]
+        found.sort(key=lambda s: (s.updated_at, s.item_id))
+        return found[:limit]
 
     def get_state(self, item_id: str) -> EscalationState | None:
         with self._lock:
@@ -147,7 +235,7 @@ class InMemoryEscalationRepository:
             failed_waiting=states.count("escalation_failed"),
             parked=states.count("parked"),
             dropped=states.count("dropped"),
-            queued=self.queued_count(),
+            queued=len(self._waiting()),
         )
 
     # ---- the lease ----

@@ -28,6 +28,9 @@ from social_tracker.shared.text import has_control_chars, has_unsafe_chars
 MAX_RATIONALE_CHARS = 300  # RC-4: a short rationale
 MAX_SIGNALS = 20
 MAX_VERSION_CHARS = 64
+# Why a verdict left the queue (migration 0009): the model judged it, it took the verdict of an
+# exact copy's original, the model's answer was invalid, or it was parked or dropped unjudged.
+SETTLE_REASONS = ("llm", "duplicate", "invalid", "parked")
 _STATUS_RE = re.compile(r"[a-z_]{1,32}")
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -297,6 +300,9 @@ class Classification:
     - `truncated`: the text was cut before analysis. `scope_reason`: why an item is out of scope.
     - `catalog_status`: outcome of the official catalog cross-check (`unavailable` until it exists).
     - `source_credibility_used`: the 1..5 prior that adjusted the confidence (RC-8).
+    - `settled_at`/`settle_reason`: when and why a queued (or waiting) verdict was settled by the
+      LLM stage (`SETTLE_REASONS`); both absent for a verdict the cascade settled itself. The
+      alert layer reads them to tell a settled verdict from one still in the queue.
     """
 
     item_id: str
@@ -319,6 +325,8 @@ class Classification:
     source_credibility_used: int = 3
     near_of: str | None = None
     awaiting_original: bool = False
+    settled_at: datetime | None = None
+    settle_reason: str | None = None
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -355,6 +363,17 @@ class Classification:
             raise ValidationError("priority must be a number from 0 to 1")
         if not _whole(self.source_credibility_used, 1, 5):
             raise ValidationError("credibility must be a whole number from 1 to 5")
+        self._check_settlement()
+
+    def _check_settlement(self) -> None:
+        if (self.settled_at is None) != (self.settle_reason is None):
+            raise ValidationError("a settlement has both a time and a reason, or neither")
+        if self.settle_reason is not None and self.settle_reason not in SETTLE_REASONS:
+            raise ValidationError("unknown settle reason")
+        if self.settled_at is not None:
+            object.__setattr__(self, "settled_at", ensure_utc(self.settled_at))
+            if self.needs_llm:
+                raise ValidationError("a verdict still in the queue is not settled")
 
     def _check_rationale(self) -> None:
         text = self.rationale
@@ -436,5 +455,6 @@ class ClassificationStats:
     recycled: int
     truncated: int
     near_duplicates: int = 0
-    awaiting_original: int = 0
+    awaiting_original: int = 0  # copies whose original still waits for the LLM
     failed: int = 0  # items parked as classification_failed (counted by the service)
+    orphaned_awaiting: int = 0  # copies with no original left to wait for

@@ -36,22 +36,42 @@ from social_tracker.shared.errors import DomainError, StorageError, ValidationEr
 _COLUMNS = (
     "item_id, label, confidence, stage, rationale, signals, topics, low_confidence, needs_llm, "
     "duplicate_of, recycled_of, near_of, awaiting_original, truncated, catalog_status, priority, "
-    "scope_reason, source_credibility_used, classified_at, classifier_version"
+    "scope_reason, source_credibility_used, classified_at, classifier_version, "
+    "settled_at, settle_reason"
 )
 _INSERT_VERDICT = (
-    f"INSERT INTO classifications ({_COLUMNS}) VALUES ({', '.join('?' * 20)}) "
+    f"INSERT INTO classifications ({_COLUMNS}) VALUES ({', '.join('?' * 22)}) "
     "ON CONFLICT (item_id) DO NOTHING"
 )
 _SETTLE = (
     "UPDATE classifications SET label = ?, confidence = ?, stage = ?, rationale = ?, "
-    "low_confidence = ?, needs_llm = ?, awaiting_original = ?, priority = ? "
+    "low_confidence = ?, needs_llm = ?, awaiting_original = ?, priority = ?, "
+    "duplicate_of = ?, near_of = ?, settled_at = ?, settle_reason = ? "
     "WHERE item_id = ? AND (needs_llm = 1 OR awaiting_original = 1)"
+)
+_REOPEN = (
+    "UPDATE classifications SET needs_llm = 1, priority = ?, settled_at = NULL, "
+    "settle_reason = NULL WHERE item_id = ? AND needs_llm = 0 AND settle_reason = 'parked'"
+)
+# A waiting copy is "live" while its original still waits for the judge (`needs_llm`).
+_LIVE_ORIGINAL = (
+    "EXISTS (SELECT 1 FROM classifications o WHERE o.item_id = classifications.duplicate_of "
+    "AND o.needs_llm = 1)"
 )
 _COUNTS = (
     "SELECT count(*), COALESCE(SUM(needs_llm), 0), COALESCE(SUM(low_confidence), 0), "
     "COALESCE(SUM(duplicate_of IS NOT NULL), 0), COALESCE(SUM(recycled_of IS NOT NULL), 0), "
     "COALESCE(SUM(truncated), 0), COALESCE(SUM(near_of IS NOT NULL), 0), "
-    "COALESCE(SUM(awaiting_original), 0) FROM classifications"
+    f"COALESCE(SUM(awaiting_original AND {_LIVE_ORIGINAL}), 0), "
+    f"COALESCE(SUM(awaiting_original AND NOT {_LIVE_ORIGINAL}), 0) FROM classifications"
+)
+# The copies that waited for an original that is about to be forgotten become normal queued items:
+# no link, the priority the original had (never under 0.1).
+_RELEASE_COPIES = (
+    "UPDATE classifications SET awaiting_original = 0, duplicate_of = NULL, needs_llm = 1, "
+    "priority = MAX(0.1, COALESCE((SELECT o.priority FROM classifications o "
+    "WHERE o.item_id = classifications.duplicate_of), 0.1)) "
+    "WHERE awaiting_original = 1 AND duplicate_of IN ({marks})"
 )
 _SIGNATURE_COLUMNS = "item_id, content_hash, ref_at, minhash, text_hash, digits_hash, n_tokens"
 _CANDIDATES = (
@@ -64,6 +84,12 @@ _CANDIDATES = (
     ") c JOIN item_signatures s ON s.item_id = c.item_id WHERE s.item_id <> ? "
     "GROUP BY s.item_id ORDER BY max(c.shared) DESC, s.ref_at, s.item_id LIMIT ?"
 )
+
+
+def _release_copies(conn: sqlite3.Connection, ids: Sequence[str]) -> None:
+    """Before verdicts are forgotten: nobody keeps waiting for an original that is gone."""
+    marks = ", ".join("?" * len(ids))
+    conn.execute(_RELEASE_COPIES.format(marks=marks), list(ids))
 
 
 def _forget_escalation(conn: sqlite3.Connection, ids: Sequence[str]) -> None:
@@ -97,6 +123,8 @@ def _verdict_from_row(row: sqlite3.Row) -> Classification:
             source_credibility_used=row["source_credibility_used"],
             classified_at=parse_utc(row["classified_at"]),
             classifier_version=row["classifier_version"],
+            settled_at=parse_utc(row["settled_at"]) if row["settled_at"] is not None else None,
+            settle_reason=row["settle_reason"],
         )
     except (DomainError, ValueError, TypeError):
         raise StorageError("stored classification is invalid") from None
@@ -124,6 +152,8 @@ def _verdict_params(c: Classification) -> tuple[Any, ...]:
         c.source_credibility_used,
         format_utc(c.classified_at),
         c.classifier_version,
+        format_utc(c.settled_at) if c.settled_at is not None else None,
+        c.settle_reason,
     )
 
 
@@ -156,7 +186,7 @@ class SqliteClassificationRepository:
                 ).fetchall()
         except sqlite3.Error as exc:
             raise map_sqlite_error(exc) from None
-        total, needs_llm, low, duplicates, recycled, truncated, near, awaiting = (
+        total, needs_llm, low, duplicates, recycled, truncated, near, awaiting, orphaned = (
             int(n) for n in counts
         )
         return ClassificationStats(
@@ -170,6 +200,7 @@ class SqliteClassificationRepository:
             truncated=truncated,
             near_duplicates=near,
             awaiting_original=awaiting,
+            orphaned_awaiting=orphaned,
         )
 
     def settle(self, classification: Classification) -> bool:
@@ -189,11 +220,25 @@ class SqliteClassificationRepository:
                         int(c.needs_llm),
                         int(c.awaiting_original),
                         c.priority,
+                        c.duplicate_of,
+                        c.near_of,
+                        format_utc(c.settled_at) if c.settled_at is not None else None,
+                        c.settle_reason,
                         c.item_id,
                     ),
                 ).rowcount
                 > 0
             )
+
+    def reopen(self, item_id: str, priority: float) -> bool:
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int | float)
+            or not 0.0 <= priority <= 1.0
+        ):
+            raise ValidationError("a priority is a number from 0 to 1")
+        with self._db.transaction() as conn:
+            return conn.execute(_REOPEN, (priority, item_id)).rowcount > 0
 
     def awaiting(self, original_id: str) -> list[Classification]:
         rows = self._db.query(
@@ -205,6 +250,7 @@ class SqliteClassificationRepository:
 
     def delete(self, item_id: str) -> bool:
         with self._db.transaction() as conn:
+            _release_copies(conn, [item_id])
             _forget_escalation(conn, [item_id])
             conn.execute("DELETE FROM classification_failures WHERE item_id = ?", (item_id,))
             removed = conn.execute("DELETE FROM classifications WHERE item_id = ?", (item_id,))
@@ -227,6 +273,7 @@ class SqliteClassificationRepository:
             return 0
         marks = ", ".join("?" * len(ids))
         with self._db.transaction() as conn:
+            _release_copies(conn, ids)
             _forget_escalation(conn, ids)
             conn.execute(f"DELETE FROM classification_failures WHERE item_id IN ({marks})", ids)
             removed = conn.execute(f"DELETE FROM classifications WHERE item_id IN ({marks})", ids)

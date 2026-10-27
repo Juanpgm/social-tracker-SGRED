@@ -94,7 +94,7 @@ from social_tracker.control.domain import (
 )
 from social_tracker.control.ports import ControlRepository
 from social_tracker.control.service import ControlService
-from social_tracker.items.domain import Item, ItemStatus, validate_limit
+from social_tracker.items.domain import Item, ItemStatus, text_identity, validate_limit
 from social_tracker.items.ports import ItemRepository
 from social_tracker.shared.clock import Clock
 from social_tracker.shared.errors import (
@@ -440,7 +440,8 @@ class ClassifierService:
         prepared = prepare(item.title, item.text, max_chars=self._settings.max_text_chars)
         topic = matcher.evaluate_prepared(prepared)
         sign = self._signature_of(item, prepared) if topic.in_scope else None
-        inherits = sign is not None and self._is_copy(self._find_match(item, sign, track=False))
+        early = self._find_match(item, sign, track=False) if sign is not None else None
+        inherits = self._is_copy(early) and self._reusable(item, early)
         catalog = None if inherits else self._catalog_status(topic, prepared, item)
         with self._uow.transaction():
             item = self._items.get(item_id)
@@ -506,8 +507,10 @@ class ClassifierService:
             return verdict, sign
         if match.gap > timedelta(days=settings.recycle_days):
             return self._recycled(outcome, topic, match, catalog, alert_min, common), None
-        if match.exact:
+        if match.exact and self._reusable(item, match):
             return self._duplicate(topic, match, alert_min, common), None
+        # A near copy, or an exact one whose text differs from a model-judged original: its rules
+        # ran on its own text and it is linked as a near copy only.
         verdict = self._from_rules(outcome, topic, catalog, alert_min, common, near=match)
         return verdict, sign
 
@@ -681,6 +684,20 @@ class ClassifierService:
         if not escalate:
             return 0.0
         return priority(strength, topic.score, secretariat=Topic.SECRETARIAT in topic.topics)
+
+    def _reusable(self, item: Item, match: _Match | None) -> bool:
+        """May `item` take the verdict of the exact copy it matched? A verdict of the CPU stages
+        is a function of the folded text, which a copy shares. A verdict the language model gave
+        is shared only with a text that is the same to the byte (`text_identity`), and only if
+        the original is still here to vouch for it."""
+        if match is None:
+            return False
+        if match.verdict.stage is not Stage.LLM:
+            return True
+        earlier = self._items.get(match.verdict.item_id)
+        return earlier is not None and text_identity(earlier.title, earlier.text) == text_identity(
+            item.title, item.text
+        )
 
     def _is_copy(self, match: _Match | None) -> bool:
         """True for an exact copy inside the recycle window: a duplicate."""

@@ -31,7 +31,7 @@ class ClassificationRepository(Protocol):
 
     def delete(self, item_id: str) -> bool:
         """Forget the verdict of an item so that it can be classified again; False if it had
-        none."""
+        none. Exact copies that waited for it are released into the queue (see `delete_many`)."""
         ...
 
     def older_than(self, cutoff: datetime, limit: int, offset: int = 0) -> list[str]:
@@ -40,7 +40,10 @@ class ClassificationRepository(Protocol):
         ...
 
     def delete_many(self, item_ids: Sequence[str]) -> int:
-        """Forget these verdicts (and their failure counters); returns how many verdicts."""
+        """Forget these verdicts (and their failure counters); returns how many verdicts. The
+        exact copies that wait for one of them (`awaiting_original`) are never left waiting for an
+        original that is gone: each is released into the queue as a normal item (no link, the
+        priority its original had, at least 0.1) and will be judged on its own."""
         ...
 
     def note_failure(self, item_id: str, at: datetime) -> int:
@@ -54,9 +57,17 @@ class ClassificationRepository(Protocol):
     def settle(self, classification: Classification) -> bool:
         """Replace a verdict that still waits for the LLM (it is queued, `needs_llm`, or it is an
         exact copy whose original is, `awaiting_original`). Only the label, confidence, stage,
-        rationale, low_confidence, needs_llm, awaiting_original and priority are written; the
-        rest of the stored verdict stays. False, changing nothing, when the item has no verdict
-        or nothing waits: a settled verdict is never settled twice."""
+        rationale, low_confidence, needs_llm, awaiting_original, priority, the links
+        (`duplicate_of`, `near_of`: a copy that must be judged on its own turns into a near copy)
+        and the settlement (`settled_at`, `settle_reason`) are written; the rest of the stored
+        verdict stays. False, changing nothing, when the item has no verdict or nothing waits: a
+        settled verdict is never settled twice."""
+        ...
+
+    def reopen(self, item_id: str, priority: float) -> bool:
+        """Put a verdict that was parked without a judgment (`settle_reason` `parked`) back in the
+        queue with this priority (0..1) and forget its settlement. False, changing nothing, for
+        any other verdict: only a parked item is ever reopened."""
         ...
 
     def awaiting(self, original_id: str) -> list[Classification]:

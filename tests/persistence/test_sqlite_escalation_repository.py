@@ -37,22 +37,84 @@ class TestSqliteEscalationRepositoryContract(EscalationRepositoryContract):
         )
 
 
-def test_the_schema_is_the_eighth_migration():
-    assert load_migrations()[-1].name == "llm_escalation"
-    assert load_migrations()[-1].version == 8
+def test_the_schema_is_the_ninth_migration():
+    assert load_migrations()[-1].name == "llm_hardening"
+    assert load_migrations()[-1].version == 9
+
+
+_OLD_VERDICT = (
+    "INSERT INTO classifications (item_id, label, confidence, stage, rationale, signals, topics, "
+    "low_confidence, needs_llm, truncated, catalog_status, priority, source_credibility_used, "
+    "classified_at, classifier_version) VALUES (?, 'unintentional_rumor', 0.55, 'rules', "
+    "'rumor candidate', '[]', '[]', 0, ?, 0, 'no_claim', ?, 3, '2026-03-01T12:00:00+00:00', "
+    "'cascade-2/topics-0')"
+)
 
 
 def test_a_database_at_the_previous_version_keeps_its_verdicts_when_migrated(tmp_path: Path):
     path = tmp_path / "old.db"
-    old = Database(path, migrations=load_migrations()[:7])
-    SqliteClassificationRepository(old).add(verdict(1))
+    old = Database(path, migrations=load_migrations()[:8])
+    with old.transaction() as conn:  # the schema of the previous version has no settlement columns
+        conn.execute(_OLD_VERDICT, (item_id(1), 1, 0.5))
     old.close()
     migrated = Database(path)
     try:
-        assert SqliteClassificationRepository(migrated).get(item_id(1)) == verdict(1)
+        kept = SqliteClassificationRepository(migrated).get(item_id(1))
+        assert kept == verdict(1, rationale="rumor candidate", signals=(), topics=())
+        assert (kept.settled_at, kept.settle_reason) == (None, None)
         assert SqliteEscalationRepository(migrated).counts().judged == 0
     finally:
         migrated.close()
+
+
+def test_the_settlement_of_old_verdicts_is_rebuilt_from_what_the_judgments_say(tmp_path: Path):
+    path = tmp_path / "backfill.db"
+    old = Database(path, migrations=load_migrations()[:8])
+    with old.transaction() as conn:
+        for n in range(1, 8):
+            conn.execute(_OLD_VERDICT, (item_id(n), 0 if n != 7 else 1, 0.5))
+    esc = SqliteEscalationRepository(old)
+    stamp = NOW + timedelta(minutes=2)
+    esc.add_judgment(judgment(1, judged_at=stamp))
+    esc.add_judgment(
+        judgment(2, outcome="invalid", label=None, confidence=None, rationale=None, judged_at=stamp)
+    )
+    esc.add_judgment(judgment(3, outcome="reused", reused_from=item_id(1), judged_at=stamp))
+    esc.put_state(state(4, state="parked", next_attempt_at=None, updated_at=stamp))
+    esc.put_state(state(5, state="dropped", next_attempt_at=None, updated_at=stamp))
+    esc.put_state(state(7, updated_at=stamp))  # still waiting for a retry
+    old.close()
+    migrated = Database(path)
+    try:
+        verdicts = SqliteClassificationRepository(migrated)
+        got = {n: verdicts.get(item_id(n)) for n in range(1, 8)}
+        assert [(got[n].settled_at, got[n].settle_reason) for n in (1, 2, 3, 4, 5)] == [
+            (stamp, "llm"),
+            (stamp, "invalid"),
+            (stamp, "duplicate"),
+            (stamp, "parked"),
+            (stamp, "parked"),
+        ]
+        assert (got[6].settled_at, got[6].settle_reason) == (None, None)  # the cascade's own
+        assert (got[7].settled_at, got[7].settle_reason) == (None, None)  # still queued
+    finally:
+        migrated.close()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE classifications SET settled_at = '2026-03-01T12:00:00+00:00'",
+        "UPDATE classifications SET settle_reason = 'llm'",
+        "UPDATE classifications SET settled_at = 'yesterday', settle_reason = 'llm'",
+        "UPDATE classifications SET settled_at = '2026-03-01T12:00:00+00:00', "
+        "settle_reason = 'maybe'",
+    ],
+)
+def test_a_settlement_that_breaks_a_constraint_is_refused_by_the_database(db: Database, sql: str):
+    SqliteClassificationRepository(db).add(verdict(1))
+    with pytest.raises(StorageError), db.transaction() as conn:
+        conn.execute(sql)
 
 
 def test_forgetting_a_verdict_also_forgets_its_judgment_and_bookkeeping(db: Database):

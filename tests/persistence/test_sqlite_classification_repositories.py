@@ -404,7 +404,7 @@ def test_the_pending_items_index_exists_and_serves_the_queue(db):
 
 def test_the_migration_is_recorded(db):
     versions = [r[0] for r in db.query("SELECT version FROM schema_migrations ORDER BY 1")]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     tables = {r[0] for r in db.query("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"classifications", "item_signatures", "item_signature_bands", "topic_config"} <= tables
     assert sqlite3.sqlite_version_info >= (3, 35)

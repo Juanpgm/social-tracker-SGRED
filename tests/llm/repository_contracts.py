@@ -154,7 +154,7 @@ class EscalationRepositoryContract:
         rig.items.purge_fetched_before(NOW + timedelta(days=3650))
         assert rig.items.get(stored.item_id) is None
         assert rig.repo.queue(source_ids={"src_news"}, now=NOW, limit=9) == []
-        assert rig.repo.queued_count() == 0
+        assert rig.repo.queued_count(source_ids={"src_news"}, now=NOW) == 0
 
     def test_only_the_eligible_sources_are_queued(self, rig):
         mine = rig.seed(1, source="src_news")
@@ -199,25 +199,87 @@ class EscalationRepositoryContract:
         with pytest.raises(Exception):  # noqa: B017,PT011
             rig.repo.queue(source_ids={"src_news"}, now=datetime(2026, 3, 1), limit=9)  # noqa: DTZ001
 
-    def test_the_queued_count_ignores_backoff_and_source(self, rig):
+    def test_the_queued_count_counts_only_what_the_queue_could_serve(self, rig):
         rig.seed(1, source="src_news")
-        other = rig.seed(2, source="src_other")
+        rig.seed(2, source="src_other")
         rig.seed(3, needs_llm=False, priority=0.0)
-        rig.repo.put_state(replace(state(1), item_id=other.item_id))
-        assert rig.repo.queued_count() == 2
+        waiting = rig.seed(4)
+        rig.repo.put_state(
+            replace(state(1), item_id=waiting.item_id, next_attempt_at=NOW + timedelta(hours=1))
+        )
+        news = {"src_news"}
+        assert rig.repo.queued_count(source_ids=news, now=NOW) == 1  # not the other source, not 4
+        both = {"src_news", "src_other"}
+        assert rig.repo.queued_count(source_ids=both, now=NOW) == 2
+        assert rig.repo.queued_count(source_ids=set(), now=NOW) == 0
+        later = NOW + timedelta(hours=1)  # the backoff is over: item 4 is served again
+        assert rig.repo.queued_count(source_ids=news, now=later) == 2
 
-    def test_the_oldest_waiting_items_come_first(self, rig):
-        newest = rig.seed(1, classified_at=NOW + timedelta(hours=2))
-        oldest = rig.seed(2, classified_at=NOW)
-        middle = rig.seed(3, classified_at=NOW + timedelta(hours=1))
-        rig.seed(4, needs_llm=False, priority=0.0, classified_at=NOW - timedelta(days=1))
-        assert rig.repo.oldest_queued(2) == [oldest.item_id, middle.item_id]
-        assert rig.repo.oldest_queued(9) == [oldest.item_id, middle.item_id, newest.item_id]
+    def test_the_queued_count_leaves_out_parked_and_dropped_items(self, rig):
+        parked = rig.seed(1)
+        dropped = rig.seed(2)
+        rig.seed(3)
+        rig.repo.put_state(replace(state(1), item_id=parked.item_id, state="parked"))
+        rig.repo.put_state(replace(state(2), item_id=dropped.item_id, state="dropped"))
+        assert rig.repo.queued_count(source_ids={"src_news"}, now=NOW) == 1
 
-    @pytest.mark.parametrize("limit", [0, -3, True])
-    def test_a_bad_oldest_limit_is_refused(self, rig, limit):
+    def test_the_waiting_items_are_counted_per_source(self, rig):
+        rig.seed(1, source="src_news")
+        rig.seed(2, source="src_news")
+        rig.seed(3, source="src_other")
+        rig.seed(4, source="src_third")
+        gone = rig.seed(5, source="src_news")
+        rig.repo.put_state(
+            replace(state(1), item_id=gone.item_id, next_attempt_at=NOW + timedelta(hours=1))
+        )
+        eligible = {"src_news", "src_other"}
+        assert rig.repo.queued_by_source(source_ids=eligible, now=NOW) == {
+            "src_news": 2,
+            "src_other": 1,
+        }
+        assert rig.repo.queued_by_source(source_ids=set(), now=NOW) == {}
+
+    def test_overflow_candidates_are_the_lowest_priority_first_then_the_oldest(self, rig):
+        hi_old = rig.seed(1, priority=0.9, classified_at=NOW)
+        low_new = rig.seed(2, priority=0.1, classified_at=NOW + timedelta(hours=3))
+        low_old = rig.seed(3, priority=0.1, classified_at=NOW + timedelta(hours=1))
+        mid = rig.seed(4, priority=0.5, classified_at=NOW + timedelta(hours=2))
+        rig.seed(5, needs_llm=False, priority=0.0)
+        eligible = {"src_news"}
+        got = rig.repo.drop_candidates(source_ids=eligible, now=NOW, limit=9)
+        # an older high priority item is never dropped before a newer low priority one
+        assert got == [low_old.item_id, low_new.item_id, mid.item_id, hi_old.item_id]
+        assert rig.repo.drop_candidates(source_ids=eligible, now=NOW, limit=2) == got[:2]
+
+    def test_ties_in_priority_and_age_break_by_the_id(self, rig):
+        a, b = rig.seed(1, priority=0.3), rig.seed(2, priority=0.3)
+        got = rig.repo.drop_candidates(source_ids={"src_news"}, now=NOW, limit=9)
+        assert got == sorted([a.item_id, b.item_id])
+
+    def test_overflow_candidates_can_be_limited_to_one_source(self, rig):
+        mine = rig.seed(1, source="src_news", priority=0.9)
+        rig.seed(2, source="src_other", priority=0.1)
+        got = rig.repo.drop_candidates(
+            source_ids={"src_news", "src_other"}, now=NOW, limit=9, source_id="src_news"
+        )
+        assert got == [mine.item_id]
+
+    def test_overflow_candidates_leave_out_backoff_ineligible_sources_and_settled_items(self, rig):
+        rig.seed(1, source="src_other")
+        waiting = rig.seed(2)
+        rig.seed(3, needs_llm=False, priority=0.0)
+        backoff = rig.seed(4)
+        rig.repo.put_state(
+            replace(state(1), item_id=backoff.item_id, next_attempt_at=NOW + timedelta(hours=1))
+        )
+        got = rig.repo.drop_candidates(source_ids={"src_news"}, now=NOW, limit=9)
+        assert got == [waiting.item_id]
+        assert rig.repo.drop_candidates(source_ids=set(), now=NOW, limit=9) == []
+
+    @pytest.mark.parametrize("limit", [0, -3, True, 1001])
+    def test_a_bad_overflow_limit_is_refused(self, rig, limit):
         with pytest.raises(Exception):  # noqa: B017,PT011
-            rig.repo.oldest_queued(limit)
+            rig.repo.drop_candidates(source_ids={"src_news"}, now=NOW, limit=limit)
 
     # ---- the budget ----
 
@@ -254,6 +316,29 @@ class EscalationRepositoryContract:
     def test_a_bad_cap_is_refused(self, repo, cap):
         with pytest.raises(Exception):  # noqa: B017,PT011
             repo.reserve_call(HOUR, cap)
+
+    def test_a_refunded_call_gives_its_place_back(self, repo):
+        for _ in range(3):
+            assert repo.reserve_call(HOUR, 3) is True
+        assert repo.reserve_call(HOUR, 3) is False
+        repo.release_call(HOUR)
+        assert repo.calls_in_hour(HOUR) == 2
+        assert repo.reserve_call(HOUR, 3) is True
+        assert repo.reserve_call(HOUR, 3) is False
+
+    def test_the_budget_never_goes_below_zero(self, repo):
+        repo.release_call(HOUR)
+        assert repo.calls_in_hour(HOUR) == 0
+        repo.reserve_call(HOUR, 2)
+        repo.release_call(HOUR)
+        repo.release_call(HOUR)
+        assert repo.calls_in_hour(HOUR) == 0
+        assert repo.reserve_call(HOUR, 1) is True
+
+    def test_a_refund_only_touches_its_own_hour(self, repo):
+        repo.reserve_call(HOUR, 3)
+        repo.release_call(HOUR + timedelta(hours=1))
+        assert repo.calls_in_hour(HOUR) == 1
 
     def test_a_budget_hour_must_be_a_whole_hour(self, repo):
         with pytest.raises(Exception):  # noqa: B017,PT011
@@ -395,3 +480,112 @@ class EscalationRepositoryContract:
         assert repo.get_judgment(item_id(2)) is not None
         assert repo.get_state(item_id(2)) is not None
         assert repo.forget([]) == 0
+
+    # ---- successes of the judge ----
+
+    def test_the_judged_since_count_includes_only_valid_judgments_from_that_moment(self, repo):
+        since = NOW
+        repo.add_judgment(judgment(1, judged_at=since))  # exactly at the limit: counted
+        repo.add_judgment(judgment(2, judged_at=since + timedelta(minutes=5)))
+        repo.add_judgment(judgment(3, judged_at=since - timedelta(microseconds=1)))
+        repo.add_judgment(
+            judgment(4, outcome="invalid", label=None, confidence=None, rationale=None)
+        )
+        repo.add_judgment(judgment(5, outcome="reused", reused_from=item_id(1)))
+        assert repo.judged_since(since) == 2
+        assert repo.judged_since(since + timedelta(hours=1)) == 0
+
+    def test_judged_since_needs_an_aware_time(self, repo):
+        with pytest.raises(Exception):  # noqa: B017,PT011
+            repo.judged_since(datetime(2026, 3, 1))  # noqa: DTZ001
+
+    # ---- parked items ----
+
+    def test_parked_items_are_listed_oldest_first_up_to_a_moment(self, repo):
+        repo.put_state(state(1, state="parked", next_attempt_at=None, updated_at=NOW))
+        repo.put_state(
+            state(2, state="parked", next_attempt_at=None, updated_at=NOW - timedelta(hours=2))
+        )
+        repo.put_state(
+            state(3, state="parked", next_attempt_at=None, updated_at=NOW + timedelta(hours=2))
+        )
+        repo.put_state(state(4, state="dropped", next_attempt_at=None, updated_at=NOW))
+        repo.put_state(state(5, updated_at=NOW))  # failed, waiting for a retry
+        every = repo.parked(before=None, limit=10)
+        assert [s.item_id for s in every] == [item_id(2), item_id(1), item_id(3)]
+        up_to = repo.parked(before=NOW, limit=10)
+        assert [s.item_id for s in up_to] == [item_id(2), item_id(1)]  # inclusive
+        assert [s.item_id for s in repo.parked(before=NOW, limit=1)] == [item_id(2)]
+        assert repo.parked(before=NOW - timedelta(hours=3), limit=10) == []
+
+    @pytest.mark.parametrize("limit", [0, -1, True, 1001])
+    def test_a_bad_parked_limit_is_refused(self, repo, limit):
+        with pytest.raises(Exception):  # noqa: B017,PT011
+            repo.parked(before=None, limit=limit)
+
+    # ---- copies that wait for an original that will never come ----
+
+    def _copy(self, rig, n: int, original: Classification, **changes) -> Classification:
+        return rig.seed(
+            n,
+            needs_llm=False,
+            priority=0.0,
+            duplicate_of=original.item_id,
+            awaiting_original=True,
+            stage="dedup",
+            **changes,
+        )
+
+    def test_a_copy_of_a_live_original_is_not_orphaned(self, rig):
+        original = rig.seed(1)
+        self._copy(rig, 2, original)
+        assert rig.repo.orphaned_copies(source_ids={"src_news"}, limit=10) == []
+
+    def test_a_copy_whose_original_waits_out_a_backoff_is_not_orphaned(self, rig):
+        original = rig.seed(1)
+        self._copy(rig, 2, original)
+        rig.repo.put_state(
+            replace(state(1), item_id=original.item_id, next_attempt_at=NOW + timedelta(hours=1))
+        )
+        assert rig.repo.orphaned_copies(source_ids={"src_news"}, limit=10) == []
+
+    def test_a_copy_whose_original_was_purged_is_orphaned(self, rig):
+        original = rig.seed(1)
+        copy = self._copy(rig, 2, original)
+        rig.items.purge_fetched_before(NOW + timedelta(days=3650))
+        assert rig.items.get(original.item_id) is None
+        rig.items.add_new([make_item("guid-2", source_id="src_news", text="text 2")])
+        rig.items.set_status(copy.item_id, ItemStatus.CLASSIFIED)
+        assert rig.repo.orphaned_copies(source_ids={"src_news"}, limit=10) == [copy.item_id]
+
+    def test_a_copy_whose_original_is_not_classified_any_more_is_orphaned(self, rig):
+        original = rig.seed(1, status=ItemStatus.NEW)
+        copy = self._copy(rig, 2, original)
+        assert rig.repo.orphaned_copies(source_ids={"src_news"}, limit=10) == [copy.item_id]
+
+    def test_a_copy_whose_original_was_settled_without_it_is_orphaned(self, rig):
+        original = rig.seed(1, needs_llm=False, priority=0.0)
+        copy = self._copy(rig, 2, original)
+        assert rig.repo.orphaned_copies(source_ids={"src_news"}, limit=10) == [copy.item_id]
+
+    def test_a_copy_whose_original_is_in_an_ineligible_source_is_orphaned(self, rig):
+        original = rig.seed(1, source="src_other")
+        copy = self._copy(rig, 2, original)
+        assert rig.repo.orphaned_copies(source_ids={"src_news"}, limit=10) == [copy.item_id]
+        assert rig.repo.orphaned_copies(source_ids={"src_news", "src_other"}, limit=10) == []
+
+    def test_a_copy_of_an_ineligible_source_is_left_alone(self, rig):
+        original = rig.seed(1, needs_llm=False, priority=0.0)
+        self._copy(rig, 2, original, source="src_other")
+        assert rig.repo.orphaned_copies(source_ids={"src_news"}, limit=10) == []
+        assert rig.repo.orphaned_copies(source_ids=set(), limit=10) == []
+
+    def test_orphans_are_listed_by_id_up_to_the_limit(self, rig):
+        original = rig.seed(1, needs_llm=False, priority=0.0)
+        copies = [self._copy(rig, n, original).item_id for n in (2, 3, 4)]
+        assert rig.repo.orphaned_copies(source_ids={"src_news"}, limit=2) == sorted(copies)[:2]
+
+    @pytest.mark.parametrize("limit", [0, -1, True, 1001])
+    def test_a_bad_orphan_limit_is_refused(self, rig, limit):
+        with pytest.raises(Exception):  # noqa: B017,PT011
+            rig.repo.orphaned_copies(source_ids={"src_news"}, limit=limit)
