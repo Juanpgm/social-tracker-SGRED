@@ -72,7 +72,19 @@ def test_expected_tables_exist_and_nothing_else(conn):
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         )
     }
-    assert names == {"sources", "source_state", "settings", "control_events"}
+    assert names == {
+        "sources",
+        "source_state",
+        "settings",
+        "control_events",
+        "items",
+        "source_fetch_status",
+        "items_fts",  # the full-text index and its four shadow tables
+        "items_fts_data",
+        "items_fts_idx",
+        "items_fts_docsize",
+        "items_fts_config",
+    }
 
 
 def test_normalized_name_has_a_unique_index(conn):

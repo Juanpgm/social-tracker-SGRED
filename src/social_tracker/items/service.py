@@ -1,0 +1,60 @@
+"""Item service: reading collected items and the retention purge.
+
+Retention (CI-10): raw items are kept for `retention_days` days from the moment they were
+fetched. One more instant and they go (see `items.domain`): an item exactly 30 days old is still
+kept. A retention of 0 means "purge once classified": no time is involved, every item that has
+reached the `classified` stage is removed (nothing sets that stage yet, so today it removes
+nothing). Alerts are a different store and are never touched here.
+
+Nothing here publishes or sends anything (G-1).
+"""
+
+from dataclasses import dataclass
+
+from social_tracker.items.domain import (
+    DEFAULT_LIST_LIMIT,
+    DEFAULT_RETENTION_DAYS,
+    Item,
+    retention_cutoff,
+    validate_retention_days,
+)
+from social_tracker.items.ports import ItemRepository
+from social_tracker.shared.clock import Clock
+from social_tracker.shared.uow import UnitOfWork
+
+
+@dataclass(frozen=True)
+class PurgeReport:
+    deleted: int
+    retention_days: int
+
+
+class ItemService:
+    def __init__(
+        self,
+        items: ItemRepository,
+        uow: UnitOfWork,
+        clock: Clock,
+        retention_days: int = DEFAULT_RETENTION_DAYS,
+    ) -> None:
+        self._items = items
+        self._uow = uow
+        self._clock = clock
+        self.retention_days = validate_retention_days(retention_days)
+
+    def list_items(
+        self, *, source_id: str | None = None, limit: int = DEFAULT_LIST_LIMIT
+    ) -> list[Item]:
+        return self._items.list(source_id=source_id, limit=limit)
+
+    def search(self, query: str, *, limit: int = DEFAULT_LIST_LIMIT) -> list[Item]:
+        return self._items.search(query, limit=limit)
+
+    def purge_expired(self) -> PurgeReport:
+        with self._uow.transaction():
+            if self.retention_days == 0:
+                deleted = self._items.purge_classified()
+            else:
+                cutoff = retention_cutoff(self._clock.now(), self.retention_days)
+                deleted = self._items.purge_fetched_before(cutoff)
+        return PurgeReport(deleted, self.retention_days)

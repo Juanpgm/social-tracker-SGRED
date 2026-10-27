@@ -135,7 +135,7 @@ def test_zero_byte_file_is_treated_as_an_empty_database(tmp_path, opened):
     path = tmp_path / "empty.db"
     path.write_bytes(b"")
     db = opened(path)
-    assert versions(db) == [1]
+    assert versions(db) == [m.version for m in load_migrations()]
 
 
 def test_path_that_is_a_directory_is_a_storage_error(tmp_path):

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from social_tracker.persistence.db import Database
+from social_tracker.persistence.db import Database, load_migrations
 from social_tracker.shared.errors import StorageError
 
 POSIX_ONLY = pytest.mark.skipif(
@@ -122,7 +122,7 @@ def test_a_file_that_appears_between_the_check_and_the_create_is_used_as_is(
 
     monkeypatch.setattr(os, "open", racing)
     with Database(target) as db:
-        assert db.query("SELECT count(*) FROM schema_migrations")[0][0] == 1
+        assert db.query("SELECT count(*) FROM schema_migrations")[0][0] == len(load_migrations())
 
 
 def test_a_directory_in_place_of_the_file_is_still_a_clean_storage_error(tmp_path: Path):

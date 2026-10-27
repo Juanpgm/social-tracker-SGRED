@@ -4,6 +4,7 @@ import sqlite3
 from importlib.resources import files
 
 TS = "2026-01-01T12:00:00+00:00"
+MIGRATION_FILES = ("0001_init.sql", "0002_items_and_fetch_status.sql")
 
 
 def migration_sql(name: str = "0001_init.sql") -> str:
@@ -11,8 +12,9 @@ def migration_sql(name: str = "0001_init.sql") -> str:
 
 
 def raw_connection() -> sqlite3.Connection:
-    """In-memory connection with migration 0001 applied directly, with no runner involved."""
+    """In-memory connection with every migration applied directly, with no runner involved."""
     conn = sqlite3.connect(":memory:", isolation_level=None)
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(migration_sql())
+    for name in MIGRATION_FILES:
+        conn.executescript(migration_sql(name))
     return conn
