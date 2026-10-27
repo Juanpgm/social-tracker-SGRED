@@ -46,6 +46,7 @@ _IMMUTABLE_FIELDS = ("id", "type", "enabled", "created_at", "updated_at")
 _VIA_IMPORT = {"via": "import"}
 _ID_CONFLICT = "a source with this id already exists"
 _NAME_CONFLICT = "a source with this name already exists"
+_UNKNOWN_FIELD = "unknown field (not part of this source type)"
 
 
 @dataclass(frozen=True)
@@ -179,11 +180,13 @@ class SourceRegistry:
         now = self._clock.now()
         with self._uow.transaction():
             current = self._require(source_id)
-            candidate = current.with_changes(**changes)
+            if any(key not in type(current).model_fields for key in changes):
+                raise ValidationError(_UNKNOWN_FIELD)  # never echo a user-supplied key
+            candidate = current.with_changes(changes)
             if candidate == current:
                 return SourceChange(current, changed=False)
             self._ensure_name_available(candidate)
-            updated = current.with_changes(**changes, updated_at=now)
+            updated = current.with_changes({**changes, "updated_at": now})
             self._sources.update(updated)
             self._audit(
                 now, SOURCE_EDITED, updated.id, {"changed": _changed_fields(current, updated)}
@@ -202,7 +205,7 @@ class SourceRegistry:
             current = self._require(source_id)
             if current.enabled is enabled:
                 return SourceChange(current, changed=False)
-            updated = current.with_changes(enabled=enabled, updated_at=now)
+            updated = current.with_changes({"enabled": enabled, "updated_at": now})
             self._sources.update(updated)
             kind = SOURCE_ENABLED if enabled else SOURCE_DISABLED
             self._audit(now, kind, updated.id, {})
@@ -284,14 +287,14 @@ class SourceRegistry:
                 operations.append(_Operation(entry, None))
                 continue
             wanted = entry.with_changes(
-                created_at=current.created_at, updated_at=current.updated_at
+                {"created_at": current.created_at, "updated_at": current.updated_at}
             )
             if wanted == current:
                 unchanged.append(entry.id)
                 continue
             owner.pop(normalize_name(current.name), None)
             owner[new_key] = entry.id
-            stamped = wanted.with_changes(updated_at=now)
+            stamped = wanted.with_changes({"updated_at": now})
             operations.append(_Operation(stamped, _changed_fields(current, wanted)))
 
         if problems:

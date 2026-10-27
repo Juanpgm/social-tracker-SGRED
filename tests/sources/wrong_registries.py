@@ -68,7 +68,7 @@ class EnableAlwaysWritesAnEvent(SourceRegistry):
         now = self._clock.now()
         with self._uow.transaction():
             current = self._require(source_id)
-            updated = current.with_changes(enabled=enabled, updated_at=now)
+            updated = current.with_changes({"enabled": enabled, "updated_at": now})
             self._sources.update(updated)
             self._audit(now, SOURCE_ENABLED, updated.id, {})
         return SourceChange(updated, changed=current.enabled is not enabled)
@@ -79,7 +79,7 @@ class EditAlwaysStampsUpdatedAt(SourceRegistry):
         now = self._clock.now()
         with self._uow.transaction():
             current = self._require(source_id)
-            updated = current.with_changes(**changes, updated_at=now)
+            updated = current.with_changes({**changes, "updated_at": now})
             self._sources.update(updated)
         return SourceChange(updated, changed=updated != current)
 
@@ -89,7 +89,7 @@ class EditAllowsImmutableFields(SourceRegistry):
         now = self._clock.now()
         with self._uow.transaction():
             current = self._require(source_id)
-            updated = current.with_changes(**changes, updated_at=now)
+            updated = current.with_changes({**changes, "updated_at": now})
             self._sources.update(updated)
             self._audit(now, "source_edited", updated.id, {"changed": []})
         return SourceChange(updated, changed=True)
@@ -199,7 +199,7 @@ class ImportAlwaysRewrites(SourceRegistry):
                 except Exception:  # noqa: BLE001
                     self._sources.add(entry)
                 else:
-                    self._sources.update(entry.with_changes(updated_at=now))
+                    self._sources.update(entry.with_changes({"updated_at": now}))
                 self._audit(now, "source_edited", entry.id, {"changed": [], "via": "import"})
         return ImportReport((), tuple(e.id for e in incoming), (), dry_run)
 

@@ -341,14 +341,14 @@ def test_data_survives_closing_and_reopening_the_database_file(tmp_path):
     repo = SqliteSourceRepository(first)
     for source in originals:
         repo.add(source)
-    repo.update(originals[0].with_changes(credibility=5))
+    repo.update(originals[0].with_changes({"credibility": 5}))
     repo.delete("src_audio")
     first.close()
 
     second = Database(path)
     try:
         reopened = SqliteSourceRepository(second)
-        expected = [originals[0].with_changes(credibility=5), originals[1], originals[2]]
+        expected = [originals[0].with_changes({"credibility": 5}), originals[1], originals[2]]
         assert reopened.list() == sorted(expected, key=lambda s: s.id)
         assert reopened.find_by_name_ci("ALPHA").id == "src_one"  # type: ignore[union-attr]
         with pytest.raises(ConflictError):

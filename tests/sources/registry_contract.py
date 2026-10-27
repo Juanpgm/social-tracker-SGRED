@@ -309,6 +309,18 @@ class RegistryContract:
         assert CANARY not in caught.value.message
         assert caught.value.fields == ()
 
+    @pytest.mark.parametrize(
+        "key", ["self", "cls", "changes", "__class__", "model_config", "handle", "stream_url"]
+    )
+    def test_edit_rejects_keys_that_are_not_fields_of_this_source_type(self, env: Env, key: str):
+        env.registry.add(data())
+        before = (env.registry.get("src_one"), env.control.list_control_events())
+        with pytest.raises(ValidationError) as caught:
+            env.registry.edit("src_one", {key: "x"})
+        assert key not in caught.value.message
+        assert caught.value.fields == ()
+        assert (env.registry.get("src_one"), env.control.list_control_events()) == before
+
     @pytest.mark.parametrize("bad", [None, [], "name", 5])
     def test_edit_rejects_changes_that_are_not_a_mapping(self, env: Env, bad: Any):
         env.registry.add(data())
@@ -528,7 +540,7 @@ class RegistryContract:
     ):
         existing = env.registry.add(data("src_a", "Old"))
         env.clock.advance(HOUR)
-        incoming = existing.with_changes(name="New", credibility=4)
+        incoming = existing.with_changes({"name": "New", "credibility": 4})
         report = env.registry.import_sources(export_of(incoming))
         assert report == ImportReport((), ("src_a",), (), dry_run=False)
         stored = env.sources.get("src_a")
@@ -576,7 +588,7 @@ class RegistryContract:
 
     def test_import_allows_a_name_released_earlier_in_the_same_file(self, env: Env):
         env.registry.add(data("src_a", "Alpha"))
-        renamed = env.registry.get("src_a").with_changes(name="Gamma")
+        renamed = env.registry.get("src_a").with_changes({"name": "Gamma"})
         newcomer = parse_source(payload("news_rss", id="src_b", name="alpha"))
         report = env.registry.import_sources(export_of(renamed, newcomer))
         assert (report.added, report.updated) == (("src_b",), ("src_a",))
@@ -584,7 +596,7 @@ class RegistryContract:
     def test_import_rejects_a_name_swap_as_a_conflict_and_applies_nothing(self, env: Env):
         a = env.registry.add(data("src_a", "Alpha"))
         b = env.registry.add(data("src_b", "Beta"))
-        text = export_of(a.with_changes(name="Beta"), b.with_changes(name="Alpha"))
+        text = export_of(a.with_changes({"name": "Beta"}), b.with_changes({"name": "Alpha"}))
         with pytest.raises(ImportConflictError):
             env.registry.import_sources(text)
         assert [s.name for s in env.registry.list()] == ["Alpha", "Beta"]
@@ -645,7 +657,7 @@ class RegistryContract:
         existing = env.registry.add(data("src_a", "A"))
         before_events = env.control.list_control_events()
         text = export_of(
-            existing.with_changes(name="Changed"),
+            existing.with_changes({"name": "Changed"}),
             parse_source(payload(id="src_b", name="B")),
         )
         report = env.registry.import_sources(text, dry_run=True)

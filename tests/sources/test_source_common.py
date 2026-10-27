@@ -424,7 +424,7 @@ def test_parse_source_is_typed_as_the_source_union():
 
 def test_with_changes_returns_a_new_validated_source():
     original = parse_source(payload(credibility=2))
-    changed = original.with_changes(credibility=5, name="Renamed")
+    changed = original.with_changes({"credibility": 5, "name": "Renamed"})
     assert changed is not original
     assert (changed.credibility, changed.name) == (5, "Renamed")
     assert original.credibility == 2
@@ -433,7 +433,7 @@ def test_with_changes_returns_a_new_validated_source():
 
 def test_with_changes_without_arguments_is_an_equal_copy():
     original = parse_source(payload("instagram"))
-    assert original.with_changes() == original
+    assert original.with_changes({}) == original
 
 
 @pytest.mark.parametrize(
@@ -451,17 +451,17 @@ def test_with_changes_without_arguments_is_an_equal_copy():
 def test_with_changes_revalidates_like_parse_source(changes: dict, field: str):
     original = parse_source(payload())
     with pytest.raises(ValidationError, match=field):
-        original.with_changes(**changes)
+        original.with_changes(changes)
     assert original.credibility == 3  # the original is untouched
 
 
 def test_with_changes_keeps_per_type_rules():
     ig = parse_source(payload("instagram"))
     with pytest.raises(ValidationError, match="poll_interval_s"):
-        ig.with_changes(poll_interval_s=10)
+        ig.with_changes({"poll_interval_s": 10})
     audio = parse_source(payload("recorded_audio"))
     with pytest.raises(ValidationError, match="exactly one"):
-        audio.with_changes(watch_dir="/data/audio")
+        audio.with_changes({"watch_dir": "/data/audio"})
 
 
 @pytest.mark.parametrize("type_", TYPES)
@@ -501,3 +501,39 @@ def test_keywords_reject_surrogates_format_characters_and_separators(value: str)
 def test_keywords_keep_accents_combining_marks_and_emoji():
     words = ["incendio", "niño", "cafe\u0301", "\U0001f525"]
     assert parse_source(payload("news_rss", keywords=words)).keywords == tuple(words)
+
+
+@pytest.mark.parametrize(
+    "key", ["self", "cls", "changes", "__class__", "model_config", "model_fields", "id "]
+)
+def test_with_changes_treats_every_key_as_data_even_one_named_like_a_parameter(key: str):
+    original = parse_source(payload())
+    with pytest.raises(ValidationError) as caught:
+        original.with_changes({key: "x"})
+    assert key not in caught.value.message
+    assert caught.value.fields == ()
+
+
+@pytest.mark.parametrize("bad", [None, "name", ["name"], 5, [("name", "x")]], ids=repr)
+def test_with_changes_requires_a_mapping(bad):
+    with pytest.raises(ValidationError):
+        parse_source(payload()).with_changes(bad)
+
+
+def test_with_changes_takes_the_mapping_positionally_only():
+    original = parse_source(payload())
+    with pytest.raises(TypeError):
+        original.with_changes(name="Renamed")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        original.with_changes(changes={"name": "Renamed"})  # type: ignore[call-arg]
+
+
+def test_with_changes_rejects_non_string_keys():
+    with pytest.raises(ValidationError):
+        parse_source(payload()).with_changes({1: "x"})  # type: ignore[dict-item]
+
+
+def test_with_changes_does_not_mutate_the_mapping_it_was_given():
+    changes = {"name": "Renamed"}
+    parse_source(payload()).with_changes(changes)
+    assert changes == {"name": "Renamed"}

@@ -7,7 +7,7 @@ fields, so there is no nested place for a credential to hide and no key blacklis
 
 import re
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -263,11 +263,15 @@ class SourceBase(_PydanticBase):
             raise ValueError("updated_at must not be earlier than created_at")
         return self
 
-    def with_changes(self, **changes: Any) -> "Source":
+    def with_changes(self, changes: Mapping[str, Any], /) -> "Source":
         """Return a NEW, fully re-validated source with `changes` applied.
 
-        Update paths must use this instead of `model_copy(update=...)`, which skips validation.
+        The changes are DATA, passed as one positional-only mapping, so no key can collide with
+        a parameter name (a key called `self` used to crash a keyword-based version). Update
+        paths must use this instead of `model_copy(update=...)`, which skips validation.
         """
+        if not isinstance(changes, Mapping):
+            raise ValidationError("changes must be a mapping of field names to values")
         return parse_source({**self.model_dump(), **changes})
 
     @property

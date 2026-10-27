@@ -142,7 +142,7 @@ class SourceRepositoryContract:
 
     def test_with_changes_results_never_alias_the_stored_source(self, repo: SourceRepository):
         repo.add(make_source())
-        changed = repo.get("src_one").with_changes(credibility=4)
+        changed = repo.get("src_one").with_changes({"credibility": 4})
         assert repo.get("src_one").credibility == 3
         repo.update(changed)
         assert repo.get("src_one").credibility == 4
