@@ -33,6 +33,7 @@ from social_tracker.entrypoints.inputs import (
 )
 from social_tracker.shared.errors import DomainError, ValidationError
 from social_tracker.sources.service import ImportConflictError, ImportReport
+from social_tracker.sources.yaml_io import MAX_FILE_BYTES
 
 app = typer.Typer(
     help="Manage the sources of the social risk monitor and the analysis switches.",
@@ -78,6 +79,23 @@ Switchable = Annotated[
     typer.Option("--source", help="Switch this source only (default: the whole system)."),
 ]
 
+# One string per paragraph: the help text is shown as written, so no hard line breaks inside.
+_IMPORT_HELP = (
+    "Import sources from a YAML file, all or nothing.\n\n"
+    "WARNING: an import replaces stored sources wholesale. An entry with the id of an existing "
+    "source overwrites it, and every field the entry omits goes back to its default: an entry "
+    "without `enabled` DISABLES a source that was enabled (enabled defaults to false) and "
+    "omitted optional fields such as keywords are reset. Sources that are not in the file are "
+    "left alone, and timestamps in the file are ignored. Run with --dry-run first to see what "
+    "would be added, updated or left unchanged.\n\n"
+    f"The file must be UTF-8 (a BOM is accepted) and at most {MAX_FILE_BYTES} bytes."
+)
+_ADD_HELP = (
+    "Register a source (disabled until you enable it). The other fields depend on the type, "
+    "for example:\n\n"
+    'sources add city_news --type news_rss --name "City News" '
+    "--set feed_url=https://example.org/rss.xml -r 'new feed'"
+)
 _ADD_RESERVED = frozenset({"id", "type", "name"})
 _MAX_PROBLEMS_SHOWN = 20
 
@@ -167,7 +185,7 @@ def _main() -> None:
 # ---- sources ----
 
 
-@sources_app.command("add")
+@sources_app.command("add", help=_ADD_HELP)
 def sources_add(
     source_id: SourceId,
     source_type: Annotated[
@@ -179,13 +197,6 @@ def sources_add(
     actor: Actor = None,
     fields: Fields = None,
 ) -> None:
-    """Register a source (disabled until you enable it).
-
-    The other fields depend on the type, for example:
-
-      sources add city_news --type news_rss --name "City News"
-      --set feed_url=https://example.org/rss.xml -r "new feed"
-    """
     with _guard():
         data = parse_fields(fields or [], reserved=_ADD_RESERVED)
         data.update({"id": source_id, "type": source_type, "name": name})
@@ -249,9 +260,12 @@ def sources_delete(source_id: SourceId, reason: Reason, actor: Actor = None) -> 
     typer.echo(f"deleted {source_id}")
 
 
-@sources_app.command("import")
+@sources_app.command("import", help=_IMPORT_HELP)
 def sources_import(
-    file: Annotated[Path, typer.Argument(help="YAML file with a top-level `sources:` list.")],
+    file: Annotated[
+        Path,
+        typer.Argument(metavar="FILE", help="YAML file with a top-level `sources:` list."),
+    ],
     reason: Annotated[
         str | None,
         typer.Option(
@@ -263,17 +277,6 @@ def sources_import(
         bool, typer.Option("--dry-run", help="Report what would change without writing anything.")
     ] = False,
 ) -> None:
-    """Import sources from a YAML file, all or nothing.
-
-    WARNING: an import replaces stored sources wholesale. An entry with the id of an existing
-    source overwrites it, and every field the entry omits goes back to its default: an entry
-    without `enabled` DISABLES a source that was enabled (enabled defaults to false) and omitted
-    optional fields such as keywords are reset. Sources that are not in the file are left alone,
-    and timestamps in the file are ignored. Run with --dry-run first to see what would be added,
-    updated or left unchanged.
-
-    The file must be UTF-8 (a BOM is accepted) and at most 1000000 bytes.
-    """
     if reason is None and not dry_run:
         raise typer.BadParameter("required unless --dry-run", param_hint="--reason")
     with _guard():
