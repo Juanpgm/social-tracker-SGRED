@@ -21,6 +21,12 @@ Environment:
   `SOCIAL_TRACKER_MAX_BYTES_PER_FETCH`: ceilings on what one feed may cost (items a source holds,
   bytes a source holds, bytes of the items of one fetch; whole numbers from 1). Defaults are
   generous (100000 items, 512 MiB, 16 MiB); entries beyond a ceiling are dropped and counted.
+- `SOCIAL_TRACKER_RECYCLE_DAYS`: content seen or published STRICTLY more than this many days ago is
+  "recycled" when it comes back (default 7, accepted range 1..3650). A blank value means the
+  default.
+- `SOCIAL_TRACKER_NEAR_DUPLICATE_THRESHOLD`: the estimated similarity (a decimal above 0 up to 1,
+  at most four decimals) from which two texts are near duplicates, inclusive (default 0.8). A
+  blank value means the default.
 - `SOCIAL_TRACKER_ALLOWED_PORTS`: comma-separated destination ports the collector may contact
   (feeds and every redirect hop). Default `80,443,8080,8443`; a value replaces the list.
 
@@ -39,6 +45,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from social_tracker.classification.domain import ClassifierSettings
+from social_tracker.classification.service import ClassifierService, TopicConfigService
+from social_tracker.classification.yaml_io import default_topic_config
 from social_tracker.collector.domain import IngestLimits
 from social_tracker.collector.http_fetcher import DEFAULT_ALLOWED_PORTS, FetchLimits, HttpFetcher
 from social_tracker.collector.ports import Fetcher
@@ -47,6 +56,11 @@ from social_tracker.collector.worker import DEFAULT_TICK_S, Worker
 from social_tracker.control.service import ControlService
 from social_tracker.items.domain import DEFAULT_RETENTION_DAYS, validate_retention_days
 from social_tracker.items.service import ItemService
+from social_tracker.persistence.classification_repo import (
+    SqliteClassificationRepository,
+    SqliteSignatureRepository,
+    SqliteTopicConfigRepository,
+)
 from social_tracker.persistence.control_repo import SqliteControlRepository
 from social_tracker.persistence.db import DEFAULT_BUSY_TIMEOUT_MS, Database
 from social_tracker.persistence.items_repo import SqliteItemRepository
@@ -62,6 +76,8 @@ BUSY_TIMEOUT_ENV = "SOCIAL_TRACKER_BUSY_TIMEOUT_MS"
 RETENTION_DAYS_ENV = "SOCIAL_TRACKER_RETENTION_DAYS"
 ALLOW_PRIVATE_HOSTS_ENV = "SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS"
 ALLOWED_PORTS_ENV = "SOCIAL_TRACKER_ALLOWED_PORTS"
+RECYCLE_DAYS_ENV = "SOCIAL_TRACKER_RECYCLE_DAYS"
+NEAR_DUPLICATE_THRESHOLD_ENV = "SOCIAL_TRACKER_NEAR_DUPLICATE_THRESHOLD"
 MAX_ITEMS_PER_SOURCE_ENV = "SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE"
 MAX_BYTES_PER_SOURCE_ENV = "SOCIAL_TRACKER_MAX_BYTES_PER_SOURCE"
 MAX_BYTES_PER_FETCH_ENV = "SOCIAL_TRACKER_MAX_BYTES_PER_FETCH"
@@ -72,6 +88,8 @@ _RETENTION_DIGITS = re.compile(r"[0-9]{1,4}")
 _HOST_NAME = re.compile(r"[a-z0-9._-]{1,253}")
 _PORT_DIGITS = re.compile(r"[0-9]{1,5}")
 _LIMIT_DIGITS = re.compile(r"[0-9]{1,15}")
+_DAY_DIGITS = re.compile(r"[0-9]{1,4}")
+_THRESHOLD = re.compile(r"[01](?:\.[0-9]{1,4})?")
 _BACKOFF_JITTER_FRACTION = 0.1
 CLAIM_MARGIN_S = 60.0  # what a claim may outlast the fetch deadline (parse and store) unchallenged
 
@@ -81,6 +99,9 @@ class Container:
     sources: SourceRegistry
     control: ControlService
     items: ItemService
+    classifier: ClassifierService
+    topics: TopicConfigService
+    classifier_settings: ClassifierSettings
     _db: Database
 
     @property
@@ -200,6 +221,25 @@ def parse_ingest_limits(env: Mapping[str, str]) -> IngestLimits:
     )
 
 
+def parse_classifier_settings(env: Mapping[str, str]) -> ClassifierSettings:
+    """The tunable thresholds of the classification cascade from the environment (blank or absent:
+    the defaults)."""
+    defaults = ClassifierSettings()
+    days_text = env.get(RECYCLE_DAYS_ENV, "").strip()
+    threshold_text = env.get(NEAR_DUPLICATE_THRESHOLD_ENV, "").strip()
+    days, threshold = defaults.recycle_days, defaults.near_duplicate_threshold
+    if days_text:
+        if not _DAY_DIGITS.fullmatch(days_text) or not 1 <= int(days_text) <= 3650:
+            raise ValidationError(f"{RECYCLE_DAYS_ENV} must be a whole number of days (1..3650)")
+        days = int(days_text)
+    if threshold_text:
+        if not _THRESHOLD.fullmatch(threshold_text) or not 0 < float(threshold_text) <= 1:
+            message = f"{NEAR_DUPLICATE_THRESHOLD_ENV} must be a decimal above 0 up to 1"
+            raise ValidationError(message)
+        threshold = float(threshold_text)
+    return ClassifierSettings(recycle_days=days, near_duplicate_threshold=threshold)
+
+
 def _random_jitter(base_s: float) -> float:
     return random.uniform(0.0, _BACKOFF_JITTER_FRACTION * base_s)
 
@@ -217,6 +257,7 @@ class _Wiring:
 
 def _open(env: Mapping[str, str]) -> _Wiring:
     retention_days = parse_retention_days(env.get(RETENTION_DAYS_ENV, ""))
+    classifier_settings = parse_classifier_settings(env)
     path = resolve_db_path(env.get(DB_PATH_ENV, ""))
     raw_timeout = env.get(BUSY_TIMEOUT_ENV, "").strip()
     timeout = _busy_timeout_ms(raw_timeout) if raw_timeout else DEFAULT_BUSY_TIMEOUT_MS
@@ -227,10 +268,28 @@ def _open(env: Mapping[str, str]) -> _Wiring:
         SqliteItemRepository(db),
     )
     uow, clock = SqliteUnitOfWork(db), SystemClock()
+    control_service = ControlService(control, sources, uow, clock)
+    topics = TopicConfigService(
+        SqliteTopicConfigRepository(db), control, uow, clock, default_topic_config()
+    )
+    classifier = ClassifierService(
+        items,
+        sources,
+        control_service,
+        SqliteClassificationRepository(db),
+        SqliteSignatureRepository(db),
+        topics,
+        uow,
+        clock,
+        settings=classifier_settings,
+    )
     container = Container(
         SourceRegistry(sources, control, uow, clock),
-        ControlService(control, sources, uow, clock),
+        control_service,
         ItemService(items, uow, clock, retention_days),
+        classifier,
+        topics,
+        classifier_settings,
         db,
     )
     return _Wiring(db, sources, control, items, uow, clock, container)
@@ -284,6 +343,7 @@ def build_worker(
             sleeper=sleeper,
             tick_s=tick_s,
             purge=container.items.purge_expired,
+            classify=container.classifier.classify_pending,
         )
     except BaseException:
         wiring.db.close()

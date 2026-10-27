@@ -14,6 +14,9 @@ What it does, in order:
   global analysis is on, every due source is collected, one at a time and in id order
   (concurrency 1), through `CollectorService.collect_once`. A source that fails, or a storage
   error, costs that source or that pass and nothing more.
+- AFTER THE COLLECTION, if a classify hook was given (the composition root passes
+  `ClassifierService.classify_pending`), the cascade runs over the pending items of the eligible
+  sources: the CPU stages only, in batches. A failure there costs that step and nothing more.
 - STOP (`request_stop`, wired to SIGINT/SIGTERM by the entrypoint): no new collection starts; the
   one in flight is completed and committed, never abandoned half-written (PC-6). The wait for
   it is bounded by the fetcher's deadline (a wall-clock budget enforced inside every connect,
@@ -44,9 +47,13 @@ _LOG = logging.getLogger("social_tracker.worker")
 
 @dataclass(frozen=True)
 class PassSummary:
+    """What one pass did. `classification` is whatever the classify hook returned (the report of
+    the cascade run), None when there is no hook, nothing ran or it failed."""
+
     global_off: bool
     results: tuple[CollectResult, ...]
     errors: int = 0
+    classification: object | None = None
 
 
 def _positive(value: float) -> bool:
@@ -65,6 +72,7 @@ class Worker:
         tick_s: float = DEFAULT_TICK_S,
         purge: Callable[[], object] | None = None,
         purge_every_s: float = DEFAULT_PURGE_EVERY_S,
+        classify: Callable[[], object] | None = None,
     ) -> None:
         if not _positive(tick_s) or not _positive(purge_every_s):
             raise ValueError("tick_s and purge_every_s must be positive, finite numbers")
@@ -76,6 +84,7 @@ class Worker:
         self._tick_s = tick_s
         self._purge = purge
         self._purge_every_s = purge_every_s
+        self._classify = classify
         self._next_purge: float | None = None
 
     @property
@@ -135,7 +144,37 @@ class Worker:
                 errors += 1
             else:
                 results.append(result)
-        return PassSummary(global_off=False, results=tuple(results), errors=errors)
+        classification, failed = self._classify_pending()
+        return PassSummary(
+            global_off=False,
+            results=tuple(results),
+            errors=errors + failed,
+            classification=classification,
+        )
+
+    def _classify_pending(self) -> tuple[object | None, int]:
+        """Run the cascade over what was collected (CPU only). Skipped once a stop is requested.
+        A failure costs this step only; the next pass tries again."""
+        if self._classify is None or self._stop.is_set():
+            return None, 0
+        try:
+            report = self._classify()
+        except DomainError as exc:
+            _LOG.warning("classification not done: %s", exc.code)
+            return None, 1
+        except Exception as exc:  # noqa: BLE001 - classification must never stop the worker
+            _LOG.error("unexpected error classifying: %s", type(exc).__name__)
+            return None, 1
+        _LOG.info(
+            "classification: classified %d, out of scope %d, skipped %d, errors %d, "
+            "queued for the LLM %d",
+            getattr(report, "classified", 0),
+            getattr(report, "out_of_scope", 0),
+            getattr(report, "skipped", 0),
+            getattr(report, "errors", 0),
+            getattr(report, "needs_llm", 0),
+        )
+        return report, 0
 
     def _collect(self, source_id: str) -> CollectResult | None:
         try:
