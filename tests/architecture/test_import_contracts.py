@@ -39,7 +39,7 @@ FORBIDDEN_EXTERNALS = [
     "tempfile",
     "glob",
 ]
-COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy")
+COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy", "service")
 FORBIDDEN_LAYERS = ["adapters", "persistence", "entrypoints", "infrastructure", "storage"]
 
 

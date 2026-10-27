@@ -8,12 +8,14 @@ secret or an attacker's text).
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from typing import Any
 
+from social_tracker.control.domain import CollectionState, FetchStatus, SourceState
 from social_tracker.shared.errors import DomainError
+from social_tracker.sources.domain import NewsRssSource, Source
 
 MAX_RETRY_AFTER_S = 7 * 24 * 3600  # a larger wait is clamped; the scheduler caps it further
 _MAX_RETRY_AFTER_TEXT = 100
@@ -118,3 +120,24 @@ def parse_retry_after(value: Any, now: datetime) -> float | None:
     except OverflowError:
         return None
     return float(min(max(wait, 0.0), MAX_RETRY_AFTER_S))
+
+
+def is_due(
+    source: Source, state: SourceState | None, fetch: FetchStatus | None, now: datetime
+) -> bool:
+    """Whether the worker should collect `source` now (CI-4).
+
+    Only enabled RSS sources are collected here. An idle source is due when it never fetched
+    successfully or its poll interval (the source's own setting, default 600 s) has passed since
+    the last successful fetch; one in backoff is due once its retry time has come. A source that
+    is collecting, failed (the operator must reset it), disabled or without state is never due.
+    """
+    if not isinstance(source, NewsRssSource) or not source.enabled or state is None:
+        return False
+    if state.state is CollectionState.BACKOFF:
+        return state.next_run_at is not None and now >= state.next_run_at
+    if state.state is not CollectionState.IDLE:
+        return False
+    if fetch is None or fetch.last_fetch_at is None:
+        return True
+    return now >= fetch.last_fetch_at + timedelta(seconds=source.poll_interval_s)

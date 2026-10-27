@@ -129,6 +129,7 @@ source_modules =
     social_tracker.collector.feed
     social_tracker.collector.normalize
     social_tracker.collector.netpolicy
+    social_tracker.collector.service
 forbidden_modules =
     social_tracker.persistence
     social_tracker.entrypoints
