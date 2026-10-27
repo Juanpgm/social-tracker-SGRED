@@ -17,6 +17,11 @@ Design:
   carry SQL text, parameters, paths or file contents.
 - A zero-byte file is a valid, empty SQLite database and is initialised normally. A file that
   is not a database is never modified: opening fails with `StorageError`.
+- Permissions: a parent directory that this class creates gets mode 0700 (the leaf only; any
+  intermediate directory follows the umask) and a database file it creates gets mode 0600, made
+  with an exclusive create so an existing file keeps whatever mode its owner gave it. `-wal` and
+  `-shm` inherit the mode of the main file. Windows has no POSIX modes: there the file simply
+  inherits the ACL of its directory.
 - `schema_migrations` belongs to the runner (created before any migration runs), not to 0001.
   It records `(version, applied_at, checksum)`; on every open the checksum of each applied
   migration is compared with the file (line endings normalised) and a mismatch is a
@@ -29,6 +34,7 @@ Design:
 """
 
 import hashlib
+import os
 import re
 import sqlite3
 import threading
@@ -46,6 +52,8 @@ from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ConflictError, DomainError, StorageError
 
 DEFAULT_BUSY_TIMEOUT_MS = 5000
+_PRIVATE_DIR_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
 _CLOSE_CHECKPOINT_WAIT_MS = 100
 _MIGRATION_FILE_RE = re.compile(r"([0-9]{4})_([a-z0-9_]+)\.sql")
 _ERROR_NAME_RE = re.compile(r"[A-Z_]{1,40}")
@@ -276,6 +284,17 @@ def _checked_path(path: object) -> Path:
     return Path(path)
 
 
+def _create_private_file(path: Path) -> None:
+    """Create the database file with mode 0600 unless it already exists.
+
+    The exclusive create means an existing file (ours from an earlier run, or one a concurrent
+    process just made) is never touched, and SQLite then opens an empty file as a new database.
+    The `-wal` and `-shm` files SQLite creates later copy the mode of the main file.
+    """
+    with suppress(FileExistsError):
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _PRIVATE_FILE_MODE))
+
+
 # ---- database -------------------------------------------------------------------------
 
 
@@ -299,7 +318,8 @@ class Database:
         self._conn: sqlite3.Connection | None = None
         self._tx_depth = 0  # only touched while holding `_lock`, i.e. by the owning thread
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.parent.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIR_MODE)
+            _create_private_file(self._path)
             conn = sqlite3.connect(self._path, isolation_level=None, check_same_thread=False)
         except (OSError, ValueError):
             raise StorageError("database location is not usable") from None
