@@ -32,6 +32,7 @@ from social_tracker.entrypoints.inputs import (
     write_export,
 )
 from social_tracker.shared.errors import DomainError, ValidationError
+from social_tracker.shared.text import escape_unprintable
 from social_tracker.sources.service import ImportConflictError, ImportReport
 from social_tracker.sources.yaml_io import MAX_FILE_BYTES
 
@@ -140,12 +141,13 @@ def _render_sources(rows: Sequence[SourceOverview]) -> str:
     )
 
 
-def _render_status(overview: SystemOverview) -> str:
+def _render_status(overview: SystemOverview, db_path: Path) -> str:
     rows = overview.sources
     by_state = Counter(o.state for o in rows)
     states = ", ".join(f"{s.value} {by_state[s]}" for s in CollectionState if by_state[s])
     return "\n".join(
         [
+            f"database: {escape_unprintable(str(db_path))}",
             f"global analysis: {_on_off(overview.global_analysis)}",
             f"alert threshold: {format_confidence(overview.alert_min_confidence)}",
             f"sources: {len(rows)} total, {sum(o.source.enabled for o in rows)} enabled",
@@ -305,7 +307,7 @@ def sources_export(
         else:
             write_export(output, text, force=force)
     if output is not None:
-        typer.echo(f"exported to {output}")
+        typer.echo(f"exported to {escape_unprintable(str(output))}")
 
 
 # ---- analysis and status ----
@@ -341,5 +343,5 @@ def analysis_off(reason: Reason, actor: Actor = None, source: Switchable = None)
 def status() -> None:
     """Show the analysis switches, the alert threshold and a summary of the sources."""
     with _guard(), closing(build_container()) as services:
-        overview = services.control.overview()
-    typer.echo(_render_status(overview))
+        overview, db_path = services.control.overview(), services.db_path
+    typer.echo(_render_status(overview, db_path))

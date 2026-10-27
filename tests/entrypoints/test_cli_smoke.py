@@ -68,6 +68,7 @@ def test_an_operator_session_from_an_empty_database_to_a_running_analysis(cli: C
     cli.ok("analysis", "on", "--reason", "go", "--actor", "dee")
     status = cli.ok("status").stdout
     assert status == (
+        f"database: {cli.db_path}\n"
         "global analysis: on\n"
         "alert threshold: 0.5\n"
         "sources: 2 total, 1 enabled\n"

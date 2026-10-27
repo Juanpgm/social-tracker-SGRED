@@ -29,6 +29,58 @@ def test_the_default_database_lives_under_data_and_its_directory_is_created(
         container.close()
 
 
+def test_the_default_path_is_resolved_against_the_working_directory_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.chdir(tmp_path)
+    container = build_container({})
+    try:
+        assert container.db_path == tmp_path / "data" / "social_tracker.db"
+        assert container.db_path.is_absolute()
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        monkeypatch.chdir(other)
+        assert container.db_path == tmp_path / "data" / "social_tracker.db"  # does not move
+        container.sources.list()  # and the open connection still works
+    finally:
+        container.close()
+
+
+def test_a_relative_path_from_the_environment_becomes_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.chdir(tmp_path)
+    container = build_container({DB_PATH_ENV: "rel/../rel/my.db"})
+    container.close()
+    assert container.db_path == tmp_path / "rel" / "my.db"
+    assert (tmp_path / "rel" / "my.db").is_file()
+
+
+def test_a_leading_tilde_means_the_home_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(tmp_path)
+    container = build_container({DB_PATH_ENV: "~/tilde.db"})
+    container.close()
+    assert container.db_path == home / "tilde.db"
+    assert not (tmp_path / "~").exists()
+
+
+def test_an_absolute_path_is_kept(tmp_path: Path):
+    target = tmp_path / "abs.db"
+    container = build_container({DB_PATH_ENV: str(target)})
+    container.close()
+    assert container.db_path == target
+
+
+def test_a_path_with_a_nul_character_is_a_clean_storage_error():
+    with pytest.raises(StorageError) as caught:
+        build_container({DB_PATH_ENV: "bad\x00name.db"})
+    assert "bad" not in caught.value.message
+
+
 def test_the_environment_variable_overrides_the_path_and_missing_parents_are_created(
     tmp_path: Path,
 ):

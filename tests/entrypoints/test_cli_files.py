@@ -308,6 +308,16 @@ def test_export_to_a_missing_directory_is_a_clean_error(cli: Cli, tmp_path: Path
     assert str(tmp_path) not in result.stderr
 
 
+def test_the_exported_to_line_escapes_terminal_control_characters_in_the_path(
+    cli: Cli, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("social_tracker.entrypoints.cli.write_export", lambda *a, **k: None)
+    result = cli.ok("sources", "export", "--output", "\x1b[2Jname\x07.yaml")
+    assert result.stdout == "exported to \\x1b[2Jname\\x07.yaml\n"
+    assert "\x1b" not in result.stdout
+    assert "\x07" not in result.stdout
+
+
 def test_a_file_export_prints_nothing_on_stderr_and_no_yaml_on_stdout(cli: Cli, tmp_path: Path):
     cli.add()
     result = cli.ok("sources", "export", "--output", str(tmp_path / "o.yaml"))

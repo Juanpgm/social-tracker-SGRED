@@ -5,7 +5,9 @@ persistence package themselves; an import-linter contract enforces it.
 
 Environment:
 - `SOCIAL_TRACKER_DB_PATH`: SQLite file (default `data/social_tracker.db`, relative to the
-  working directory). Missing parent directories are created. A blank value means the default.
+  working directory). A leading `~` is expanded and the result is made absolute once, here; the
+  value is operator-owned, not untrusted input. Missing parent directories are created (mode
+  0700, see `persistence.db`). A blank value means the default.
 - `SOCIAL_TRACKER_BUSY_TIMEOUT_MS`: how long a write waits for another process holding the
   database before failing (default 5000, accepted range 1..600000). A blank value means the
   default.
@@ -15,6 +17,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from social_tracker.control.service import ControlService
 from social_tracker.persistence.control_repo import SqliteControlRepository
@@ -38,9 +41,22 @@ class Container:
     control: ControlService
     _db: Database
 
+    @property
+    def db_path(self) -> Path:
+        """The absolute path of the open database file."""
+        return self._db.path
+
     def close(self) -> None:
         """Release the database. Safe to call more than once."""
         self._db.close()
+
+
+def resolve_db_path(raw: str) -> Path:
+    """The database file as an absolute path, worked out once: a leading `~` is the home
+    directory and a relative path (the default included) is taken from the current working
+    directory, so a later `chdir` cannot move the database. Symbolic links are not resolved."""
+    chosen = raw.strip() or DEFAULT_DB_PATH
+    return Path(os.path.abspath(os.path.expanduser(chosen)))
 
 
 def _busy_timeout_ms(raw: str) -> int:
@@ -54,7 +70,7 @@ def _busy_timeout_ms(raw: str) -> int:
 def build_container(environ: Mapping[str, str] | None = None) -> Container:
     """Open the database (running pending migrations) and wire the services around it."""
     env = os.environ if environ is None else environ
-    path = env.get(DB_PATH_ENV, "").strip() or DEFAULT_DB_PATH
+    path = resolve_db_path(env.get(DB_PATH_ENV, ""))
     raw_timeout = env.get(BUSY_TIMEOUT_ENV, "").strip()
     timeout = _busy_timeout_ms(raw_timeout) if raw_timeout else DEFAULT_BUSY_TIMEOUT_MS
     db = Database(path, busy_timeout_ms=timeout)

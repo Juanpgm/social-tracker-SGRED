@@ -1,11 +1,12 @@
 """`social-tracker analysis ...`, `status` and the behaviour shared by every command."""
 
 import sqlite3
+from pathlib import Path, PurePosixPath
 
 import pytest
 from typer.testing import CliRunner
 
-from social_tracker.bootstrap import DB_PATH_ENV, build_container
+from social_tracker.bootstrap import DB_PATH_ENV, Container, build_container
 from social_tracker.control.service import (
     EVENT_GLOBAL_ANALYSIS,
     EVENT_SOURCE_ANALYSIS,
@@ -99,6 +100,7 @@ def test_the_switches_need_a_reason_and_refuse_a_blank_one(cli: Cli, command: st
 def test_status_of_a_fresh_system(cli: Cli):
     result = cli.ok("status")
     assert result.stdout == (
+        f"database: {cli.db_path}\n"
         "global analysis: off\n"
         "alert threshold: 0.5\n"
         "sources: 0 total, 0 enabled\n"
@@ -120,12 +122,35 @@ def test_status_summarises_switches_states_and_effective_analysis(cli: Cli):
     assert "effective analysis: 0 source(s)\n" in cli.ok("status").stdout
     cli.ok("analysis", "on", "--reason", WHY)
     assert cli.ok("status").stdout == (
+        f"database: {cli.db_path}\n"
         "global analysis: on\n"
         "alert threshold: 0.5\n"
         "sources: 3 total, 2 enabled\n"
         "collection states: disabled 1, idle 2\n"
         "effective analysis: 1 source(s)\n"
     )
+
+
+def test_status_names_the_resolved_database_so_a_wrong_working_directory_shows(
+    cli: Cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.chdir(tmp_path)
+    relative = cli.ok("status", env={DB_PATH_ENV: "some/where.db"}).stdout.splitlines()[0]
+    assert relative == f"database: {tmp_path / 'some' / 'where.db'}"
+    default = cli.ok("status", env={DB_PATH_ENV: None}).stdout.splitlines()[0]
+    assert default == f"database: {tmp_path / 'data' / 'social_tracker.db'}"
+
+
+def test_status_escapes_terminal_control_characters_in_the_database_path(
+    cli: Cli, monkeypatch: pytest.MonkeyPatch
+):
+    hostile = PurePosixPath("/tmp/\x1b[2J\x1b]0;pwned\x07\x9b‮/db")
+    monkeypatch.setattr(Container, "db_path", property(lambda self: hostile))
+    result = cli.ok("status")
+    assert result.stdout.splitlines()[0] == (
+        "database: /tmp/\\x1b[2J\\x1b]0;pwned\\x07\\x9b\\u202e/db"
+    )
+    assert not any(char in result.stdout for char in "\x1b\x07\x9b‮")
 
 
 def test_status_does_not_write_anything(cli: Cli):

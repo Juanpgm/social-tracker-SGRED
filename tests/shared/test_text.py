@@ -2,7 +2,12 @@
 
 import pytest
 
-from social_tracker.shared.text import has_control_chars, has_unsafe_chars, is_blank_text
+from social_tracker.shared.text import (
+    escape_unprintable,
+    has_control_chars,
+    has_unsafe_chars,
+    is_blank_text,
+)
 
 
 @pytest.mark.parametrize("code", [*range(0, 32), 127, *range(128, 160)])
@@ -84,3 +89,39 @@ def test_text_with_nothing_visible_is_blank_even_when_it_has_format_characters(t
 @pytest.mark.parametrize("text", ["a", " a ", "\u200ba\u200b", "\u00e9", "\U0001f600", "e\u0301"])
 def test_text_with_a_visible_character_is_not_blank(text: str):
     assert not is_blank_text(text)
+
+
+# ---- escaping text for a terminal ----
+
+
+@pytest.mark.parametrize(
+    ("raw", "escaped"),
+    [
+        ("\x1b[31mred", "\\x1b[31mred"),
+        ("a\nb", "a\\x0ab"),
+        ("a\rb", "a\\x0db"),
+        ("a\x00b", "a\\x00b"),
+        ("a\x7fb", "a\\x7fb"),
+        ("\x9b31m", "\\x9b31m"),  # a C1 control sequence introducer
+        ("a\u202eb", "a\\u202eb"),  # bidi override
+        ("a\u2028b", "a\\u2028b"),
+        ("a\ufeffb", "a\\ufeffb"),
+        ("a\ud800b", "a\\ud800b"),  # lone surrogate
+        ("\U000e0041", "\\U000e0041"),  # tag character
+    ],
+)
+def test_control_and_hidden_characters_are_shown_as_escapes(raw: str, escaped: str):
+    assert escape_unprintable(raw) == escaped
+
+
+@pytest.mark.parametrize(
+    "text", ["", "plain/path.db", "C:\\Users\\x\\a.db", "café 新聞 \U0001f4f0", "a b", "e\u0301"]
+)
+def test_ordinary_text_is_left_alone(text: str):
+    assert escape_unprintable(text) == text
+
+
+def test_escaped_text_contains_nothing_a_terminal_would_act_on():
+    escaped = escape_unprintable("".join(chr(code) for code in range(160)))
+    assert escaped.isascii()
+    assert not has_control_chars(escaped)
