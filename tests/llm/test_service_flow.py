@@ -350,3 +350,26 @@ def test_an_empty_queue_is_a_quiet_run():
     w.ready()
     report = w.escalate()
     assert (report.judged, report.failed, report.skipped, w.judge.calls) == (0, 0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("queued", "candidates", "capped"), [(1, 1, False), (2, 2, False), (3, 2, True)]
+)
+def test_a_dry_run_reports_the_cap_only_when_it_would_actually_stop_something(
+    queued, candidates, capped
+):
+    w = memory_llm(LlmSettings(hourly_cap=2))
+    w.ready()
+    for n in range(queued):
+        w.seed(n)
+    report = w.escalate(dry_run=True)
+    assert (report.candidates, report.cap_reached) == (candidates, capped)
+
+
+@pytest.mark.parametrize("limit", [1, 2, 1000])
+def test_the_ends_of_the_batch_range_are_accepted(limit):
+    w = memory_llm()
+    w.ready()
+    w.seed(1)
+    w.seed(2)
+    assert w.escalate(limit=limit).judged == min(limit, 2)

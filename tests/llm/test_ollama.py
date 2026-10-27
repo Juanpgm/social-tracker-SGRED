@@ -509,3 +509,26 @@ def test_error_messages_never_carry_the_item_text_or_the_model_output():
         judge.judge(request(secret))
     assert secret not in str(caught.value)
     assert secret not in repr(caught.value)
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 400, 404, 500])
+def test_an_error_status_is_an_error_even_with_a_body_that_looks_like_an_answer(status: int):
+    """The status decides, not the body: a redirect or an error page that carries a valid verdict
+    is never taken for one."""
+    seen = []
+
+    def handler(req: httpx2.Request) -> httpx2.Response:
+        seen.append(req.url.path)
+        return httpx2.Response(
+            status, json=envelope(), headers={"Location": "http://example.org/x"}
+        )
+
+    judge = make(handler, fallback_model=None)
+    with pytest.raises(JudgeError) as caught:
+        judge.judge(request())
+    assert caught.value.kind in {
+        JudgeErrorKind.BAD_RESPONSE,
+        JudgeErrorKind.SERVER_ERROR,
+        JudgeErrorKind.MODEL_NOT_FOUND,
+    }
+    assert seen == ["/api/chat"]

@@ -439,3 +439,17 @@ def test_the_label_of_a_valid_answer_is_the_models_and_a_hostile_text_cannot_add
     assert (after.label, after.confidence) == (Label.DELIBERATE_DISINFORMATION, 0.6)
     assert after.source_credibility_used == stored.source_credibility_used
     assert after.signals == stored.signals
+
+
+@pytest.mark.parametrize(
+    "status", [ItemStatus.NEW, ItemStatus.OUT_OF_SCOPE, ItemStatus.CLASSIFICATION_FAILED]
+)
+def test_an_item_sent_back_to_the_classifier_during_the_call_discards_the_answer(status):
+    w = memory_llm()
+    w.ready()
+    stored = w.seed(1)
+    w.judge.on_call = lambda request: w.items.set_status(stored.item_id, status)
+    report = w.escalate()
+    assert (report.judged, report.skipped) == (0, 1)
+    assert w.verdict(stored) == stored
+    assert w.escalations.get_judgment(stored.item_id) is None

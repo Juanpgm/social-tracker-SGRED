@@ -8,7 +8,8 @@ a boundary no test pins. The source is always restored, even on an interrupt.
     uv run python scripts/mutation_sweep_llm.py backoff    # mutants whose name contains "backoff"
 
 The real-socket tests are left out of the sweep (they only repeat what the scripted transports
-already pin and cost seconds each). Exit status: 0 when every mutant was killed, 1 when some
+already pin and cost seconds each), except the one that pins the ignored proxy variables
+(`test_ollama_proxy.py`). Exit status: 0 when every mutant was killed, 1 when some
 survived, 2 when the targeted tests do not pass on the unmutated code.
 """
 
@@ -23,6 +24,7 @@ SRC = ROOT / "src" / "social_tracker"
 TESTS = [
     "tests/llm",
     "--ignore=tests/llm/test_ollama_http.py",
+    "tests/llm/test_ollama_proxy.py",
     "tests/persistence/test_sqlite_escalation_repository.py",
     "tests/classification/test_fake_repositories.py",
     "tests/persistence/test_sqlite_classification_repositories.py",
@@ -52,7 +54,11 @@ CLASS_REPO = "persistence/classification_repo.py"
 # - the number of seconds a lease lasts beyond one call (the tests run on a fixed clock and a
 #   lease only has to outlive a call);
 # - `remaining <= 0` vs `< 0` in the call deadline (a monotonic clock never stands still between
-#   two reads in practice).
+#   two reads in practice);
+# - `allow_inf_nan=False` of the confidence and the `parse_constant` hook of the JSON reader: each
+#   is defence in depth for the other (NaN fails `ge/le` anyway, and an infinity is over `le`);
+# - `not fresh.needs_llm` in the re-check before a write: `ClassificationRepository.settle`
+#   refuses a verdict that no longer waits, and every write sits behind it.
 MUTANTS = [
     # ---- the vocabulary ----
     m(
@@ -281,7 +287,7 @@ MUTANTS = [
         '{self._settings.keep_alive_s}s"',
         '{self._settings.keep_alive_s}m"',
     ),
-    m("environment proxies", OLLAMA, "trust_env=False", "trust_env=True"),
+    m("environment proxies", OLLAMA, "            trust_env=False,", "            trust_env=True,"),
     m("redirects followed", OLLAMA, "follow_redirects=False", "follow_redirects=True"),
     m("temperature", OLLAMA, '"temperature": 0,', '"temperature": 1,'),
     m("last model", OLLAMA, "last = index == len(models) - 1", "last = index == 0"),

@@ -74,16 +74,6 @@ def test_a_redirect_is_not_followed(server: FakeOllama):
     assert [r.path for r in server.requests] == ["/api/chat"]
 
 
-def test_a_proxy_in_the_environment_is_ignored(server: FakeOllama, monkeypatch: pytest.MonkeyPatch):
-    dead = f"http://127.0.0.1:{closed_port()}"
-    for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "HTTPS_PROXY"):
-        monkeypatch.setenv(name, dead)
-    monkeypatch.delenv("NO_PROXY", raising=False)
-    monkeypatch.delenv("no_proxy", raising=False)
-    server.script.steps.append(reply(200, CHAT))
-    assert judge_for(server).judge(request()).label is Label.RECYCLED_CONTENT
-
-
 def test_a_slow_loris_body_is_cut_by_the_deadline_of_the_call(server: FakeOllama):
     server.script.steps.append(trickle(total=500, pause_s=0.15))
     judge = judge_for(server, call_deadline_s=0.6)
