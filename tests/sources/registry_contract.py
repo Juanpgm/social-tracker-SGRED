@@ -173,15 +173,16 @@ class RegistryContract:
         before = env.control.list_control_events()
         with pytest.raises(ConflictError) as caught:
             env.registry.add(data("src_one", "Other Name"))
-        assert "Other Name" not in caught.value.message
+        assert caught.value.message == "a source with this id already exists"
         assert [s.name for s in env.registry.list()] == ["Unique Name"]
         assert env.control.list_control_events() == before
 
     @pytest.mark.parametrize("clash", ["same name", "SAME NAME", "  Same Name  "])
     def test_add_name_uniqueness_is_case_and_edge_space_insensitive(self, env: Env, clash: str):
         env.registry.add(data("src_one", "Same Name"))
-        with pytest.raises(ConflictError):
+        with pytest.raises(ConflictError) as caught:
             env.registry.add(data("src_two", clash))
+        assert caught.value.message == "a source with this name already exists"
         assert [s.id for s in env.registry.list()] == ["src_one"]
         assert kinds(env) == [SOURCE_ADDED]
 

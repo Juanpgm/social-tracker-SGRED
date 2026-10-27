@@ -412,6 +412,15 @@ class ControlServiceContract:
                 call()
             assert caught.value.fields == ("source_id",)
 
+    def test_a_stored_flag_that_is_neither_true_nor_false_is_a_storage_error(self, env: Env):
+        env.control.set_setting(source_analysis_key("src_one"), "maybe")
+        with pytest.raises(StorageError):
+            env.service.source_analysis_enabled("src_one")
+        with pytest.raises(StorageError):
+            env.service.effective_analysis("src_one")
+        with pytest.raises(StorageError):
+            env.service.set_source_analysis("src_one", True, **WHO)
+
     @pytest.mark.parametrize("bad", [1, "true", None])
     def test_the_source_flag_takes_a_real_bool(self, env: Env, bad: Any):
         with pytest.raises(ValidationError) as caught:

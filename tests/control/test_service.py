@@ -131,3 +131,17 @@ def test_concurrent_writers_never_leak_a_database_is_locked_error(tmp_path):
         assert_log_reproduces_state(env)
         assert_chains_are_consistent(env)
         assert env.control.get_source_state("src_a") is None
+
+
+class _CorruptThreshold:
+    """A control repository whose stored threshold is garbage (as a tampered file could be)."""
+
+    def get_setting(self, key: str) -> str | None:
+        return "not-a-number"
+
+
+def test_a_garbage_stored_threshold_is_a_storage_error_with_any_repository():
+    service = ControlService(_CorruptThreshold(), None, None, FixedClock(START))  # type: ignore[arg-type]
+    with pytest.raises(StorageError) as caught:
+        service.alert_min_confidence()
+    assert "not-a-number" not in caught.value.message

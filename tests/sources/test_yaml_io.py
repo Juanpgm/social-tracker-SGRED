@@ -13,6 +13,7 @@ from social_tracker.shared.errors import ValidationError
 from social_tracker.sources.domain import SOURCE_TYPES, Source, parse_source
 from social_tracker.sources.yaml_io import (
     MAX_FILE_BYTES,
+    MAX_SOURCES,
     SourceFileError,
     SourceFileProblem,
     dump_sources,
@@ -278,15 +279,20 @@ def test_a_billion_laughs_document_is_rejected_quickly_without_expanding():
 def test_deeply_nested_documents_are_rejected_not_recursed_into(depth: int):
     text = "sources: " + "[" * depth + "]" * depth + "\n"
     started = time.perf_counter()
-    with pytest.raises(SourceFileError):
-        load_sources(text)
+    (problem,) = problems_of(text)
+    assert problem.message == "nesting is too deep"
     assert time.perf_counter() - started < 2.0
 
 
 def test_deep_block_nesting_is_rejected():
     lines = [f"{'  ' * i}k{i}:" for i in range(60)]
-    with pytest.raises(SourceFileError):
-        load_sources("sources:\n- " + "\n".join(lines) + "\n")
+    (problem,) = problems_of("sources:\n- " + "\n".join(lines) + "\n")
+    assert problem.message == "nesting is too deep"
+
+
+def test_nesting_up_to_the_limit_is_still_allowed():
+    # mapping -> sources list -> entry -> keywords list is depth 4; MAX_DEPTH leaves headroom
+    assert load_sources(doc(payload("news_rss", keywords=["a"])))[0].keywords == ("a",)
 
 
 def test_too_many_entries_are_rejected_before_any_are_validated():
@@ -301,8 +307,8 @@ def test_too_many_entries_are_rejected_before_any_are_validated():
 def test_a_flood_of_scalars_is_bounded():
     text = "sources: [" + ",".join(["1"] * 200_000) + "]"
     assert len(text.encode()) < MAX_FILE_BYTES
-    with pytest.raises(SourceFileError):
-        load_sources(text)
+    (problem,) = problems_of(text)
+    assert problem.message == "document is too complex"
 
 
 def test_duplicate_keys_in_an_entry_are_rejected():
@@ -511,3 +517,40 @@ _keywords = st.lists(
 def test_arbitrary_names_and_keywords_survive_a_round_trip(name: str, keywords: list[str] | None):
     source = src("news_rss", name=name, keywords=keywords)
     assert load_sources(dump_sources([source])) == [source]
+
+
+# ---- boundaries of the entry cap, message truncation and line folding -------------------
+
+
+def _many(count: int) -> str:
+    return dump_sources(
+        [src(id=f"src_{i:04d}", name=f"Name {i}", keywords=None) for i in range(count)]
+    )
+
+
+def test_exactly_the_maximum_number_of_entries_loads():
+    assert len(load_sources(_many(MAX_SOURCES))) == MAX_SOURCES
+
+
+def test_one_entry_over_the_maximum_is_rejected_as_a_whole():
+    (problem,) = problems_of(_many(MAX_SOURCES + 1))
+    assert problem.index is None
+    assert str(MAX_SOURCES) in problem.message
+
+
+def test_the_summary_message_is_truncated_but_every_problem_is_kept():
+    entries = [
+        payload("news_rss", id=f"src_{i:02d}", name=f"N{i}", credibility=9) for i in range(12)
+    ]
+    exc = pytest.raises(SourceFileError, load_sources, doc(*entries)).value
+    assert len(exc.problems) == 12
+    assert exc.message.count("entry ") == 10
+    assert exc.message.endswith("and 2 more")
+
+
+def test_long_values_stay_on_one_line_so_the_file_is_diff_friendly():
+    long_name = "N" * 100
+    long_url = "https://example.org/" + "a" * 300
+    text = dump_sources([src(name=long_name, feed_url=long_url)])
+    assert f"name: {long_name}" + chr(10) in text
+    assert f"feed_url: {long_url}" + chr(10) in text
