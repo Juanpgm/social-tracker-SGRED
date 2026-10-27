@@ -263,6 +263,8 @@ def test_a_megabyte_of_adversarial_text_is_classified_quickly():
         "Un temblor golpeará la ciudad el domingo",
         "Un sismo fuerte ocurrirá en Cali el lunes a las 8 am",
         "Un sismo en Cali habrá otro más fuerte el viernes",
+        "Prepárense para el temblor que se viene esta semana en Cali",
+        "Alcaldía de Cali informa: suspendidas las clases mañana por el temblor que se viene",
     ],
 )
 def test_predictions_with_the_future_of_a_quake_verb_are_rumors_and_escalated(text):

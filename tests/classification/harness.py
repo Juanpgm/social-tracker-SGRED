@@ -48,7 +48,8 @@ CRIME = "Hubo un robo en un banco del centro de Cali"
 ATTRIBUTION = "Según la Secretaría de Gestión del Riesgo, evacuen la zona ya"
 BENIGN_QUAKE = "El sismo de anoche fue sentido por varios vecinos de Cali"
 
-_VOCABULARY = [f"palabra{n}" for n in range(300)]
+# Letters only: a digit inside a word would be read as a number by the near-duplicate check.
+_VOCABULARY = ["palabra" + "".join(chr(97 + int(d)) for d in str(n)) for n in range(300)]
 
 
 def long_text(seed: int, words: int = 70) -> str:

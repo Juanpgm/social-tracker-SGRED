@@ -369,6 +369,48 @@ class ItemRepositoryContract:
         assert [i.external_id for i in repo.list()] == ["pending"]
         assert repo.add_new([skipped]).duplicate == 1  # tombstoned: it does not come back
 
+    def test_purge_classified_keeps_the_recent_out_of_scope_items_when_given_a_grace_cutoff(
+        self, repo
+    ):
+        cutoff = NOW
+        recent = make_item("recent", title="r", text="1", fetched_at=cutoff)
+        edge_old = make_item(
+            "old", title="o", text="2", fetched_at=cutoff - timedelta(microseconds=1)
+        )
+        done = make_item("done", title="d", text="3", fetched_at=cutoff + timedelta(hours=5))
+        repo.add_new([recent, edge_old, done])
+        for item in (recent, edge_old):
+            repo.set_status(item.id, ItemStatus.OUT_OF_SCOPE)
+        repo.set_status(done.id, ItemStatus.CLASSIFIED)
+        assert repo.purge_classified(out_of_scope_fetched_before=cutoff) == 2
+        assert {i.external_id for i in repo.list()} == {
+            "recent"
+        }  # strictly older goes, equal stays
+
+    def test_purge_classified_never_removes_the_parked_failed_items(self, repo):
+        failed = make_item("failed", title="f", text="1")
+        repo.add_new([failed])
+        repo.set_status(failed.id, ItemStatus.CLASSIFICATION_FAILED)
+        assert repo.purge_classified() == 0
+        assert repo.purge_classified(out_of_scope_fetched_before=NOW + timedelta(days=9)) == 0
+        assert repo.count() == 1
+
+    def test_a_naive_grace_cutoff_is_refused(self, repo):
+        with pytest.raises(ValidationError):
+            repo.purge_classified(out_of_scope_fetched_before=NOW.replace(tzinfo=None))
+
+    def test_items_are_counted_by_status(self, repo):
+        a, b, c = (make_item(n, title=n, text=n) for n in "abc")
+        repo.add_new([a, b, c])
+        repo.set_status(b.id, ItemStatus.CLASSIFIED)
+        repo.set_status(c.id, ItemStatus.CLASSIFICATION_FAILED)
+        assert repo.count_by_status(ItemStatus.NEW) == 1
+        assert repo.count_by_status(ItemStatus.CLASSIFIED) == 1
+        assert repo.count_by_status(ItemStatus.CLASSIFICATION_FAILED) == 1
+        assert repo.count_by_status(ItemStatus.OUT_OF_SCOPE) == 0
+        with pytest.raises(ValidationError):
+            repo.count_by_status("bogus")  # type: ignore[arg-type]
+
     # ---- retention ----
 
     def test_purge_fetched_before_removes_only_strictly_older_items(self, repo):

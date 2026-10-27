@@ -85,6 +85,28 @@ def test_a_zero_retention_purges_only_classified_items_whatever_their_age():
     assert names(repo) == {"pending"}
 
 
+def test_a_zero_retention_keeps_an_out_of_scope_item_for_the_first_day():
+    service, repo = build(retention_days=0)
+    fresh = aged("fresh", timedelta(hours=23, minutes=59))
+    edge = aged("edge", timedelta(hours=24))
+    stale = aged("stale", timedelta(hours=24, microseconds=1))
+    repo.add_new([fresh, edge, stale])
+    for item in (fresh, edge, stale):
+        repo.set_status(item.id, ItemStatus.OUT_OF_SCOPE)
+    assert service.purge_expired() == PurgeReport(deleted=1, retention_days=0)
+    assert names(repo) == {"fresh", "edge"}  # exactly one day old is still in its grace
+
+
+def test_a_zero_retention_still_purges_a_classified_item_at_once_and_never_a_failed_one():
+    service, repo = build(retention_days=0)
+    done, failed = aged("done", timedelta(minutes=1)), aged("failed", timedelta(days=99))
+    repo.add_new([done, failed])
+    repo.set_status(done.id, ItemStatus.CLASSIFIED)
+    repo.set_status(failed.id, ItemStatus.CLASSIFICATION_FAILED)
+    assert service.purge_expired().deleted == 1
+    assert names(repo) == {"failed"}
+
+
 def test_purging_an_empty_store_deletes_nothing():
     service, _ = build()
     assert service.purge_expired().deleted == 0

@@ -87,6 +87,7 @@ _PREDICTIONS = tuple(
         rf"\b{_FORECAST}\b(?: \w+){{0,6}} {_QUAKE}\b",
         rf"\b{_QUAKE}\b(?: \w+){{0,4}} (?:{_TOMORROW}|pasado manana|esta noche|esta madrugada)\b",
         rf"\b{_QUAKE}\b(?: \w+){{0,4}} {_QUAKE_VERB}\b",
+        rf"\b{_QUAKE}\b (?:que )?(?:se viene|se aproxima|se acerca|va a venir)\b",
         rf"\b{_QUAKE}\b(?: \w+){{0,3}} habra\b(?: \w+){{0,3}} (?:replicas?|otro|otra|magnitud)\b",
     )
 )

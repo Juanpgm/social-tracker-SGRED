@@ -34,7 +34,6 @@ def _newest_first(items: list[Item]) -> list[Item]:
 
 
 _UNDATED = "published_at_missing"
-_PROCESSED = (ItemStatus.CLASSIFIED, ItemStatus.OUT_OF_SCOPE)
 
 
 class InMemoryItemRepository:
@@ -145,13 +144,26 @@ class InMemoryItemRepository:
                 del self._items[item.id]
         return len(doomed)
 
-    def purge_classified(self) -> int:
+    def purge_classified(self, *, out_of_scope_fetched_before: datetime | None = None) -> int:
+        grace = (
+            None if out_of_scope_fetched_before is None else ensure_utc(out_of_scope_fetched_before)
+        )
         with self._lock:
-            doomed = [i for i in self._items.values() if i.status in _PROCESSED]
+            doomed = [
+                i
+                for i in self._items.values()
+                if i.status is ItemStatus.CLASSIFIED
+                or (i.status is ItemStatus.OUT_OF_SCOPE and (grace is None or i.fetched_at < grace))
+            ]
             self._remember(doomed)
             for item in doomed:
                 del self._items[item.id]
         return len(doomed)
+
+    def count_by_status(self, status: ItemStatus) -> int:
+        stage = _stage(status)
+        with self._lock:
+            return sum(1 for i in self._items.values() if i.status is stage)
 
     # Defined last: the name shadows the builtin inside the class body.
     def list(self, *, source_id: str | None = None, limit: int = DEFAULT_LIST_LIMIT) -> list[Item]:

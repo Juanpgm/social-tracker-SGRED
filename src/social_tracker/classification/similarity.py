@@ -1,14 +1,22 @@
-"""Near-duplicate detection without any model: word-shingle MinHash with LSH bands (RC-5).
+"""Near-duplicate detection without any model: character-shingle MinHash with LSH bands (RC-5).
 Pure, deterministic and dependency free.
 
-A text becomes the set of its 3-word shingles (folded words, see `text.fold`; a text of fewer
-than three words is one shingle). The MinHash signature keeps, for each of 80 fixed hash
-functions, the smallest value over the shingles; the share of equal positions of two signatures
-estimates the Jaccard similarity of the shingle sets. The 80 positions are cut into 16 bands of
-5: two signatures that agree on a whole band share its key, so a store indexed by `(band, key)`
-finds the candidates of a text without comparing it to every other one. At a similarity of 0.8 a
-pair shares a band with probability 0.998; at 0.5, 0.40, and the candidates are verified with the
-full signature anyway.
+A text becomes the set of its 4-character shingles (the folded words joined by single spaces, see
+`text.fold`; a text of fewer than four characters is one shingle). Characters, not words: a
+one-word edit of a 20-word caption keeps about 0.87 of its shingles (0.74 with word triples,
+which a threshold of 0.8 would call a different text) while unrelated news items of the same
+language stay under 0.25. The MinHash signature keeps, for each of
+80 fixed hash functions, the smallest value over the shingles; the share of equal positions of two
+signatures estimates the Jaccard similarity of the shingle sets, with a standard error of
+sqrt(J (1 - J) / 80): 0.045 at J = 0.8, 0.034 at J = 0.9. The 80 positions are cut into 16 bands
+of 5: two signatures that agree on a whole band share its key, so a store indexed by
+`(band, key)` finds the candidates of a text without comparing it to every other one. The chance
+that a pair of similarity J shares at least one band is 1 - (1 - J^5)^16: 0.998 at 0.8, 0.9998 at
+0.9, 0.82 at 0.6. Candidates are then verified with the full signature.
+
+A similar text is not a copy: a magnitude of 3.2 changed to 7.9 leaves the shingles nearly
+untouched. `numbers_digest` therefore digests the numbers of a text apart (as a multiset), and two
+texts are near copies only when the digests are equal and the estimate reaches the threshold.
 
 Nothing depends on `hash()` (randomized per process) or on `random`: shingles are hashed with
 BLAKE2b and the hash functions come from fixed BLAKE2b-derived constants, so a signature is the
@@ -24,7 +32,7 @@ from social_tracker.shared.errors import ValidationError
 NUM_PERM = 80
 BANDS = 16
 ROWS = NUM_PERM // BANDS
-SHINGLE_WORDS = 3
+SHINGLE_CHARS = 4
 _MASK64 = (1 << 64) - 1
 _MAX_VALUE = 1 << 32
 
@@ -40,13 +48,13 @@ _PACK = struct.Struct(f">{NUM_PERM}I")
 
 
 def _shingles(words: Sequence[str]) -> set[int]:
-    if len(words) < SHINGLE_WORDS:
-        grams = [tuple(words)]
+    text = " ".join(words)
+    if len(text) < SHINGLE_CHARS:
+        grams = [text]
     else:
-        grams = [tuple(words[i : i + SHINGLE_WORDS]) for i in range(len(words) - SHINGLE_WORDS + 1)]
+        grams = [text[i : i + SHINGLE_CHARS] for i in range(len(text) - SHINGLE_CHARS + 1)]
     return {
-        int.from_bytes(hashlib.blake2b(" ".join(g).encode(), digest_size=8).digest(), "big")
-        for g in grams
+        int.from_bytes(hashlib.blake2b(g.encode(), digest_size=8).digest(), "big") for g in grams
     }
 
 
@@ -89,6 +97,22 @@ def band_keys(sig: Sequence[int]) -> tuple[int, ...]:
         digest = hashlib.blake2b(struct.pack(f">{ROWS}I", *rows), digest_size=8).digest()
         keys.append(int.from_bytes(digest, "big", signed=True))
     return tuple(keys)
+
+
+def _digest(items: Sequence[str]) -> str:
+    return hashlib.sha256("\n".join(items).encode()).hexdigest()
+
+
+def text_digest(words: Sequence[str]) -> str:
+    """SHA-256 of the folded words: equal for texts that differ only in case, accents, spacing or
+    punctuation."""
+    return _digest([" ".join(words)])
+
+
+def numbers_digest(words: Sequence[str]) -> str:
+    """SHA-256 of the numbers of a text (every word with a digit in it), as a multiset: the same
+    numbers in any order and nothing else give the same digest."""
+    return _digest(sorted(word for word in words if any(ch.isdigit() for ch in word)))
 
 
 def pack(sig: Sequence[int]) -> bytes:

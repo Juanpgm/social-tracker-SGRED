@@ -29,15 +29,42 @@ class ClassificationRepository(Protocol):
 
     def stats(self) -> ClassificationStats: ...
 
+    def delete(self, item_id: str) -> bool:
+        """Forget the verdict of an item so that it can be classified again; False if it had
+        none."""
+        ...
+
+    def older_than(self, cutoff: datetime, limit: int, offset: int = 0) -> list[str]:
+        """Item ids of at most `limit` (1..1000) verdicts classified strictly before `cutoff`,
+        oldest first, after skipping `offset`: the candidates of the history pruning."""
+        ...
+
+    def delete_many(self, item_ids: Sequence[str]) -> int:
+        """Forget these verdicts (and their failure counters); returns how many verdicts."""
+        ...
+
+    def note_failure(self, item_id: str, at: datetime) -> int:
+        """Count one more consecutive per-item error for the item and return the new count."""
+        ...
+
+    def clear_failure(self, item_id: str) -> None:
+        """Forget the error counter of an item (it was classified, or retried by hand)."""
+        ...
+
 
 @runtime_checkable
 class SignatureRepository(Protocol):
-    """Persistence port for the near-duplicate index.
+    """Persistence port for the near-duplicate index. Neither lookup scans.
 
-    `find_candidates` is the only lookup and it never scans: it returns the signatures that have
-    the same content hash as the item OR share at least one of its band keys (see
-    `similarity.band_keys`), never the item's own, oldest `ref_at` first (then by item id), at
-    most `limit` (1..1000). Verifying a candidate against the full signature is the caller's job.
+    `find_exact` returns the signatures with the same content hash OR the same folded-text hash as
+    the item (optionally only those whose `ref_at` is within `[ref_from, ref_to]`), never the
+    item's own, oldest `ref_at` first (then by item id), at most `limit` (1..1000). It is the
+    lookup of identical content and has nothing to do with the candidate limit of the bands.
+
+    `find_candidates` returns the signatures that share at least one of the item's band keys (see
+    `similarity.band_keys`) or have its content hash, never the item's own, best first: the most
+    shared bands, then the oldest `ref_at` (then by item id), at most `limit` (1..1000).
+    Verifying a candidate against the full signature is the caller's job.
     """
 
     def add(self, signature: ItemSignature) -> bool:
@@ -45,6 +72,17 @@ class SignatureRepository(Protocol):
         ...
 
     def get(self, item_id: str) -> ItemSignature | None: ...
+
+    def find_exact(
+        self,
+        *,
+        item_id: str,
+        content_hash: str,
+        text_hash: str | None,
+        ref_from: datetime | None = None,
+        ref_to: datetime | None = None,
+        limit: int = 100,
+    ) -> list[ItemSignature]: ...
 
     def find_candidates(
         self, *, item_id: str, content_hash: str, band_keys: Sequence[int], limit: int

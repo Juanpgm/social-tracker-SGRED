@@ -88,7 +88,7 @@ def test_a_locked_database_is_reported_as_an_error_and_nothing_is_lost(tmp_path)
         item = world.add("a", PREDICTION)
         with holder.transaction():
             report = world.service.classify_pending(10)
-        assert (report.classified, report.errors) == (0, 1)
+        assert (report.classified, report.errors, report.storage_errors) == (0, 0, 1)
         assert world.verdict(item) is None
         assert world.status(item) is ItemStatus.NEW
         assert world.service.classify_pending(10).classified == 1  # released: it resumes
@@ -151,6 +151,7 @@ def test_retention_zero_purges_classified_and_out_of_scope_items_once_and_keeps_
         )
         world.service.classify_pending(2)  # the two oldest only
         assert world.status(pending) is ItemStatus.NEW
+        world.clock.advance(days(2))  # past the first-day grace of an out-of-scope item
         purge = ItemService(world.items, world.uow, world.clock, retention_days=0).purge_expired()
         assert purge.deleted == 2
         assert world.items.get(quake.id) is None
@@ -172,11 +173,11 @@ def test_a_copy_of_a_purged_original_is_still_recognised_by_its_signature(tmp_pa
     try:
         world.ready("src_a")
         world.add_source("src_b")
-        original = world.add("a", PREDICTION, source_id="src_a")
+        original = world.add("a", long_text(5), source_id="src_a")
         world.service.classify_pending(10)
         ItemService(world.items, world.uow, world.clock, retention_days=0).purge_expired()
         assert world.items.get(original.id) is None
-        copy = world.add("b", PREDICTION, source_id="src_b", published_at=PUBLISHED + days(8))
+        copy = world.add("b", long_text(5), source_id="src_b", published_at=PUBLISHED + days(8))
         world.service.classify_pending(10)
         assert world.verdict(copy).recycled_of == original.id
     finally:

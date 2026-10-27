@@ -376,7 +376,7 @@ def test_a_prediction_is_a_rumor_candidate_with_its_evidence(world):
     assert verdict.topics == (Topic.EARTHQUAKE,)
     assert (verdict.needs_llm, verdict.low_confidence) == (True, False)
     assert verdict.source_credibility_used == 3
-    assert verdict.classifier_version == "cascade-1/topics-0"
+    assert verdict.classifier_version == "cascade-2/topics-0"
     assert verdict.classified_at == START
 
 
@@ -505,13 +505,13 @@ def test_a_changed_configuration_applies_to_the_next_run_and_is_versioned(world)
     first = world.add("a", "El granizo cayó sobre Cali")
     run(world)
     assert world.verdict(first).label is Label.OUT_OF_SCOPE
-    assert world.verdict(first).classifier_version == "cascade-1/topics-0"
+    assert world.verdict(first).classifier_version == "cascade-2/topics-0"
     world.topics.set_text("version: 1\nother_disaster: [granizo]\nplaces: [Cali]\n", **WHO)
     second = world.add("b", "El granizo cayó otra vez sobre Cali")
     run(world)
     verdict = world.verdict(second)
     assert verdict.topics == (Topic.OTHER_DISASTER,)
-    assert verdict.classifier_version == "cascade-1/topics-1"
+    assert verdict.classifier_version == "cascade-2/topics-1"
     assert world.verdict(first).label is Label.OUT_OF_SCOPE  # a stored verdict is never redone
 
 
@@ -597,7 +597,8 @@ def test_a_storage_error_ends_the_run_and_the_next_run_resumes():
     world.ready()
     items = [world.add(f"n{n}", long_text(n)) for n in range(3)]
     report = run(world)
-    assert (report.classified, report.errors) == (0, 1)  # the run stopped: nothing else was tried
+    # the run stopped at the storage error: nothing else was tried, and no item was blamed
+    assert (report.classified, report.errors, report.storage_errors) == (0, 0, 1)
     assert {world.status(i) for i in items} == {ItemStatus.NEW}
     assert world.classifications.stats().total == 0
     assert run(world).classified == 3
@@ -689,7 +690,8 @@ def test_an_in_scope_item_leaves_a_signature_without_its_text(world):
     run(world)
     signature = world.signatures.get(item.id)
     assert signature.content_hash == item.content_hash
-    assert signature.ref_at == item.published_at
+    assert signature.ref_at == item.fetched_at  # first seen here, not the date the feed claims
+    assert signature.n_tokens == 10
 
 
 def test_old_signatures_are_forgotten_after_the_retention():

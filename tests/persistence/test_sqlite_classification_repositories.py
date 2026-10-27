@@ -104,10 +104,10 @@ def test_a_tampered_configuration_is_a_storage_error(db):
 def _plan(db: Database, repo: SqliteSignatureRepository, probe) -> list[str]:
     from social_tracker.persistence import classification_repo as module
 
-    params = [probe.content_hash]
+    params: list = []
     for band, key in enumerate(band_keys(probe.minhash)):
         params.extend((band, key))
-    params.extend((probe.item_id, 10))
+    params.extend((16, probe.content_hash, probe.item_id, 10))
     rows = db.query("EXPLAIN QUERY PLAN " + module._CANDIDATES, params)
     return [str(row["detail"]) for row in rows]
 
@@ -239,13 +239,13 @@ def raw(db: Database, sql: str, params=()) -> None:
 
 
 BASE = (
-    "itm_one", "no_risk", 0.5, "rules", "r", "[]", "[]", 0, 0, None, None, 0, "unavailable", 0.0,
-    None, 3, "2026-03-01T08:00:00+00:00", "v1",
+    "itm_one", "no_risk", 0.5, "rules", "r", "[]", "[]", 0, 0, None, None, None, 0, 0,
+    "unavailable", 0.0, None, 3, "2026-03-01T08:00:00+00:00", "v1",
 )  # fmt: skip
 COLUMNS = (
     "item_id, label, confidence, stage, rationale, signals, topics, low_confidence, needs_llm, "
-    "duplicate_of, recycled_of, truncated, catalog_status, priority, scope_reason, "
-    "source_credibility_used, classified_at, classifier_version"
+    "duplicate_of, recycled_of, near_of, awaiting_original, truncated, catalog_status, priority, "
+    "scope_reason, source_credibility_used, classified_at, classifier_version"
 )
 
 
@@ -283,6 +283,14 @@ def test_a_valid_row_is_accepted(db):
         {"duplicate_of": "itm_one"},
         {"recycled_of": "itm_one"},
         {"duplicate_of": "itm_two", "recycled_of": "itm_two"},
+        {"duplicate_of": "itm_two", "near_of": "itm_three"},
+        {"recycled_of": "itm_two", "near_of": "itm_three"},
+        {"near_of": "itm_one"},
+        {"near_of": "Bad Id"},
+        {"awaiting_original": 2},
+        {"awaiting_original": 1},  # only a duplicate can wait for its original
+        {"awaiting_original": 1, "recycled_of": "itm_two"},
+        {"scope_reason": "english", "label": "out_of_scope"},
         {"duplicate_of": "itm_two", "needs_llm": 1},
         {"catalog_status": "Bad"},
         {"catalog_status": ""},
@@ -309,6 +317,9 @@ def test_the_schema_accepts_the_boundary_values(db):
     insert_row(db, item_id="itm_b", confidence=1.0, priority=1.0, source_credibility_used=5)
     insert_row(db, item_id="itm_c", rationale="x" * 300)
     insert_row(db, item_id="itm_d", label="out_of_scope", scope_reason="empty_text")
+    insert_row(db, item_id="itm_e", label="out_of_scope", scope_reason="non_spanish")
+    insert_row(db, item_id="itm_f", near_of="itm_x", needs_llm=1)
+    insert_row(db, item_id="itm_g", duplicate_of="itm_x", awaiting_original=1)
 
 
 def test_the_schema_keeps_one_verdict_per_item(db):
@@ -393,7 +404,7 @@ def test_the_pending_items_index_exists_and_serves_the_queue(db):
 
 def test_the_migration_is_recorded(db):
     versions = [r[0] for r in db.query("SELECT version FROM schema_migrations ORDER BY 1")]
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     tables = {r[0] for r in db.query("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"classifications", "item_signatures", "item_signature_bands", "topic_config"} <= tables
     assert sqlite3.sqlite_version_info >= (3, 35)

@@ -278,8 +278,14 @@ class Classification:
     - `low_confidence`: below the alert threshold when classified (RC-11).
     - `needs_llm` and `priority`: queued for the LLM judgment (RC-7); the hourly cap is applied by
       the stage that consumes the queue.
-    - `duplicate_of`: a copy, within the window, of an item already classified (its verdict is
-      reused); `recycled_of`: matches content first seen/published longer ago (RC-5). Never both.
+    - `duplicate_of`: an EXACT copy (same content), within the window, of an item already
+      classified: its verdict is reused with this source's credibility prior. `awaiting_original`
+      says that original is still waiting for the LLM, so this verdict is provisional and is to
+      be replaced by the original's when it is judged (the link is what the later stage follows).
+    - `near_of`: a near copy within the window. Its verdict is its OWN (the rules ran on its own
+      text, so a changed number cannot inherit the original's verdict); the link is a prior for
+      later stages. `recycled_of`: matches content first seen longer ago (RC-5). At most one of
+      the three links is set.
     - `truncated`: the text was cut before analysis. `scope_reason`: why an item is out of scope.
     - `catalog_status`: outcome of the official catalog cross-check (`unavailable` until it exists).
     - `source_credibility_used`: the 1..5 prior that adjusted the confidence (RC-8).
@@ -303,6 +309,8 @@ class Classification:
     priority: float = 0.0
     scope_reason: OutOfScopeReason | None = None
     source_credibility_used: int = 3
+    near_of: str | None = None
+    awaiting_original: bool = False
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -328,7 +336,7 @@ class Classification:
         if not all(isinstance(s, Signal) for s in self.signals):
             raise ValidationError("signals must be Signal objects")
         set_(self, "topics", tuple(_coerce(Topic, t, "topic") for t in self.topics))
-        for flag in ("low_confidence", "needs_llm", "truncated"):
+        for flag in ("low_confidence", "needs_llm", "truncated", "awaiting_original"):
             _flag(getattr(self, flag), flag)
         self._check_references()
         if not isinstance(self.catalog_status, str) or not _STATUS_RE.fullmatch(
@@ -353,11 +361,14 @@ class Classification:
             )
 
     def _check_references(self) -> None:
-        for other in (self.duplicate_of, self.recycled_of):
+        links = (self.duplicate_of, self.recycled_of, self.near_of)
+        for other in links:
             if other is not None and validate_slug(other) == self.item_id:
                 raise ValidationError("an item cannot refer to itself")
-        if self.duplicate_of is not None and self.recycled_of is not None:
-            raise ValidationError("an item is a duplicate or recycled, not both")
+        if sum(other is not None for other in links) > 1:
+            raise ValidationError("an item is a duplicate, a near copy or recycled, only one")
+        if self.awaiting_original and self.duplicate_of is None:
+            raise ValidationError("only a duplicate can wait for its original")
         if self.needs_llm and self.duplicate_of is not None:
             raise ValidationError("a duplicate of a classified item is not escalated")
         if self.scope_reason is not None:
@@ -373,13 +384,19 @@ class Classification:
 @dataclass(frozen=True)
 class ItemSignature:
     """What the near-duplicate check keeps of a classified item: its content hash, the time it
-    counts from (first seen or published, whichever is earlier) and its MinHash signature. No
-    text, so it can outlive the item itself."""
+    counts from (when this application first saw it), its MinHash signature and three digests
+    of its words (`text_hash`: the folded words; `digits_hash`: its numbers, as a multiset;
+    `n_tokens`: how many words). No text, so it can outlive the item itself. The digests are
+    absent (`None`, 0 words) on a signature stored before they existed: such a signature can only
+    match by identical content hash."""
 
     item_id: str
     content_hash: str
     ref_at: datetime
     minhash: tuple[int, ...]
+    text_hash: str | None = None
+    digits_hash: str | None = None
+    n_tokens: int = 0
 
     def __post_init__(self) -> None:
         validate_slug(self.item_id)
@@ -389,6 +406,13 @@ class ItemSignature:
         if len(self.minhash) != NUM_PERM or not all(_whole(v, 0, 2**32 - 1) for v in self.minhash):
             raise ValidationError("a signature is 80 unsigned 32-bit values")
         object.__setattr__(self, "minhash", tuple(self.minhash))
+        for digest in (self.text_hash, self.digits_hash):
+            if digest is not None and (
+                not isinstance(digest, str) or not _HASH_RE.fullmatch(digest)
+            ):
+                raise ValidationError("a digest must be 64 lowercase hex digits")
+        if not _whole(self.n_tokens, 0, 1_000_000):
+            raise ValidationError("the word count must be a whole number")
 
 
 @dataclass(frozen=True)
@@ -403,3 +427,6 @@ class ClassificationStats:
     duplicates: int
     recycled: int
     truncated: int
+    near_duplicates: int = 0
+    awaiting_original: int = 0
+    failed: int = 0  # items parked as classification_failed (counted by the service)

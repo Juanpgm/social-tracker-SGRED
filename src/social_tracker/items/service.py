@@ -3,13 +3,17 @@
 Retention (CI-10): raw items are kept for `retention_days` days from the moment they were
 fetched. One more instant and they go (see `items.domain`): an item exactly 30 days old is still
 kept. A retention of 0 means "purge once classified": no time is involved, every item that has
-been processed by the classifier (`classified` or `out_of_scope`) is removed.
+been processed by the classifier is removed: `classified` ones at once, `out_of_scope` ones only
+once they were fetched more than `OUT_OF_SCOPE_GRACE` (24 hours) ago, so that a vocabulary change
+in the first day can still bring an off-topic item back (`classify reclassify`). Items parked as
+`classification_failed` stay until a retry or the time-based retention.
 Alerts are a different store and are never touched here.
 
 Nothing here publishes or sends anything (G-1).
 """
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 from social_tracker.items.domain import (
     DEFAULT_LIST_LIMIT,
@@ -21,6 +25,8 @@ from social_tracker.items.domain import (
 from social_tracker.items.ports import ItemRepository
 from social_tracker.shared.clock import Clock
 from social_tracker.shared.uow import UnitOfWork
+
+OUT_OF_SCOPE_GRACE = timedelta(hours=24)
 
 
 @dataclass(frozen=True)
@@ -53,7 +59,8 @@ class ItemService:
     def purge_expired(self) -> PurgeReport:
         with self._uow.transaction():
             if self.retention_days == 0:
-                deleted = self._items.purge_classified()
+                grace = self._clock.now() - OUT_OF_SCOPE_GRACE
+                deleted = self._items.purge_classified(out_of_scope_fetched_before=grace)
             else:
                 cutoff = retention_cutoff(self._clock.now(), self.retention_days)
                 deleted = self._items.purge_fetched_before(cutoff)

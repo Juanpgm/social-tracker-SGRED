@@ -36,7 +36,7 @@ def make(**changes) -> Classification:
         "signals": (Signal("prediction_claim", Label.UNINTENTIONAL_RUMOR, 0.45),),
         "topics": (Topic.EARTHQUAKE,),
         "classified_at": NOW,
-        "classifier_version": "cascade-1",
+        "classifier_version": "cascade-2",
         **changes,
     }
     return Classification(**fields)

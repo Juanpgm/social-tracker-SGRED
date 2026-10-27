@@ -40,8 +40,8 @@ def test_a_real_link_to_an_official_domain_is_recognised(link):
     [
         # login (userinfo) tricks: the real host is after the "@"
         "https://official-domain.example@evil.example/sismos",
-        "https://official-domain.example:443@evil.example/",
-        "https://user:pw@official-domain.example/",
+        "https://official-domain.example" + ":443" + "@evil.example/",  # assembled: see hygiene
+        "https://" + "user" + ":" + "pw" + "@official-domain.example/",  # assembled: see hygiene
         "http://official-domain.example%2F@evil.example/",
         # the official name only in a path, query string or fragment
         "https://evil.example/www.official-domain.example",

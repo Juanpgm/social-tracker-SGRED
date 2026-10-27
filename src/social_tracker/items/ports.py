@@ -73,8 +73,15 @@ class ItemRepository(Protocol):
 
     def purge_fetched_before(self, cutoff: datetime) -> int: ...
 
-    def purge_classified(self) -> int:
-        """Remove every item that has been processed, that is classified or out of scope."""
+    def purge_classified(self, *, out_of_scope_fetched_before: datetime | None = None) -> int:
+        """Remove the items that have been processed: classified ones always, and out-of-scope
+        ones too, unless `out_of_scope_fetched_before` is given, in which case only those fetched
+        strictly before it (a grace period: the topic vocabulary may change and an off-topic
+        item is worth judging again). Items parked as failed are never removed here."""
+        ...
+
+    def count_by_status(self, status: ItemStatus) -> int:
+        """How many items are at one pipeline stage."""
         ...
 
     # Defined last: the name shadows the builtin inside the class body.

@@ -69,7 +69,6 @@ _FORGET_OLDEST = (
     "DELETE FROM item_tombstones WHERE source_id = ? AND seq <= "
     "(SELECT seq FROM item_tombstones WHERE source_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?)"
 )
-_PROCESSED = (ItemStatus.CLASSIFIED, ItemStatus.OUT_OF_SCOPE)
 _NEWEST_FIRST = " ORDER BY published_at DESC, id DESC LIMIT ?"
 
 
@@ -261,12 +260,21 @@ class SqliteItemRepository:
             self._remember(conn, f"fetched_at < ? AND {_UNDATED_FLAG}", (text,))
             return conn.execute("DELETE FROM items WHERE fetched_at < ?", (text,)).rowcount
 
-    def purge_classified(self) -> int:
-        processed = tuple(s.value for s in _PROCESSED)
-        condition = f"status IN ({', '.join('?' * len(processed))})"
+    def purge_classified(self, *, out_of_scope_fetched_before: datetime | None = None) -> int:
+        params: tuple[Any, ...] = (ItemStatus.CLASSIFIED.value, ItemStatus.OUT_OF_SCOPE.value)
+        condition = "(status = ? OR status = ?)"
+        if out_of_scope_fetched_before is not None:
+            condition = "(status = ? OR (status = ? AND fetched_at < ?))"
+            params = (*params, format_utc(out_of_scope_fetched_before))
         with self._db.transaction() as conn:
-            self._remember(conn, condition, processed)
-            return conn.execute(f"DELETE FROM items WHERE {condition}", processed).rowcount
+            self._remember(conn, condition, params)
+            return conn.execute(f"DELETE FROM items WHERE {condition}", params).rowcount
+
+    def count_by_status(self, status: ItemStatus) -> int:
+        rows = self._db.query(
+            "SELECT count(*) FROM items WHERE status = ?", (_stage(status).value,)
+        )
+        return int(rows[0][0])
 
     # Defined last: the name shadows the builtin inside the class body.
     def list(self, *, source_id: str | None = None, limit: int = DEFAULT_LIST_LIMIT) -> list[Item]:

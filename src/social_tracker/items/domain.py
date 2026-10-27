@@ -70,6 +70,9 @@ class ItemStatus(StrEnum):
     NEW = "new"
     CLASSIFIED = "classified"
     OUT_OF_SCOPE = "out_of_scope"  # judged by the topic filter: not about earthquakes or the like
+    # Parked after several consecutive per-item classification errors: the classifier skips it,
+    # `classify stats` counts it and `classify reclassify --status classification_failed` retries.
+    CLASSIFICATION_FAILED = "classification_failed"
 
 
 # ---- text helpers ---------------------------------------------------------------------
