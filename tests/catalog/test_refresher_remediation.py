@@ -417,3 +417,17 @@ def test_the_removal_and_the_state_are_one_transaction(tmp_path):
         assert "us1" not in w.ids(USGS)
     finally:
         w.db.close()
+
+
+def test_a_good_catalog_never_removes_the_events_of_the_other_one(world):
+    put(world, "em-only", source=EMSC, at=NOW - timedelta(hours=2))
+    world.fetcher.on("emsc", RuntimeError("down"))  # the EMSC refresh fails: nothing reconciled
+    report = world.refresher.refresh(force=True)
+    assert world.outcome(report, USGS).outcome is Outcome.REFRESHED
+    assert world.outcome(report, EMSC).outcome is Outcome.FAILED
+    assert "em-only" in world.ids(EMSC)
+    put(world, "us-only", at=NOW - timedelta(hours=2))
+    world.fetcher.on("usgs", RuntimeError("down"))
+    world.fetcher.on("emsc", emsc_payload({"id": "em1"}))
+    world.refresher.refresh(force=True)
+    assert "us-only" in world.ids(USGS)

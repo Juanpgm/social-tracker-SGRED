@@ -186,7 +186,7 @@ class CatalogRefresher:
                 settled = claimed
                 return failed
             result = self._store(source, fetched, dry_run)
-            settled = result.outcome is Outcome.REFRESHED
+            settled = True  # `_store` committed the state, which cleared the claim
             return result
         finally:
             if claimed and not settled:

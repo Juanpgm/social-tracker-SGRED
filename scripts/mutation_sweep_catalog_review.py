@@ -12,6 +12,7 @@ interrupt.
 Exit status: 0 when every mutant was killed, 1 when some survived or a pattern is stale.
 """
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -140,8 +141,7 @@ MUTANTS = [
         'or hour_text.startswith("0")',
         "",
     ),
-    m("claims thirteen is 24 hours", CLAIMS, "or hour >= 13", "or hour > 13"),
-    m("claims zero is 24 hours", CLAIMS, "twenty_four = hour == 0 or", "twenty_four = False or"),
+    m("claims thirteen is 24 hours", CLAIMS, "twenty_four = hour >= 13", "twenty_four = hour > 13"),
     m("claims utc is 24 hours", CLAIMS, 'or groups.get("utc")', ""),
     m(
         "claims bare number is no time",
@@ -427,12 +427,6 @@ MUTANTS = [
     ),
     m("refresher releases the claim", SERVICE, "if claimed and not settled:", "if False:"),
     m(
-        "refresher settles on success only",
-        SERVICE,
-        "settled = result.outcome is Outcome.REFRESHED",
-        "settled = True",
-    ),
-    m(
         "refresher stops between requests",
         SERVICE,
         "            if self._should_stop():\n                raise _StopRequested",
@@ -507,6 +501,8 @@ def run_tests(tests: list[str] | None = None) -> bool:
     done = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *(tests or TESTS)],
         cwd=ROOT,
+        # no bytecode: a mutant restored within the same second would otherwise leave a stale .pyc
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         capture_output=True,
         text=True,
         check=False,
