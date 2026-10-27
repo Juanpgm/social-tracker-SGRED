@@ -12,6 +12,8 @@ from hypothesis import strategies as st
 from social_tracker.shared.errors import ValidationError
 from social_tracker.sources.domain import SOURCE_TYPES, Source, parse_source
 from social_tracker.sources.yaml_io import (
+    MAX_DEPTH,
+    MAX_EVENTS,
     MAX_FILE_BYTES,
     MAX_SOURCES,
     SourceFileError,
@@ -617,3 +619,47 @@ def test_impossible_calendar_dates_are_a_generic_yaml_problem():
     text = "sources:\n- id: src_one\n  created_at: 2026-13-45\n"
     (problem,) = problems_of(text)
     assert (problem.index, problem.message) == (None, "malformed or unsupported YAML document")
+
+
+# ---- the exact accept/reject pair of every limit (literal numbers, never the constants) ------
+
+
+def test_the_documented_limits_are_pinned():
+    assert (MAX_SOURCES, MAX_EVENTS, MAX_DEPTH, MAX_FILE_BYTES) == (500, 100_000, 8, 1_000_000)
+
+
+def test_500_entries_load_and_501_are_rejected():
+    assert len(load_sources(_many(500))) == 500
+    (problem,) = problems_of(_many(501))
+    assert problem.index is None
+    assert "at most 500" in problem.message
+
+
+def _nested_document(levels: int) -> str:
+    """A top-level mapping whose extra key holds `levels` nested flow sequences."""
+    return "sources: []\nextra: " + "[" * levels + "]" * levels + "\n"
+
+
+def test_nesting_of_exactly_eight_levels_passes_the_scan_and_nine_is_too_deep():
+    # The root mapping is level 1, so seven nested sequences make level 8 (allowed) and eight
+    # make level 9 (rejected). The extra key is reported afterwards, but not as "too deep".
+    allowed = {p.message for p in problems_of(_nested_document(7))}
+    assert "nesting is too deep" not in allowed
+    (rejected,) = problems_of(_nested_document(8))
+    assert rejected.message == "nesting is too deep"
+
+
+def _document_with_events(count: int) -> str:
+    """A parseable document that produces exactly `count` parser events (one per scalar)."""
+    base = "sources: []\nextra: ["
+    empty_events = sum(1 for _ in yaml.parse(base + "]\n"))
+    text = base + ", ".join(["1"] * (count - empty_events)) + "]\n"
+    assert sum(1 for _ in yaml.parse(text)) == count
+    return text
+
+
+def test_exactly_100000_parser_events_are_accepted_and_one_more_is_too_complex():
+    at_limit = {p.message for p in problems_of(_document_with_events(100_000))}
+    assert "document is too complex" not in at_limit
+    (over,) = problems_of(_document_with_events(100_001))
+    assert over.message == "document is too complex"

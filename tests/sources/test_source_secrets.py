@@ -289,3 +289,11 @@ def test_a_token_after_a_valid_prefix_is_still_limited_by_charset_and_length(sch
 
 def test_the_secret_reference_shape_is_pinned_by_constants():
     assert (REF_SCHEMES, REF_NAME_MAX) == (("env", "keyring", "file"), 64)
+
+
+@pytest.mark.parametrize(
+    "query", ["%74oken=1", "%2574oken=1", "%252574oken=1"], ids=["once", "twice", "thrice"]
+)
+def test_a_secret_parameter_name_encoded_up_to_three_times_is_still_refused(query: str):
+    with pytest.raises(ValidationError, match="feed_url"):
+        parse_source(payload("news_rss", feed_url=f"https://example.org/rss?{query}"))
