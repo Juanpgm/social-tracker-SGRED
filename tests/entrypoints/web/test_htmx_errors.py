@@ -204,3 +204,14 @@ def test_the_same_failures_without_htmx_stay_full_pages(client: TestClient):
     assert "hx-reswap" not in stale.headers
     assert "hx-refresh" not in stale.headers
     assert "Reload the page" in visible_text(stale.text)
+
+
+def test_a_foreign_host_over_htmx_is_plain_text_that_htmx_never_swaps(client: TestClient):
+    response = client.post(
+        "/sources/src_one/enable",
+        content=f"csrf_token={token_for()}",
+        headers={**HTMX, **FORM, "host": "evil.example"},
+    )
+    assert response.status_code == 400
+    assert response.text == "Invalid host header"
+    assert response.headers["hx-reswap"] == "none"
