@@ -182,3 +182,27 @@ def test_raw_non_utf8_bytes_in_the_body_are_a_400(web: Web):
     web.csrf()
     response = web.client.post("/analysis", content=b"csrf_token=\xff\xfe&on=1", headers=FORM)
     assert response.status_code == 400
+
+
+def test_the_first_value_of_a_repeated_field_is_the_one_that_counts(web: Web):
+    token = web.csrf()
+    good_first = f"{CSRF_FIELD}={token}&{CSRF_FIELD}=forged&on=1"
+    assert (
+        web.client.post(
+            "/analysis", content=good_first, headers=FORM, follow_redirects=False
+        ).status_code
+        == 303
+    )
+    bad_first = f"{CSRF_FIELD}=forged&{CSRF_FIELD}={token}&on=1"
+    assert web.client.post("/analysis", content=bad_first, headers=FORM).status_code == 403
+
+
+def test_every_form_on_every_page_carries_the_token(web: Web):
+    web.seed("src_one")
+    web.seed("src_two", name="Two")
+    for path in ("/", "/sources/new/news_rss", "/sources/new/instagram", "/sources/src_one/edit"):
+        page = web.client.get(path).text
+        assert page.count("<form") >= 1
+        assert page.count("<form") == page.count('name="csrf_token"'), path
+    confirm = web.client.get("/sources/src_one/delete").text
+    assert confirm.count("<form") == confirm.count('name="csrf_token"') == 1

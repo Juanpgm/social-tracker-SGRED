@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from typing import Any
@@ -236,3 +237,14 @@ def test_many_concurrent_enables_of_one_source_write_exactly_one_event(web: Web)
     assert codes == [303] * 8
     assert len(web.events("source_enabled")) == 1
     assert state_of(web) == (True, CollectionState.IDLE)
+
+
+def test_row_buttons_work_without_script_and_update_in_place_with_it(web: Web):
+    web.seed()
+    row = row_of(web.client.get("/").text, "src_one")
+    forms = re.findall(r'<form method="post" action="([^"]+)" hx-post="([^"]+)"([^>]*)>', row)
+    assert len(forms) == 2  # enable/disable and the analysis switch
+    for action, hx_post, rest in forms:
+        assert action == hx_post
+        assert 'hx-target="#row-src_one"' in rest
+        assert 'hx-swap="outerHTML"' in rest
