@@ -4,9 +4,12 @@ from datetime import date, datetime, timedelta, timezone
 from typing import get_type_hints
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from pydantic import ValidationError as PydanticValidationError
 
 from social_tracker.shared.errors import ValidationError
+from social_tracker.sources import domain as sources_domain
 from social_tracker.sources.domain import Source, normalize_name, parse_source
 from tests.sources.factories import CANARY, T0, payload, without
 
@@ -146,6 +149,79 @@ def test_normalized_name_is_case_and_whitespace_insensitive():
 def test_normalized_name_handles_unicode_case_and_composition():
     assert normalize_name("STRASSE") == normalize_name("straße")  # casefold: ss
     assert normalize_name("Café") == normalize_name("Café")  # NFC
+
+
+# NFC then casefold is not a fixed point: casefolding can create sequences that NFC reorders.
+# U+1E9B U+0323 casefolds to U+1E61 U+0323, which NFC recomposes to U+1E69 on the next pass.
+IDEMPOTENCE_COUNTEREXAMPLES = [
+    "\u1e9b\u0323",
+    "\u1e9b\u0323\u0323",
+    "x\u1e9b\u0323y",
+    "\u1e61\u0323",
+    "\u1e69",
+    "s\u0323\u0307",
+    "S\u0307\u0323",
+    "\u0130",  # dotted capital I casefolds to i + combining dot
+    "\ufb03",  # ffi ligature
+    "\u1fd3",
+    "\u0345\u0301",
+]
+
+
+@pytest.mark.parametrize("name", IDEMPOTENCE_COUNTEREXAMPLES, ids=ascii)
+def test_normalize_name_is_idempotent_on_known_hard_cases(name: str):
+    once = normalize_name(name)
+    assert normalize_name(once) == once
+
+
+def test_the_original_counterexample_normalises_to_the_composed_form():
+    assert normalize_name("\u1e9b\u0323") == "\u1e69"
+
+
+@settings(max_examples=2000, deadline=None)
+@given(st.text(max_size=30))
+def test_normalize_name_is_idempotent_for_arbitrary_unicode(name: str):
+    once = normalize_name(name)
+    assert normalize_name(once) == once
+
+
+@settings(max_examples=1000, deadline=None)
+@given(
+    st.text(
+        alphabet=st.sampled_from(
+            "sS\u1e9b\u1e61\u1e69\u0323\u0307\u0345\u0301\u0130\u03a3\u03c2\u00df\ufb03 "
+        ),
+        max_size=12,
+    )
+)
+def test_normalize_name_is_idempotent_for_combining_and_casefold_heavy_text(name: str):
+    once = normalize_name(name)
+    assert normalize_name(once) == once
+
+
+def test_a_source_is_found_by_its_own_stored_normalized_name():
+    source = parse_source(payload(name="\u1e9b\u0323"))
+    assert normalize_name(source.normalized_name) == source.normalized_name
+
+
+def test_normalization_that_never_settles_is_an_explicit_error(monkeypatch):
+    flip = iter("abcdefghijklmnopqrstuvwxyz" * 3)
+    monkeypatch.setattr(sources_domain, "_normalize_once", lambda text: next(flip))
+    with pytest.raises(ValidationError, match="normali"):
+        normalize_name("anything")
+
+
+def test_normalization_gives_up_after_a_small_bounded_number_of_passes(monkeypatch):
+    calls: list[str] = []
+
+    def never_settles(text: str) -> str:
+        calls.append(text)
+        return text + "x"
+
+    monkeypatch.setattr(sources_domain, "_normalize_once", never_settles)
+    with pytest.raises(ValidationError):
+        normalize_name("a")
+    assert 2 <= len(calls) <= 10
 
 
 def test_normalized_name_keeps_distinct_names_distinct():

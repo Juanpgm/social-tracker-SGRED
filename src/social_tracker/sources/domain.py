@@ -63,9 +63,28 @@ STREAM_SCHEMES = frozenset({"http", "https", "rtmp", "icecast"})
 # ---- helpers --------------------------------------------------------------------------
 
 
+_NORMALIZE_MAX_PASSES = 5  # real text settles in 1-2 passes; the bound only guards a bug
+
+
+def _normalize_once(text: str) -> str:
+    return unicodedata.normalize("NFC", text.strip()).casefold()
+
+
 def normalize_name(name: str) -> str:
-    """Canonical form used for case/whitespace-insensitive uniqueness."""
-    return unicodedata.normalize("NFC", name.strip()).casefold()
+    """Canonical form used for case/whitespace-insensitive uniqueness.
+
+    A single NFC + casefold pass is not idempotent (casefolding can produce sequences that NFC
+    would reorder or recompose), which would make a stored `normalized_name` unfindable by
+    itself. The pass is therefore repeated until it reaches a fixed point, so
+    `normalize_name(normalize_name(x)) == normalize_name(x)` for every input.
+    """
+    current = name
+    for _ in range(_NORMALIZE_MAX_PASSES):
+        following = _normalize_once(current)
+        if following == current:
+            return current
+        current = following
+    raise ValidationError("name cannot be normalized to a stable form")
 
 
 def _as_value_error[T](check: Callable[[Any], T]) -> Callable[[Any], T]:
