@@ -11,7 +11,7 @@ from pathlib import Path
 
 from social_tracker.control.domain import ControlEvent
 from social_tracker.persistence.control_repo import SqliteControlRepository, _event_from_row
-from social_tracker.persistence.db import Database, Migration
+from social_tracker.persistence.db import Database, Migration, format_utc
 from social_tracker.persistence.sources_repo import _COLUMNS, SqliteSourceRepository, _from_row
 from social_tracker.shared.errors import ConflictError, NotFoundError, StorageError
 from social_tracker.sources.domain import Source
@@ -144,6 +144,40 @@ class StateInsertOnly(SqliteControlRepository):
             )
 
 
+def _upsert_state_without(column: str):
+    """A save_source_state whose UPDATE branch silently skips one column."""
+    updates = [
+        f"{c} = excluded.{c}"
+        for c in ("state", "consecutive_failures", "next_run_at")
+        if c != column
+    ]
+    sql = (
+        "INSERT INTO source_state (source_id, state, consecutive_failures, next_run_at) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT (source_id) DO UPDATE SET " + ", ".join(updates)
+    )
+
+    def save_source_state(self, state) -> None:
+        next_run = format_utc(state.next_run_at) if state.next_run_at is not None else None
+        with self._db.transaction() as conn:
+            conn.execute(
+                sql, (state.source_id, state.state.value, state.consecutive_failures, next_run)
+            )
+
+    return save_source_state
+
+
+class UpsertSkipsState(SqliteControlRepository):
+    save_source_state = _upsert_state_without("state")
+
+
+class UpsertSkipsFailures(SqliteControlRepository):
+    save_source_state = _upsert_state_without("consecutive_failures")
+
+
+class UpsertSkipsNextRunAt(SqliteControlRepository):
+    save_source_state = _upsert_state_without("next_run_at")
+
+
 class StateRequiresRegisteredSource(SqliteControlRepository):
     def save_source_state(self, state) -> None:
         if not self._db.query("SELECT 1 FROM sources WHERE id = ?", (state.source_id,)):
@@ -226,6 +260,9 @@ CONTROL_WRONG: dict[str, Callable[[Path], object]] = {
     "event_log_capped_at_100": lambda p: _plain(p, EventLogCappedAt100),
     "settings_without_validation": lambda p: _plain(p, SettingsWithoutValidation),
     "state_insert_only": lambda p: _plain(p, StateInsertOnly),
+    "upsert_skips_state": lambda p: _plain(p, UpsertSkipsState),
+    "upsert_skips_failures": lambda p: _plain(p, UpsertSkipsFailures),
+    "upsert_skips_next_run_at": lambda p: _plain(p, UpsertSkipsNextRunAt),
     "state_requires_registered_source": lambda p: _plain(p, StateRequiresRegisteredSource),
     "analysis_defaults_to_true": lambda p: _plain(p, DefaultsToTrue),
     "exposes_purge": lambda p: _plain(p, ExposesPurge),

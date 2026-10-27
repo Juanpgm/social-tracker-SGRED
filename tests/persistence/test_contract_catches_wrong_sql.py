@@ -16,7 +16,7 @@ import pytest
 from social_tracker.persistence.control_repo import SqliteControlRepository
 from social_tracker.persistence.db import Database
 from social_tracker.persistence.sources_repo import SqliteSourceRepository
-from social_tracker.shared.errors import DomainError
+from social_tracker.shared.errors import ConflictError, NotFoundError, StorageError
 from tests.control.repository_contract import ControlRepositoryContract
 from tests.persistence.wrong_implementations import CONTROL_WRONG, SOURCE_WRONG
 from tests.sources.repository_contract import SourceRepositoryContract
@@ -69,6 +69,9 @@ CONTROL_MUST_BE_CAUGHT_BY = {
         "test_non_string_key_is_rejected",
     ],
     "state_insert_only": ["test_save_is_an_upsert"],
+    "upsert_skips_state": ["test_save_is_an_upsert"],
+    "upsert_skips_failures": ["test_save_is_an_upsert"],
+    "upsert_skips_next_run_at": ["test_save_is_an_upsert"],
     "state_requires_registered_source": ["test_saving_state_for_an_unregistered_source_is_allowed"],
     "analysis_defaults_to_true": ["test_global_analysis_defaults_to_false"],
     "exposes_purge": ["test_the_implementation_exposes_nothing_beyond_the_port"],
@@ -79,6 +82,89 @@ CONTROL_MUST_BE_CAUGHT_BY = {
         "test_a_fresh_repository_does_not_see_another_ones_settings"
     ],
 }
+
+
+# How each wrong variant must be caught. Unlisted pairs fail by plain `assert` (AssertionError).
+# The listed ones fail differently on purpose: a missing error (`pytest.fail`), or the wrong
+# repository itself raising. Pinning type AND message means an unrelated exception (say a
+# ValidationError from a broken test fixture) can never pass as "the contract caught it".
+DID_NOT_RAISE = pytest.fail.Exception
+EXPECTED_FAILURE: dict[tuple[str, str], tuple[type[BaseException], str]] = {
+    (
+        "no_unique_name_index",
+        "test_add_duplicate_name_differing_by_unicode_composition_conflicts",
+    ): (
+        DID_NOT_RAISE,
+        "DID NOT RAISE.*ConflictError",
+    ),
+    ("no_unique_name_index", "test_update_to_another_sources_name_conflicts_and_changes_nothing"): (
+        DID_NOT_RAISE,
+        "DID NOT RAISE.*ConflictError",
+    ),
+    ("id_is_not_unique", "test_add_duplicate_id_conflicts"): (
+        DID_NOT_RAISE,
+        "DID NOT RAISE.*ConflictError",
+    ),
+    ("delete_ignores_missing", "test_delete_missing_raises_not_found"): (
+        DID_NOT_RAISE,
+        "DID NOT RAISE.*NotFoundError",
+    ),
+    ("delete_ignores_missing", "test_delete_twice_raises_not_found_the_second_time"): (
+        DID_NOT_RAISE,
+        "DID NOT RAISE.*NotFoundError",
+    ),
+    ("update_ignores_missing", "test_update_missing_raises_not_found"): (
+        DID_NOT_RAISE,
+        "DID NOT RAISE.*NotFoundError",
+    ),
+    ("conflict_becomes_storage_error", "test_add_duplicate_id_conflicts"): (
+        StorageError,
+        "duplicate",
+    ),
+    (
+        "conflict_becomes_storage_error",
+        "test_add_duplicate_name_differing_by_unicode_composition_conflicts",
+    ): (StorageError, "duplicate"),
+    (
+        "update_is_delete_then_add",
+        "test_update_to_another_sources_name_conflicts_and_changes_nothing",
+    ): (
+        NotFoundError,
+        "source not found",
+    ),
+    ("settings_without_validation", "test_invalid_value_is_rejected_and_keeps_the_old_one"): (
+        StorageError,
+        "SQLITE_CONSTRAINT_NOTNULL",
+    ),
+    (
+        "settings_without_validation",
+        "test_global_analysis_rejects_other_values_and_keeps_the_old_one",
+    ): (StorageError, "SQLITE_CONSTRAINT_CHECK"),
+    ("settings_without_validation", "test_non_string_key_is_rejected"): (
+        DID_NOT_RAISE,
+        "DID NOT RAISE.*ValidationError",
+    ),
+    ("state_insert_only", "test_save_is_an_upsert"): (ConflictError, "unique constraint violated"),
+    ("upsert_skips_next_run_at", "test_save_is_an_upsert"): (
+        StorageError,
+        "SQLITE_CONSTRAINT_CHECK",
+    ),
+    (
+        "state_requires_registered_source",
+        "test_saving_state_for_an_unregistered_source_is_allowed",
+    ): (
+        NotFoundError,
+        "source not found",
+    ),
+    ("forgets_next_run_at", "test_save_and_get_round_trip_including_backoff_schedule"): (
+        StorageError,
+        "SQLITE_CONSTRAINT_CHECK",
+    ),
+}
+
+
+def expected_failure(wrong: str, test_name: str) -> tuple[type[BaseException], str | None]:
+    return EXPECTED_FAILURE.get((wrong, test_name), (AssertionError, None))
 
 
 def _run(contract_cls, build: Callable[[Path], object], root: Path, test_name: str) -> None:
@@ -116,6 +202,16 @@ def test_every_wrong_variant_has_a_catching_test():
     assert set(CONTROL_MUST_BE_CAUGHT_BY) == set(CONTROL_WRONG)
 
 
+def test_every_pinned_failure_refers_to_a_real_wrong_variant_and_test():
+    pairs = {
+        (wrong, test)
+        for mapping in (SOURCE_MUST_BE_CAUGHT_BY, CONTROL_MUST_BE_CAUGHT_BY)
+        for wrong, tests in mapping.items()
+        for test in tests
+    }
+    assert set(EXPECTED_FAILURE) <= pairs
+
+
 def test_the_catching_tests_exist_and_are_not_parametrized():
     # They are invoked directly, so a typo or a parametrized test would fail for the wrong reason.
     for contract_cls, mapping in (
@@ -136,7 +232,8 @@ def test_the_catching_tests_exist_and_are_not_parametrized():
 )
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_source_contract_catches_wrong_sqlite_repositories(tmp_path, wrong, test_name):
-    with pytest.raises((AssertionError, DomainError, pytest.fail.Exception)):
+    exc_type, match = expected_failure(wrong, test_name)
+    with pytest.raises(exc_type, match=match):
         _run(SourceRepositoryContract, SOURCE_WRONG[wrong], tmp_path, test_name)
 
 
@@ -146,7 +243,8 @@ def test_source_contract_catches_wrong_sqlite_repositories(tmp_path, wrong, test
 )
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_control_contract_catches_wrong_sqlite_repositories(tmp_path, wrong, test_name):
-    with pytest.raises((AssertionError, DomainError, pytest.fail.Exception)):
+    exc_type, match = expected_failure(wrong, test_name)
+    with pytest.raises(exc_type, match=match):
         _run(ControlRepositoryContract, CONTROL_WRONG[wrong], tmp_path, test_name)
 
 

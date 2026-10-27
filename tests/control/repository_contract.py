@@ -163,9 +163,26 @@ class ControlRepositoryContract:
         assert got.next_run_at.utcoffset() == timedelta(0)  # type: ignore[union-attr]
 
     def test_save_is_an_upsert(self, repo: ControlRepository):
-        repo.save_source_state(SourceState("src_one", CollectionState.IDLE))
-        repo.save_source_state(SourceState("src_one", CollectionState.COLLECTING))
-        assert repo.get_source_state("src_one").state is CollectionState.COLLECTING  # type: ignore[union-attr]
+        # Every save replaces EVERY column of the row, whichever column changes. The sequence
+        # moves each of state, consecutive_failures and next_run_at on its own and together,
+        # including back to NULL, and compares the whole state after each save.
+        t1, t2 = AT + timedelta(minutes=10), AT + timedelta(minutes=45)
+        sequence = [
+            SourceState("src_one", CollectionState.IDLE),
+            SourceState("src_one", CollectionState.COLLECTING),
+            SourceState("src_one", CollectionState.COLLECTING, 3),
+            SourceState("src_one", CollectionState.COLLECTING, 4),
+            SourceState("src_one", CollectionState.BACKOFF, 4, t1),
+            SourceState("src_one", CollectionState.BACKOFF, 4, t2),
+            SourceState("src_one", CollectionState.BACKOFF, 1, t2),
+            SourceState("src_one", CollectionState.FAILED, 5),
+            SourceState("src_one", CollectionState.DISABLED),
+            SourceState("src_one", CollectionState.IDLE, 2),
+        ]
+        for state in sequence:
+            repo.save_source_state(state)
+            assert repo.get_source_state("src_one") == state
+        assert repo.get_source_state("src_two") is None  # a save never touches another source
 
     def test_sources_are_independent(self, repo: ControlRepository):
         repo.save_source_state(SourceState("src_one", CollectionState.IDLE))
