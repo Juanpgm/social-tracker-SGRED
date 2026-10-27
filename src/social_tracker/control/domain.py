@@ -254,3 +254,11 @@ class ControlEvent:
         if self.source_id is not None:
             validate_slug(self.source_id)
         _require_text(self.detail, "detail", MAX_EVENT_DETAIL, non_blank=False)
+
+
+SETTING_SOURCE_ANALYSIS_PREFIX = "source_analysis."
+
+
+def source_analysis_key(source_id: str) -> str:
+    """Settings key holding the per-source analysis flag ("true"/"false"; absent means off)."""
+    return SETTING_SOURCE_ANALYSIS_PREFIX + validate_slug(source_id)
