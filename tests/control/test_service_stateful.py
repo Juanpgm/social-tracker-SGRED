@@ -11,6 +11,7 @@ Whatever sequence of operations runs, after every step:
 
 import shutil
 import tempfile
+from collections import Counter
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -18,7 +19,7 @@ from typing import Any
 import pytest
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
-from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
+from hypothesis.stateful import RuleBasedStateMachine, invariant, rule, run_state_machine_as_test
 
 from social_tracker.control.domain import InvalidTransition
 from social_tracker.control.service import ControlService
@@ -40,6 +41,7 @@ from tests.sources.factories import payload
 from tests.sources.registry_contract import data
 
 IDS = ["src_a", "src_b", "src_c"]
+WORKER_METHODS = [method for method, _ in OPERATIONS] + ["start_collection"]
 THRESHOLDS = st.sampled_from([0.0, 0.1, 0.5, 0.5000000001, 0.9, 1.0]) | st.floats(0.0, 1.0)
 
 
@@ -55,6 +57,7 @@ class Wrapped:
 
 class ControlMachine(RuleBasedStateMachine):
     open_env: Callable[[], tuple[Env, Callable[[], None]]]
+    visits: Counter[str] = Counter()  # which interesting paths a run really took
 
     def wrap_control(self, control: Any) -> Any:
         return control
@@ -87,13 +90,18 @@ class ControlMachine(RuleBasedStateMachine):
         self.registry.add(item, **WHO)
         self.known.add(source_id)
         self.changes += 1
+        self.visits["added_enabled" if enabled else "added_disabled"] += 1
 
     def _flip(self, method: str, source_id: str) -> None:
         if source_id not in self.known:
             with pytest.raises(NotFoundError):
                 getattr(self.registry, method)(source_id, **WHO)
             return
-        self._count(getattr(self.registry, method)(source_id, **WHO))
+        state = self.env.control.get_source_state(source_id)
+        result = getattr(self.registry, method)(source_id, **WHO)
+        if result.changed and method == "disable" and state is not None:
+            self.visits[f"disabled_while_{state.state.value}"] += 1
+        self._count(result)
 
     @rule(source_id=st.sampled_from(IDS))
     def enable_source(self, source_id: str) -> None:
@@ -109,6 +117,9 @@ class ControlMachine(RuleBasedStateMachine):
             with pytest.raises(NotFoundError):
                 self.registry.delete(source_id, **WHO)
             return
+        self.visits[
+            "deleted_enabled" if self.env.sources.get(source_id).enabled else "deleted"
+        ] += 1
         self.registry.delete(source_id, **WHO)
         self.known.discard(source_id)
         self.changes += 1
@@ -130,7 +141,11 @@ class ControlMachine(RuleBasedStateMachine):
         sources = [
             parse_source(payload(id=sid, name=f"Name {sid}", enabled=on)) for sid, on in entries
         ]
+        before = {s.id: s.enabled for s in self.env.sources.list()}
         report = self.registry.import_sources(dump_sources(sources), **WHO)
+        for sid in report.updated:
+            if before[sid] != dict(entries)[sid]:
+                self.visits["import_flipped_enabled"] += 1
         self.known.update(report.added)
         written = len(report.added) + len(report.updated)
         self.changes += written + (1 if written else 0)  # one event per entry + the summary
@@ -151,17 +166,36 @@ class ControlMachine(RuleBasedStateMachine):
 
     @rule(
         source_id=st.sampled_from(IDS),
-        operation=st.sampled_from(OPERATIONS),
+        session=st.lists(st.sampled_from(WORKER_METHODS), min_size=1, max_size=4),
         jitter=st.sampled_from([0.0, 7.5]),
     )
-    def collection(self, source_id: str, operation: tuple, jitter: float) -> None:
-        method, _ = operation
-        kwargs = {"jitter_s": jitter} if method == "fail_collection" else {}
-        try:
-            result = getattr(self.service, method)(source_id, **WHO, **kwargs)
-        except (InvalidTransition, NotFoundError):
-            return
-        self._count(result)
+    def collection(self, source_id: str, session: list[str], jitter: float) -> None:
+        """A short run of worker calls on one source (start is listed twice: it opens a run)."""
+        for method in session:
+            kwargs = {"jitter_s": jitter} if method == "fail_collection" else {}
+            try:
+                result = getattr(self.service, method)(source_id, **WHO, **kwargs)
+            except InvalidTransition:
+                if source_id in self.known and not self.env.sources.get(source_id).enabled:
+                    self.visits["worker_refused_on_disabled"] += 1
+                continue
+            except NotFoundError:
+                return
+            self.visits[f"worker_{method}"] += 1
+            self._count(result)
+
+    @rule(source_id=st.sampled_from(IDS), failures=st.integers(0, 5))
+    def bring_up_a_running_source(self, source_id: str, failures: int) -> None:
+        """Register and enable a source if needed, start it, and let it fail a few times, so the
+        later disable/delete/import rules meet collecting, backoff and failed states."""
+        if source_id not in self.known:
+            self.add_source(source_id, False)
+        self.enable_source(source_id)
+        for _ in range(failures + 1):
+            self.collection(source_id, ["start_collection", "fail_collection"], 0.0)
+            self.env.clock.advance(timedelta(hours=2))  # backoff always elapses before a retry
+            self.collection(source_id, ["retry_collection"], 0.0)
+        self.collection(source_id, ["start_collection"], 0.0)
 
     @rule(minutes=st.integers(0, 90))
     def pass_time(self, minutes: int) -> None:
@@ -220,11 +254,41 @@ TestInMemoryStateful.settings = settings(
 )
 TestSqliteStateful = SqliteMachine.TestCase
 TestSqliteStateful.settings = settings(
-    max_examples=25,
-    stateful_step_count=25,
+    max_examples=60,
+    stateful_step_count=30,
     deadline=None,
     suppress_health_check=list(HealthCheck),
 )
+
+
+def test_the_random_walk_really_reaches_the_paths_the_invariant_is_about():
+    # Guard against a vacuous pass: a walk that never disables a running source, never imports a
+    # flipped flag or never sees a worker refused on a disabled source would prove nothing.
+    InMemoryMachine.visits = Counter()
+    run_state_machine_as_test(
+        InMemoryMachine,
+        settings=settings(
+            max_examples=120,
+            stateful_step_count=40,
+            deadline=None,
+            derandomize=True,  # the same walk every time, so this guard can never flake
+            suppress_health_check=list(HealthCheck),
+        ),
+    )
+    visits = InMemoryMachine.visits
+    wanted = [
+        "added_enabled",
+        "added_disabled",
+        "deleted_enabled",
+        "import_flipped_enabled",
+        "disabled_while_idle",
+        "disabled_while_collecting",
+        "disabled_while_backoff",
+        "worker_refused_on_disabled",
+        "worker_start_collection",
+        "worker_fail_collection",
+    ]
+    assert all(visits[name] > 0 for name in wanted), {n: visits[n] for n in wanted}
 
 
 # ---- the invariants must be able to fail ------------------------------------------------
