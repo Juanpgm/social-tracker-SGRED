@@ -17,7 +17,8 @@ What it reads
   `hace una hora` count back from the publication time (the first one in the text). ABSOLUTE last:
   a time of day (`a las 3:15 pm`, `14:05 UTC`, `ayer a las 11:30 pm`) read as local time (the
   configurable offset, Colombia UTC-5 by default) unless it says UTC/GMT, on the publication day,
-  or the day before when that would be later than the publication.
+  or the day before when that would be later than the publication. `ayer`/`anoche` with no time
+  of day cannot be placed in a time window and count as HISTORIC.
 - PLACE: the capitalised name after `en`, `cerca de`, `frente a`..., folded to plain lowercase
   letters (at most `MAX_PLACE_CHARS`), so it is safe to store and to show.
 
@@ -328,6 +329,8 @@ def _time(plain: str, published: datetime, offset: timedelta) -> TimeClaim:
     instant = _absolute(plain, published, offset)
     if instant is not None:
         return TimeClaim(TimeKind.ABSOLUTE, instant)
+    if _DAY_BEFORE.search(plain):  # "ayer" without a time of day cannot be placed in a window
+        return TimeClaim(TimeKind.HISTORIC)
     return TimeClaim()
 
 

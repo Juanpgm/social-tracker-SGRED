@@ -318,6 +318,17 @@ def test_the_date_of_the_publication_day_is_not_historic():
     assert when("sismo en 2026").kind is TimeKind.NONE
 
 
+@pytest.mark.parametrize("text", ["el sismo de ayer", "se sintió anoche un temblor", "ayer tembló"])
+def test_yesterday_without_a_time_of_day_cannot_be_placed_so_it_is_historic(text):
+    claim = when(text)
+    assert claim.kind is TimeKind.HISTORIC
+    assert claim.at is None
+
+
+def test_yesterday_with_a_relative_time_keeps_the_relative_time():
+    assert when("ayer, hace 5 minutos").kind is TimeKind.RELATIVE
+
+
 def test_an_impossible_date_is_ignored_not_historic():
     assert when("el 31 de febrero").kind is TimeKind.NONE
 
