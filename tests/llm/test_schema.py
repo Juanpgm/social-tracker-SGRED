@@ -208,3 +208,14 @@ def test_a_non_text_body_has_an_empty_audit_text():
     with pytest.raises(JudgeError) as caught:
         parse_judge_output(None, model="m")
     assert caught.value.raw_output == ""
+
+
+@pytest.mark.parametrize(("length", "valid"), [(65_535, True), (65_536, True), (65_537, False)])
+def test_the_size_cap_of_an_output_is_exact(length: int, valid: bool):
+    text = raw()
+    padded = text + " " * (length - len(text))
+    assert len(padded) == length
+    if valid:
+        assert parse_judge_output(padded, model="m").label is Label.UNINTENTIONAL_RUMOR
+    else:
+        invalid(padded)
