@@ -12,7 +12,10 @@
 3. COMMIT (one transaction). If the source was disabled, deleted or re-enabled meanwhile, or is
    no longer `collecting`, the unit is DISCARDED: nothing is stored and no transition is made
    (the registry already moved the state). Otherwise the items of the whole fetch, the
-   `collection_succeeded` transition and the fetch status commit together or not at all.
+   `collection_succeeded` transition and the fetch status commit together or not at all. What a
+   hostile feed may cost is bounded: entries past the per-fetch byte cap or the per-source
+   item/byte quota are dropped and counted (`fetch_quota`, `source_quota`), and dated entries
+   older than the retention horizon are skipped (`older_than_retention`, see `items.domain`).
    Global analysis turned off meanwhile does not waste the unit already fetched (PC-6).
 4. FAILURE (one transaction) for any error in steps 2-3: `collection_failed` with exponential
    backoff, the sanitized reason stored as the source's last error, and `Retry-After` honoured
@@ -40,6 +43,7 @@ from social_tracker.collector.domain import (
     FetchError,
     FetchRequest,
     FetchResponse,
+    IngestLimits,
     is_due,
 )
 from social_tracker.collector.feed import FeedError, parse_feed
@@ -53,6 +57,7 @@ from social_tracker.control.domain import (
 )
 from social_tracker.control.ports import ControlRepository
 from social_tracker.control.service import ControlService
+from social_tracker.items.domain import retention_horizon
 from social_tracker.items.ports import ItemRepository
 from social_tracker.shared.clock import Clock
 from social_tracker.shared.errors import (
@@ -72,6 +77,7 @@ INTERRUPTED = "interrupted collection"
 # and storing. The composition root derives the value from the fetcher's real deadline.
 DEFAULT_CLAIM_TIMEOUT_S = 120.0
 _STARTED_EVENT = "collection_started"
+DISCARD_SOURCE_QUOTA = "source_quota"
 _LOG = logging.getLogger("social_tracker.collector")
 
 
@@ -130,6 +136,8 @@ class CollectorService:
         *,
         jitter: Callable[[float], float] = _no_jitter,
         claim_timeout_s: float = DEFAULT_CLAIM_TIMEOUT_S,
+        retention_days: int | None = None,
+        limits: IngestLimits | None = None,
     ) -> None:
         if (
             isinstance(claim_timeout_s, bool)
@@ -139,6 +147,8 @@ class CollectorService:
         ):
             raise ValueError("claim_timeout_s must be a positive, finite number")
         self.claim_timeout_s = float(claim_timeout_s)
+        self._retention_days = retention_days
+        self._limits = limits or IngestLimits()
         self._sources = sources
         self._control = control
         self._repo = control_repo
@@ -213,6 +223,8 @@ class CollectorService:
             source_name=claim.source.name,
             fetched_at=at,
             over_limit=parsed.over_limit,
+            horizon=retention_horizon(at, self._retention_days),
+            max_total_bytes=self._limits.max_bytes_per_fetch,
         )
         return _Fetched(response, report, at)
 
@@ -234,8 +246,21 @@ class CollectorService:
                 new = duplicate = 0
                 discarded: Mapping[str, int] = {}
             else:
-                added = self._items.add_new(fetched.report.items)
-                new, duplicate, discarded = added.new, added.duplicate, fetched.report.discarded
+                added = self._items.add_new(
+                    fetched.report.items,
+                    max_items=self._limits.max_items_per_source,
+                    max_bytes=self._limits.max_bytes_per_source,
+                )
+                new, duplicate = added.new, added.duplicate
+                discarded = dict(fetched.report.discarded)
+                if added.over_quota:
+                    discarded[DISCARD_SOURCE_QUOTA] = added.over_quota
+                    _LOG.warning(
+                        "source=%s: %s reached, %d item(s) not stored",
+                        source_id,
+                        DISCARD_SOURCE_QUOTA,
+                        added.over_quota,
+                    )
             etag, modified = fetched.response.etag, fetched.response.last_modified
             if fetched.report is None and previous is not None:
                 # a "not modified" answer keeps the validators it did not resend

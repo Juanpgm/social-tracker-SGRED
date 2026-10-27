@@ -88,6 +88,38 @@ class FetchError(DomainError):
         return self.kind is FetchErrorKind.HTTP and self.status in _DEGRADED_STATUSES
 
 
+DEFAULT_MAX_ITEMS_PER_SOURCE = 100_000
+DEFAULT_MAX_BYTES_PER_SOURCE = 512 * 1024 * 1024
+DEFAULT_MAX_BYTES_PER_FETCH = 16 * 1024 * 1024
+
+
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive whole number")
+    return value
+
+
+@dataclass(frozen=True)
+class IngestLimits:
+    """What a hostile or broken feed may cost the database. Generous by default: the point is a
+    ceiling, not a budget. Over a limit the extra entries are dropped and counted (reasons
+    `fetch_quota` and `source_quota`); the fetch itself still succeeds.
+
+    - `max_bytes_per_fetch`: title, text and raw payload bytes of the items of ONE fetch;
+    - `max_items_per_source` / `max_bytes_per_source`: what ONE source holds at any time
+      (retention frees room as items expire).
+    """
+
+    max_items_per_source: int = DEFAULT_MAX_ITEMS_PER_SOURCE
+    max_bytes_per_source: int = DEFAULT_MAX_BYTES_PER_SOURCE
+    max_bytes_per_fetch: int = DEFAULT_MAX_BYTES_PER_FETCH
+
+    def __post_init__(self) -> None:
+        _positive_int(self.max_items_per_source, "max_items_per_source")
+        _positive_int(self.max_bytes_per_source, "max_bytes_per_source")
+        _positive_int(self.max_bytes_per_fetch, "max_bytes_per_fetch")
+
+
 @dataclass(frozen=True)
 class FetchRequest:
     url: str

@@ -6,5 +6,5 @@ from tests.items.repository_contract import ItemRepositoryContract
 
 
 class TestInMemoryItemRepository(ItemRepositoryContract):
-    def make_repo(self) -> ItemRepository:
-        return InMemoryItemRepository()
+    def make_repo(self, **options: int) -> ItemRepository:
+        return InMemoryItemRepository(**options)

@@ -26,10 +26,10 @@ class TestSqliteItemRepositoryContract(ItemRepositoryContract):
         for db in self._opened:
             db.close()
 
-    def make_repo(self) -> ItemRepository:
+    def make_repo(self, **options: int) -> ItemRepository:
         db = Database(self._root / f"items-{len(self._opened)}.db")
         self._opened.append(db)
-        return SqliteItemRepository(db)
+        return SqliteItemRepository(db, **options)
 
 
 @pytest.fixture

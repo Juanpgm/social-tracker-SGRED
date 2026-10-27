@@ -5,8 +5,11 @@ every call, exactly like the in-memory reference. Every row read back is rebuilt
 so a tampered row is a `StorageError`, never a half-valid object.
 
 Dedup is decided inside the write transaction (`BEGIN IMMEDIATE`, so concurrent writers queue):
-each item is inserted only if no row of the same source has its external id or its content hash,
-which makes a batch idempotent and a repeated or racing ingest store nothing twice.
+each item is inserted only if no row of the same source has its external id or its content hash
+and no tombstone of the source has its external id, which makes a batch idempotent and a repeated
+or racing ingest store nothing twice, and keeps a purged entry from coming back (see
+`item_tombstones`, migration 0003). Quotas are checked in the same transaction, so two writers
+cannot both squeeze in under the same cap.
 
 User search text never reaches SQL as syntax: `search_terms` reduces it to plain words and each
 word is bound inside a double-quoted FTS5 string, so `AND`, `NEAR`, `*`, `:` and quotes are data.
@@ -20,12 +23,16 @@ from typing import Any
 
 from social_tracker.items.domain import (
     DEFAULT_LIST_LIMIT,
+    MAX_TOMBSTONES_PER_SOURCE,
     AddReport,
     Item,
     ItemStatus,
+    SourceUsage,
+    item_size_bytes,
     raw_json,
     search_terms,
     validate_limit,
+    validate_quota,
 )
 from social_tracker.persistence.db import Database, format_utc, parse_utc
 from social_tracker.shared.errors import DomainError, StorageError, ValidationError
@@ -40,7 +47,27 @@ _INSERT_IF_NEW = (
     f"INSERT INTO items ({_COLUMNS}) "
     "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
     "WHERE NOT EXISTS (SELECT 1 FROM items WHERE source_id = ? "
-    "AND (external_id = ? OR content_hash = ?))"
+    "AND (external_id = ? OR content_hash = ?)) "
+    "AND NOT EXISTS (SELECT 1 FROM item_tombstones WHERE source_id = ? AND external_id = ?)"
+)
+_IS_KNOWN = (
+    "SELECT 1 FROM items WHERE source_id = ? AND (external_id = ? OR content_hash = ?) "
+    "UNION ALL SELECT 1 FROM item_tombstones WHERE source_id = ? AND external_id = ?"
+)
+_USAGE = (
+    "SELECT count(*), COALESCE(SUM(length(CAST(title AS BLOB)) + length(CAST(text AS BLOB)) "
+    "+ length(CAST(raw_payload AS BLOB))), 0) FROM items WHERE source_id = ?"
+)
+_UNDATED_FLAG = (
+    "EXISTS (SELECT 1 FROM json_each(items.flags) WHERE json_each.value = 'published_at_missing')"
+)
+_TOMBSTONE_FROM = (
+    "INSERT OR IGNORE INTO item_tombstones (source_id, external_id) "
+    "SELECT source_id, external_id FROM items WHERE "
+)
+_FORGET_OLDEST = (
+    "DELETE FROM item_tombstones WHERE source_id = ? AND seq <= "
+    "(SELECT seq FROM item_tombstones WHERE source_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?)"
 )
 _NEWEST_FIRST = " ORDER BY published_at DESC, id DESC LIMIT ?"
 
@@ -99,21 +126,78 @@ def _insert_params(item: Item) -> tuple[Any, ...]:
         item.source_id,
         item.external_id,
         item.content_hash,
+        item.source_id,
+        item.external_id,
     )
 
 
 class SqliteItemRepository:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, max_tombstones_per_source: int = MAX_TOMBSTONES_PER_SOURCE):
         self._db = db
+        self._max_tombstones = max_tombstones_per_source
 
-    def add_new(self, items: Sequence[Item]) -> AddReport:
+    def add_new(
+        self,
+        items: Sequence[Item],
+        *,
+        max_items: int | None = None,
+        max_bytes: int | None = None,
+    ) -> AddReport:
         if not all(isinstance(item, Item) for item in items):
             raise ValidationError("items must be Item objects")
-        new = 0
+        item_cap = validate_quota(max_items, "max_items")
+        byte_cap = validate_quota(max_bytes, "max_bytes")
+        limited = item_cap is not None or byte_cap is not None
+        new = duplicate = over = 0
+        held: dict[str, list[int]] = {}
         with self._db.transaction() as conn:
             for item in items:
-                new += conn.execute(_INSERT_IF_NEW, _insert_params(item)).rowcount
-        return AddReport(new=new, duplicate=len(items) - new)
+                cost = item_size_bytes(item) if limited else 0
+                if limited:
+                    count, used = held.setdefault(
+                        item.source_id, list(conn.execute(_USAGE, (item.source_id,)).fetchone())
+                    )
+                    full = (item_cap is not None and count >= item_cap) or (
+                        byte_cap is not None and used + cost > byte_cap
+                    )
+                    if full:
+                        known = conn.execute(
+                            _IS_KNOWN,
+                            (
+                                item.source_id,
+                                item.external_id,
+                                item.content_hash,
+                                item.source_id,
+                                item.external_id,
+                            ),
+                        ).fetchone()
+                        duplicate, over = duplicate + bool(known), over + (known is None)
+                        continue
+                if conn.execute(_INSERT_IF_NEW, _insert_params(item)).rowcount:
+                    new += 1
+                    if limited:
+                        held[item.source_id][0] += 1
+                        held[item.source_id][1] += cost
+                else:
+                    duplicate += 1
+        return AddReport(new=new, duplicate=duplicate, over_quota=over)
+
+    def source_usage(self, source_id: str) -> SourceUsage:
+        count, size = self._db.query(_USAGE, (source_id,))[0]
+        return SourceUsage(items=int(count), bytes=int(size))
+
+    def _remember(self, conn: sqlite3.Connection, condition: str, params: tuple[Any, ...]) -> None:
+        """Leave a tombstone for each item `condition` selects, then forget the oldest ones of
+        the touched sources beyond the cap. Runs before the delete, in its transaction."""
+        sources = [
+            row[0]
+            for row in conn.execute(
+                f"SELECT DISTINCT source_id FROM items WHERE {condition}", params
+            ).fetchall()
+        ]
+        conn.execute(f"{_TOMBSTONE_FROM}{condition}", params)
+        for source_id in sources:
+            conn.execute(_FORGET_OLDEST, (source_id, source_id, self._max_tombstones))
 
     def get(self, item_id: str) -> Item | None:
         rows = self._db.query(f"{_SELECT} WHERE id = ?", (item_id,))
@@ -156,13 +240,14 @@ class SqliteItemRepository:
     def purge_fetched_before(self, cutoff: datetime) -> int:
         text = format_utc(cutoff)  # raises ValidationError for a naive or non-datetime value
         with self._db.transaction() as conn:
+            self._remember(conn, f"fetched_at < ? AND {_UNDATED_FLAG}", (text,))
             return conn.execute("DELETE FROM items WHERE fetched_at < ?", (text,)).rowcount
 
     def purge_classified(self) -> int:
+        classified = (ItemStatus.CLASSIFIED.value,)
         with self._db.transaction() as conn:
-            return conn.execute(
-                "DELETE FROM items WHERE status = ?", (ItemStatus.CLASSIFIED.value,)
-            ).rowcount
+            self._remember(conn, "status = ?", classified)
+            return conn.execute("DELETE FROM items WHERE status = ?", classified).rowcount
 
     # Defined last: the name shadows the builtin inside the class body.
     def list(self, *, source_id: str | None = None, limit: int = DEFAULT_LIST_LIMIT) -> list[Item]:

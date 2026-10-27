@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,13 @@ def rss(*entries: tuple[str, str, str], channel_extra: str = "") -> bytes:
         f'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>t</title>'
         f"{channel_extra}{items}</channel></rss>"
     ).encode()
+
+
+def dated_now(document: bytes) -> bytes:
+    """`document` with every entry dated now: for tests that run on the real clock, where the
+    fixture date would fall outside the retention horizon."""
+    today = format_datetime(datetime.now(UTC), usegmt=True)
+    return document.replace(b"Sun, 01 Mar 2026 07:00:00 GMT", today.encode())
 
 
 FEED = rss(("a", "Sismo en Cali", "Un temblor sacudio la ciudad"), ("b", "Otra noticia", "Texto b"))

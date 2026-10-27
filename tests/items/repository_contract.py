@@ -12,7 +12,13 @@ from datetime import timedelta
 
 import pytest
 
-from social_tracker.items.domain import AddReport, ItemKind, ItemStatus
+from social_tracker.items.domain import (
+    AddReport,
+    ItemKind,
+    ItemStatus,
+    SourceUsage,
+    item_size_bytes,
+)
 from social_tracker.items.ports import ItemRepository
 from social_tracker.shared.errors import ValidationError
 from tests.items.factories import NOW, make_item
@@ -67,7 +73,9 @@ HOSTILE_QUERIES = [
 class ItemRepositoryContract:
     ALLOWED_EXTRA_PUBLIC: frozenset[str] = frozenset()
 
-    def make_repo(self) -> ItemRepository:
+    def make_repo(self, **options: int) -> ItemRepository:
+        """A fresh repository; `options` are constructor settings such as
+        `max_tombstones_per_source`."""
         raise NotImplementedError
 
     @pytest.fixture
@@ -343,11 +351,177 @@ class ItemRepositoryContract:
         assert repo.purge_classified() == 1
         assert [i.external_id for i in repo.list()] == ["pending"]
 
-    def test_a_purged_item_can_be_collected_again(self, repo):
+    def test_a_purged_dated_item_is_not_remembered_by_the_repository(self, repo):
+        # A dated entry is kept out by the collector's retention horizon instead (it is older
+        # than the horizon by construction), so the store keeps no tombstone for it.
         item = make_item("a", fetched_at=NOW - timedelta(days=60))
         repo.add_new([item])
         repo.purge_fetched_before(NOW)
         assert repo.add_new([item]) == AddReport(new=1, duplicate=0)
+
+    # ---- tombstones: what a purge must not let come back ----
+
+    def test_an_undated_item_purged_by_age_is_not_ingested_again(self, repo):
+        item = make_item("a", flags=("published_at_missing",), fetched_at=NOW - timedelta(days=60))
+        repo.add_new([item])
+        assert repo.purge_fetched_before(NOW) == 1
+        assert repo.count() == 0
+        assert repo.add_new([item]) == AddReport(new=0, duplicate=1)
+        assert repo.count() == 0
+
+    def test_a_classified_item_purged_for_retention_zero_is_not_ingested_again(self, repo):
+        dated, undated = (
+            make_item("a", title="a", text="a"),
+            make_item("b", title="b", text="b", flags=("published_at_missing",)),
+        )
+        repo.add_new([dated, undated])
+        repo.set_status(dated.id, ItemStatus.CLASSIFIED)
+        repo.set_status(undated.id, ItemStatus.CLASSIFIED)
+        assert repo.purge_classified() == 2
+        assert repo.add_new([dated, undated]) == AddReport(new=0, duplicate=2)
+        assert repo.count() == 0
+
+    def test_a_tombstone_blocks_the_same_external_id_even_with_other_content(self, repo):
+        repo.add_new([make_item("a", flags=("published_at_missing",), fetched_at=NOW)])
+        repo.purge_fetched_before(NOW + timedelta(days=1))
+        edited = make_item("a", text="the publisher edited it", flags=("published_at_missing",))
+        assert repo.add_new([edited]) == AddReport(new=0, duplicate=1)
+
+    def test_a_tombstone_only_covers_its_own_source(self, repo):
+        repo.add_new([make_item("a", source_id="src_one", flags=("published_at_missing",))])
+        repo.purge_fetched_before(NOW + timedelta(days=1))
+        other = make_item("a", source_id="src_two", flags=("published_at_missing",))
+        assert repo.add_new([other]) == AddReport(new=1, duplicate=0)
+
+    def test_new_items_next_to_a_tombstoned_one_are_still_stored(self, repo):
+        old = make_item("old", title="old", text="old", flags=("published_at_missing",))
+        repo.add_new([old])
+        repo.purge_fetched_before(NOW + timedelta(days=1))
+        fresh = make_item("fresh", title="fresh", text="fresh")
+        assert repo.add_new([old, fresh]) == AddReport(new=1, duplicate=1)
+        assert [i.external_id for i in repo.list()] == ["fresh"]
+
+    def test_purging_twice_keeps_one_tombstone_and_nothing_breaks(self, repo):
+        item = make_item("a", flags=("published_at_missing",))
+        repo.add_new([item])
+        repo.purge_fetched_before(NOW + timedelta(days=1))
+        repo.purge_fetched_before(NOW + timedelta(days=1))
+        repo.purge_classified()
+        assert repo.add_new([item]) == AddReport(new=0, duplicate=1)
+
+    def test_the_oldest_tombstones_of_a_source_are_forgotten_beyond_the_cap(self):
+        repo = self.make_repo(max_tombstones_per_source=3)
+        items = [
+            make_item(f"g{n}", title=f"t{n}", text=f"x{n}", flags=("published_at_missing",))
+            for n in range(5)
+        ]
+        for item in items:  # one purge each, so their tombstones are written in this order
+            repo.add_new([item])
+            repo.purge_fetched_before(NOW + timedelta(days=1))
+        report = repo.add_new(items)
+        assert report == AddReport(new=2, duplicate=3)  # g0 and g1 were forgotten
+        assert {i.external_id for i in repo.list()} == {"g0", "g1"}
+
+    def test_the_tombstone_cap_is_per_source(self):
+        repo = self.make_repo(max_tombstones_per_source=1)
+        one = make_item("a", source_id="src_one", flags=("published_at_missing",))
+        two = make_item("a", source_id="src_two", flags=("published_at_missing",))
+        repo.add_new([one, two])
+        repo.purge_fetched_before(NOW + timedelta(days=1))
+        assert repo.add_new([one, two]) == AddReport(new=0, duplicate=2)
+
+    # ---- per-source quota ----
+
+    def test_usage_counts_the_items_and_bytes_of_one_source(self, repo):
+        a = make_item("a", title="Title", text="Body")
+        b = make_item("b", source_id="src_two", title="Other", text="Other body")
+        repo.add_new([a, b])
+        usage = repo.source_usage("src_news")
+        assert usage.items == 1
+        assert usage.bytes == item_size_bytes(a)
+        assert repo.source_usage("src_two").items == 1
+        assert repo.source_usage("src_none") == SourceUsage(0, 0)
+
+    def test_usage_counts_bytes_not_characters(self, repo):
+        item = make_item("a", title="ñandú", text="日本語のテキスト")
+        repo.add_new([item])
+        assert repo.source_usage("src_news").bytes == item_size_bytes(item)
+        assert item_size_bytes(item) > len(item.title) + len(item.text)
+
+    @pytest.mark.parametrize(
+        ("room", "stored", "refused"), [(4, 3, 0), (3, 3, 0), (2, 2, 1), (1, 1, 2)]
+    )
+    def test_the_item_quota_stops_new_items_at_the_cap(self, repo, room, stored, refused):
+        batch = [make_item(f"g{n}", title=f"t{n}", text=f"x{n}") for n in range(3)]
+        report = repo.add_new(batch, max_items=room)
+        assert report == AddReport(new=stored, duplicate=0, over_quota=refused)
+        assert [i.external_id for i in sorted(repo.list(), key=lambda i: i.external_id)] == [
+            f"g{n}" for n in range(stored)
+        ]
+
+    def test_existing_items_of_the_source_use_up_the_item_quota(self, repo):
+        repo.add_new([make_item("old", title="old", text="old")])
+        batch = [make_item(f"g{n}", title=f"t{n}", text=f"x{n}") for n in range(3)]
+        assert repo.add_new(batch, max_items=3) == AddReport(new=2, duplicate=0, over_quota=1)
+        assert repo.source_usage("src_news").items == 3
+
+    def test_other_sources_do_not_use_up_a_quota(self, repo):
+        repo.add_new([make_item("x", source_id="src_other", title="x", text="x")])
+        assert repo.add_new([make_item("a")], max_items=1) == AddReport(new=1, duplicate=0)
+
+    def test_duplicates_are_not_charged_to_the_quota_even_when_it_is_full(self, repo):
+        a, b = make_item("a", title="a", text="a"), make_item("b", title="b", text="b")
+        repo.add_new([a])
+        report = repo.add_new([a, b], max_items=1)  # a is a duplicate, b does not fit
+        assert report == AddReport(new=0, duplicate=1, over_quota=1)
+
+    def test_a_tombstoned_item_is_a_duplicate_not_an_over_quota_one(self, repo):
+        old = make_item("old", title="old", text="old", flags=("published_at_missing",))
+        repo.add_new([old])
+        repo.purge_fetched_before(NOW + timedelta(days=1))
+        assert repo.add_new([old], max_items=1) == AddReport(new=0, duplicate=1, over_quota=0)
+
+    @pytest.mark.parametrize(
+        ("slack", "stored"), [(1, 2), (0, 2), (-1, 1)], ids=["cap+1", "cap", "cap-1"]
+    )
+    def test_the_byte_quota_boundaries(self, repo, slack, stored):
+        batch = [make_item(f"g{n}", title=f"t{n}", text=f"x{n}") for n in range(2)]
+        cap = sum(item_size_bytes(i) for i in batch) + slack
+        report = repo.add_new(batch, max_bytes=cap)
+        assert (report.new, report.over_quota) == (stored, 2 - stored)
+
+    def test_the_byte_quota_counts_what_is_already_stored(self, repo):
+        first = make_item("a", title="a", text="a")
+        second = make_item("b", title="b", text="b")
+        repo.add_new([first])
+        cap = item_size_bytes(first) + item_size_bytes(second)
+        assert repo.add_new([second], max_bytes=cap - 1) == AddReport(0, 0, over_quota=1)
+        assert repo.add_new([second], max_bytes=cap) == AddReport(1, 0)
+
+    def test_a_smaller_later_item_may_still_fit_when_a_bigger_one_did_not(self, repo):
+        big = make_item("big", title="big", text="x" * 500)
+        small = make_item("small", title="small", text="s")
+        report = repo.add_new([big, small], max_bytes=item_size_bytes(small) + 10)
+        assert (report.new, report.over_quota) == (1, 1)
+        assert [i.external_id for i in repo.list()] == ["small"]
+
+    def test_both_quotas_apply_together(self, repo):
+        batch = [make_item(f"g{n}", title=f"t{n}", text=f"x{n}") for n in range(4)]
+        report = repo.add_new(batch, max_items=3, max_bytes=item_size_bytes(batch[0]) * 2 + 1)
+        assert report.new == 2
+        assert report.over_quota == 2
+
+    def test_without_quotas_nothing_is_refused(self, repo):
+        batch = [make_item(f"g{n}", title=f"t{n}", text=f"x{n}") for n in range(30)]
+        assert repo.add_new(batch, max_items=None, max_bytes=None).new == 30
+
+    @pytest.mark.parametrize("bad", [0, -1, True, 1.5, "3"])
+    def test_an_invalid_quota_is_rejected_and_nothing_is_stored(self, repo, bad):
+        with pytest.raises(ValidationError):
+            repo.add_new([make_item("a")], max_items=bad)
+        with pytest.raises(ValidationError):
+            repo.add_new([make_item("a")], max_bytes=bad)
+        assert repo.count() == 0
 
     def test_purge_rejects_a_naive_cutoff(self, repo):
         with pytest.raises(ValidationError):

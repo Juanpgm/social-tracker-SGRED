@@ -11,6 +11,13 @@ Retention (CI-10): raw items are kept for `DEFAULT_RETENTION_DAYS` days, counted
 (when WE stored them, which a feed cannot forge). An item is purged only when it is STRICTLY
 older than the retention: at exactly N days it is still kept, one microsecond later it is not.
 Zero means "purge once classified" (nothing is time-based then).
+
+A purged item must not come back as a new one when the feed still lists it. Entries with a
+publication date are kept out by a horizon (`retention_horizon`: published before it, skipped at
+ingest); the others (no date, or retention 0) leave a tombstone, the dedup key alone, behind.
+
+Quotas bound what one source may keep (`add_new` takes `max_items` and `max_bytes`):
+`item_size_bytes` is the one measure of an item's weight, `SourceUsage` what a source holds now.
 """
 
 import hashlib
@@ -35,6 +42,7 @@ MAX_AUTHOR_CHARS = 200
 MAX_RAW_PAYLOAD_BYTES = 256 * 1024
 DEFAULT_RETENTION_DAYS = 30
 MAX_RETENTION_DAYS = 3650
+MAX_TOMBSTONES_PER_SOURCE = 50_000
 MAX_SEARCH_TERMS = 16
 MAX_SEARCH_TERM_CHARS = 64
 
@@ -143,6 +151,15 @@ def retention_cutoff(now: datetime, days: int) -> datetime:
     if validate_retention_days(days) == 0:
         raise ValidationError("a retention of 0 days has no time cutoff")
     return ensure_utc(now) - timedelta(days=days)
+
+
+def retention_horizon(now: datetime, days: int | None) -> datetime | None:
+    """Entries PUBLISHED strictly before this instant would be purged as soon as they were
+    stored (an item's publication time never exceeds its fetch time), so ingest skips them.
+    None when there is no time-based retention (`days` is None or 0)."""
+    if days is None or validate_retention_days(days) == 0:
+        return None
+    return retention_cutoff(now, days)
 
 
 # ---- search ---------------------------------------------------------------------------
@@ -285,7 +302,36 @@ class Item:
 
 @dataclass(frozen=True)
 class AddReport:
-    """What storing a batch did: how many items were new and how many were already known."""
+    """What storing a batch did: how many items were new, how many were already known (stored,
+    or purged and remembered) and how many did not fit the source's quota."""
 
     new: int
     duplicate: int
+    over_quota: int = 0
+
+
+@dataclass(frozen=True)
+class SourceUsage:
+    """What one source holds now: the number of items and their weight in bytes."""
+
+    items: int
+    bytes: int
+
+
+def item_size_bytes(item: "Item") -> int:
+    """The weight of an item for quotas: UTF-8 bytes of title, text and raw payload (the three
+    fields a hostile feed can make big)."""
+    return (
+        len(item.title.encode("utf-8"))
+        + len(item.text.encode("utf-8"))
+        + _json_bytes(item.raw_payload)
+    )
+
+
+def validate_quota(value: Any, what: str) -> int | None:
+    """A quota is None (unlimited) or a positive whole number."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValidationError(f"{what} must be a positive whole number")
+    return value

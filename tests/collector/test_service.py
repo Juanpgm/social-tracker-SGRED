@@ -514,8 +514,8 @@ class FailingItems:
     def __init__(self, inner) -> None:
         self._inner = inner
 
-    def add_new(self, items):
-        self._inner.add_new(items)
+    def add_new(self, items, **limits):
+        self._inner.add_new(items, **limits)
         raise StorageError("simulated failure after the write")
 
     def __getattr__(self, name):

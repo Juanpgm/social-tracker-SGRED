@@ -8,19 +8,24 @@ from social_tracker.bootstrap import (
     ALLOW_PRIVATE_HOSTS_ENV,
     ALLOWED_PORTS_ENV,
     DB_PATH_ENV,
+    MAX_BYTES_PER_FETCH_ENV,
+    MAX_BYTES_PER_SOURCE_ENV,
+    MAX_ITEMS_PER_SOURCE_ENV,
     RETENTION_DAYS_ENV,
     build_container,
     build_worker,
     parse_allowed_ports,
+    parse_ingest_limits,
     parse_private_hosts,
     parse_retention_days,
 )
+from social_tracker.collector.domain import IngestLimits
 from social_tracker.collector.http_fetcher import DEFAULT_ALLOWED_PORTS, FetchLimits, HttpFetcher
 from social_tracker.items.domain import DEFAULT_RETENTION_DAYS
 from social_tracker.persistence.worker_lock import WorkerLockHeldError
 from social_tracker.shared.errors import ValidationError
 from tests.actors import WHO
-from tests.collector.harness import FEED, FakeFetcher
+from tests.collector.harness import FEED, FakeFetcher, dated_now
 from tests.sources.factories import payload
 
 
@@ -93,6 +98,62 @@ def test_a_malformed_private_host_is_refused(raw):
     with pytest.raises(ValidationError) as caught:
         parse_private_hosts(raw)
     assert ALLOW_PRIVATE_HOSTS_ENV in caught.value.message
+
+
+# ---- ingest limits ----
+
+
+def test_ingest_limits_default_when_the_variables_are_blank_or_absent():
+    assert parse_ingest_limits({}) == IngestLimits()
+    blank = {
+        MAX_ITEMS_PER_SOURCE_ENV: " ",
+        MAX_BYTES_PER_SOURCE_ENV: "",
+        MAX_BYTES_PER_FETCH_ENV: "",
+    }
+    assert parse_ingest_limits(blank) == IngestLimits()
+
+
+def test_ingest_limits_come_from_the_environment():
+    limits = parse_ingest_limits(
+        {
+            MAX_ITEMS_PER_SOURCE_ENV: "500",
+            MAX_BYTES_PER_SOURCE_ENV: " 1048576 ",
+            MAX_BYTES_PER_FETCH_ENV: "65536",
+        }
+    )
+    assert limits == IngestLimits(500, 1048576, 65536)
+
+
+@pytest.mark.parametrize(
+    "name", [MAX_ITEMS_PER_SOURCE_ENV, MAX_BYTES_PER_SOURCE_ENV, MAX_BYTES_PER_FETCH_ENV]
+)
+@pytest.mark.parametrize(
+    "raw", ["0", "-1", "1.5", "abc", "1e6", "0x10", "٣٠", "+5", "9" * 16, "10 MB"]
+)
+def test_a_malformed_ingest_limit_is_refused_with_the_variable_name(name, raw):
+    with pytest.raises(ValidationError) as caught:
+        parse_ingest_limits({name: raw})
+    assert name in caught.value.message
+
+
+def test_the_configured_limits_and_the_retention_reach_the_collector(tmp_path):
+    settings = {
+        MAX_ITEMS_PER_SOURCE_ENV: "7",
+        RETENTION_DAYS_ENV: "9",
+    }
+    built = build_worker(env(tmp_path, **settings))
+    try:
+        collector = built.worker._collector
+        assert collector._limits.max_items_per_source == 7
+        assert collector._retention_days == 9
+    finally:
+        built.close()
+
+
+def test_an_invalid_limit_stops_the_start_before_the_database_is_opened(tmp_path):
+    with pytest.raises(ValidationError):
+        build_worker(env(tmp_path, **{MAX_BYTES_PER_FETCH_ENV: "0"}))
+    assert not (tmp_path / "w.db").exists()
 
 
 # ---- destination ports ----
@@ -201,7 +262,7 @@ def test_the_worker_uses_the_real_http_fetcher_unless_one_is_injected(tmp_path):
 
 
 def test_an_injected_fetcher_drives_a_whole_collection_through_the_real_wiring(tmp_path):
-    fetcher = FakeFetcher(FEED)
+    fetcher = FakeFetcher(dated_now(FEED))  # the real clock is in play
     built = build_worker(env(tmp_path), fetcher=fetcher)
     try:
         built.sources.add(payload(id="src_news", enabled=True), **WHO)

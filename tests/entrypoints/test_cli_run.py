@@ -13,7 +13,7 @@ from social_tracker.bootstrap import build_worker as real_build_worker
 from social_tracker.collector.domain import FetchError
 from social_tracker.control.domain import CollectionState
 from tests.actors import WHO
-from tests.collector.harness import FEED, FEED_URL, FakeFetcher
+from tests.collector.harness import FEED, FEED_URL, FakeFetcher, dated_now
 from tests.entrypoints.conftest import WHY, Cli
 
 
@@ -53,7 +53,7 @@ def operator(cli: Cli) -> Operator:
 @pytest.fixture
 def fetcher(monkeypatch, operator: Operator) -> FakeFetcher:
     """Replaces the HTTP client: no test of `run` can reach the network."""
-    script = FakeFetcher(FEED)
+    script = FakeFetcher(dated_now(FEED))  # the real clock is in play: dates must be recent
 
     def build(environ=None, **options):
         return real_build_worker(environ, fetcher=script, sleeper=operator.sleeper, **options)
@@ -197,7 +197,7 @@ def test_a_stop_signal_during_a_collection_lets_the_unit_finish_and_exits_cleanl
 
     def stop_during_fetch(request):
         signal.raise_signal(signum)
-        return FEED
+        return dated_now(FEED)
 
     fetcher.then(stop_during_fetch)
     operator.turn_analysis_on()
@@ -251,7 +251,7 @@ def test_the_worker_collects_what_is_due_once_the_operator_turns_analysis_on(
 
     def finish_after_first_pass(request):
         signal.raise_signal(signal.SIGTERM)
-        return FEED
+        return dated_now(FEED)
 
     fetcher.then(finish_after_first_pass)
     operator.turn_analysis_on()

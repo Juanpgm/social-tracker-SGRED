@@ -77,6 +77,7 @@ def test_expected_tables_exist_and_nothing_else(conn):
         "source_state",
         "settings",
         "control_events",
+        "item_tombstones",
         "items",
         "source_fetch_status",
         "items_fts",  # the full-text index and its four shadow tables

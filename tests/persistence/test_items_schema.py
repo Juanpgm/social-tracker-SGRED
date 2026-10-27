@@ -139,3 +139,37 @@ def test_a_fetch_status_row_is_checked(conn):
     ):
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("INSERT INTO source_fetch_status VALUES (?, ?, ?, ?, ?)", bad)
+
+
+# ---- tombstones (migration 0003) ----
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        ("ab", "guid"),
+        ("Bad Id", "guid"),
+        ("src_news", ""),
+        ("src_news", "g" * 513),
+    ],
+    ids=["short source", "bad source", "empty external id", "long external id"],
+)
+def test_an_invalid_tombstone_is_refused_by_the_schema(conn, row):
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO item_tombstones (source_id, external_id) VALUES (?, ?)", row)
+
+
+def test_a_tombstone_is_unique_per_source_and_external_id(conn):
+    sql = "INSERT INTO item_tombstones (source_id, external_id) VALUES (?, ?)"
+    conn.execute(sql, ("src_news", "guid"))
+    conn.execute(sql, ("src_other", "guid"))
+    conn.execute(sql, ("src_news", "other"))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(sql, ("src_news", "guid"))
+
+
+def test_boundary_tombstones_are_accepted(conn):
+    sql = "INSERT INTO item_tombstones (source_id, external_id) VALUES (?, ?)"
+    conn.execute(sql, ("abc", "g"))
+    conn.execute(sql, ("s" * 64, "g" * 512))
+    assert conn.execute("SELECT count(*) FROM item_tombstones").fetchone()[0] == 2

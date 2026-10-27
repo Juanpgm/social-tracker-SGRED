@@ -12,6 +12,11 @@ Rules, each with a flag on the item or a reason in the report:
   is a title over 1000 characters;
 - no usable publication date: the fetch time is used (`published_at_missing`); a date after the
   fetch time is clamped to it (`published_at_future`);
+- published before the retention horizon (a dated entry only): discarded, counted as
+  `older_than_retention`, because it would be purged as soon as it was stored and a feed that
+  keeps listing it would otherwise bring it back after every purge; an entry with no date has
+  no age to judge (the item store remembers it with a tombstone instead);
+- past the per-fetch byte cap (`max_total_bytes`): discarded, counted as `fetch_quota`;
 - no guid: the external id is a hash of link and title (`external_id_synthesized`), and a guid
   longer than the id limit is replaced by its hash;
 - a link that is not a plain http(s) address is dropped; the item is kept.
@@ -36,6 +41,7 @@ from social_tracker.items.domain import (
     bounded_raw_payload,
     content_hash,
     item_id,
+    item_size_bytes,
     normalize_text,
     optional_url,
     truncate_utf8,
@@ -45,6 +51,8 @@ from social_tracker.shared.errors import ValidationError
 MAX_HTML_CHARS = 500_000  # input to the HTML reader is bounded, so its cost is too
 DISCARD_EMPTY = "empty"
 DISCARD_OVER_LIMIT = "over_limit"
+DISCARD_OLDER_THAN_RETENTION = "older_than_retention"
+DISCARD_FETCH_QUOTA = "fetch_quota"
 
 _DROPPED_CONTENT = frozenset({"script", "style", "noscript", "template", "iframe", "object"})
 _PARAGRAPH_TAGS = frozenset(
@@ -149,14 +157,19 @@ class NormalizeReport:
 
 
 def _normalize(
-    entry: FeedEntry, source_id: str, source_name: str, fetched_at: datetime
-) -> Item | None:
+    entry: FeedEntry,
+    source_id: str,
+    source_name: str,
+    fetched_at: datetime,
+    horizon: datetime | None,
+) -> Item | str:
+    """The item, or the reason (a `DISCARD_*` value) the entry is not stored."""
     flags: set[str] = set()
     title_full = _one_line(strip_html(entry.title), 10 * MAX_TITLE_CHARS)
     title = title_full[:MAX_TITLE_CHARS]
     text, text_cut = truncate_utf8(strip_html(entry.body_html), MAX_TEXT_BYTES)
     if not title and not text.strip():
-        return None
+        return DISCARD_EMPTY
     if len(title_full) > MAX_TITLE_CHARS or text_cut:
         flags.add("truncated")
 
@@ -168,6 +181,8 @@ def _normalize(
     if published is None:
         published = fetched_at
         flags.add("published_at_missing")
+    elif horizon is not None and published < horizon:
+        return DISCARD_OLDER_THAN_RETENTION
     elif published > fetched_at:
         published = fetched_at
         flags.add("published_at_future")
@@ -205,15 +220,24 @@ def normalize_entries(
     source_name: str,
     fetched_at: datetime,
     over_limit: int = 0,
+    horizon: datetime | None = None,
+    max_total_bytes: int | None = None,
 ) -> NormalizeReport:
     items: list[Item] = []
     discarded: dict[str, int] = {}
+    spent = 0
     for entry in entries:
-        item = _normalize(entry, source_id, source_name, fetched_at)
-        if item is None:
-            discarded[DISCARD_EMPTY] = discarded.get(DISCARD_EMPTY, 0) + 1
+        outcome = _normalize(entry, source_id, source_name, fetched_at, horizon)
+        if isinstance(outcome, Item) and max_total_bytes is not None:
+            weight = item_size_bytes(outcome)
+            if spent + weight > max_total_bytes:
+                outcome = DISCARD_FETCH_QUOTA
+            else:
+                spent += weight
+        if isinstance(outcome, Item):
+            items.append(outcome)
         else:
-            items.append(item)
+            discarded[outcome] = discarded.get(outcome, 0) + 1
     if over_limit:
         discarded[DISCARD_OVER_LIMIT] = over_limit
     return NormalizeReport(tuple(items), discarded)

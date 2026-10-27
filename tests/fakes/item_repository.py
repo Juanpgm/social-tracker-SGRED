@@ -7,12 +7,16 @@ from datetime import datetime
 
 from social_tracker.items.domain import (
     DEFAULT_LIST_LIMIT,
+    MAX_TOMBSTONES_PER_SOURCE,
     AddReport,
     Item,
     ItemStatus,
+    SourceUsage,
+    item_size_bytes,
     plain_words,
     search_terms,
     validate_limit,
+    validate_quota,
 )
 from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ValidationError
@@ -22,28 +26,66 @@ def _newest_first(items: list[Item]) -> list[Item]:
     return sorted(items, key=lambda i: (i.published_at, i.id), reverse=True)
 
 
+_UNDATED = "published_at_missing"
+
+
 class InMemoryItemRepository:
-    def __init__(self) -> None:
+    def __init__(self, max_tombstones_per_source: int = MAX_TOMBSTONES_PER_SOURCE) -> None:
         self._lock = threading.Lock()
         self._items: dict[str, Item] = {}
+        self._tombstones: dict[tuple[str, str], None] = {}  # insertion order = age
+        self._max_tombstones = max_tombstones_per_source
 
-    def add_new(self, items: Sequence[Item]) -> AddReport:
+    def add_new(
+        self,
+        items: Sequence[Item],
+        *,
+        max_items: int | None = None,
+        max_bytes: int | None = None,
+    ) -> AddReport:
         if not all(isinstance(item, Item) for item in items):
             raise ValidationError("items must be Item objects")
+        item_cap = validate_quota(max_items, "max_items")
+        byte_cap = validate_quota(max_bytes, "max_bytes")
         with self._lock:
             external = {(i.source_id, i.external_id) for i in self._items.values()}
             hashes = {(i.source_id, i.content_hash) for i in self._items.values()}
-            new = duplicate = 0
+            new = duplicate = over = 0
             for item in items:
                 keys = ((item.source_id, item.external_id), (item.source_id, item.content_hash))
-                if keys[0] in external or keys[1] in hashes:
+                if keys[0] in external or keys[1] in hashes or keys[0] in self._tombstones:
                     duplicate += 1
+                    continue
+                held = self._usage(item.source_id)
+                cost = item_size_bytes(item)
+                if (item_cap is not None and held.items >= item_cap) or (
+                    byte_cap is not None and held.bytes + cost > byte_cap
+                ):
+                    over += 1
                     continue
                 external.add(keys[0])
                 hashes.add(keys[1])
                 self._items[item.id] = item
                 new += 1
-        return AddReport(new, duplicate)
+        return AddReport(new, duplicate, over)
+
+    def _usage(self, source_id: str) -> SourceUsage:
+        mine = [i for i in self._items.values() if i.source_id == source_id]
+        return SourceUsage(len(mine), sum(item_size_bytes(i) for i in mine))
+
+    def source_usage(self, source_id: str) -> SourceUsage:
+        with self._lock:
+            return self._usage(source_id)
+
+    def _remember(self, removed: list[Item]) -> None:
+        touched = set()
+        for item in removed:
+            self._tombstones[(item.source_id, item.external_id)] = None
+            touched.add(item.source_id)
+        for source_id in touched:
+            keys = [k for k in self._tombstones if k[0] == source_id]
+            for key in keys[: max(0, len(keys) - self._max_tombstones)]:
+                del self._tombstones[key]
 
     def get(self, item_id: str) -> Item | None:
         with self._lock:
@@ -79,16 +121,18 @@ class InMemoryItemRepository:
     def purge_fetched_before(self, cutoff: datetime) -> int:
         limit = ensure_utc(cutoff)
         with self._lock:
-            doomed = [i.id for i in self._items.values() if i.fetched_at < limit]
-            for item_id in doomed:
-                del self._items[item_id]
+            doomed = [i for i in self._items.values() if i.fetched_at < limit]
+            self._remember([i for i in doomed if _UNDATED in i.flags])
+            for item in doomed:
+                del self._items[item.id]
         return len(doomed)
 
     def purge_classified(self) -> int:
         with self._lock:
-            doomed = [i.id for i in self._items.values() if i.status is ItemStatus.CLASSIFIED]
-            for item_id in doomed:
-                del self._items[item_id]
+            doomed = [i for i in self._items.values() if i.status is ItemStatus.CLASSIFIED]
+            self._remember(doomed)
+            for item in doomed:
+                del self._items[item.id]
         return len(doomed)
 
     # Defined last: the name shadows the builtin inside the class body.

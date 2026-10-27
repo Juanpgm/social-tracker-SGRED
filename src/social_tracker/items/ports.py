@@ -4,7 +4,13 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from social_tracker.items.domain import DEFAULT_LIST_LIMIT, AddReport, Item, ItemStatus
+from social_tracker.items.domain import (
+    DEFAULT_LIST_LIMIT,
+    AddReport,
+    Item,
+    ItemStatus,
+    SourceUsage,
+)
 
 
 @runtime_checkable
@@ -22,10 +28,29 @@ class ItemRepository(Protocol):
     accents; it never raises for odd text. `limit` is 1..1000 (`ValidationError` otherwise).
 
     Retention purges delete by `fetched_at`, strictly older than the cutoff, and by status
-    (`purge_classified`), and return how many items they removed.
+    (`purge_classified`), and return how many items they removed. A purge leaves a tombstone (the
+    dedup key `(source_id, external_id)` alone) for every removed item whose publication date was
+    unknown (flag `published_at_missing`) and, in `purge_classified`, for every one: `add_new`
+    counts a tombstoned entry as a duplicate, so a feed that keeps listing it cannot bring it
+    back. Dated entries need none: the collector skips what is older than the retention horizon.
+    Each source remembers at most a fixed number of tombstones; beyond it the oldest are forgotten.
     """
 
-    def add_new(self, items: Sequence[Item]) -> AddReport: ...
+    def add_new(
+        self,
+        items: Sequence[Item],
+        *,
+        max_items: int | None = None,
+        max_bytes: int | None = None,
+    ) -> AddReport:
+        """Store the new items of a batch. The optional quotas bound what the item's SOURCE holds
+        after the call (stored items already there count): a new item that would exceed
+        `max_items` items or `max_bytes` bytes (`item_size_bytes`) is not stored and counts in
+        `over_quota`, but a smaller one later in the batch may still fit. Duplicates are never
+        charged. A quota that is not None must be a positive whole number."""
+        ...
+
+    def source_usage(self, source_id: str) -> SourceUsage: ...
 
     def get(self, item_id: str) -> Item | None: ...
 

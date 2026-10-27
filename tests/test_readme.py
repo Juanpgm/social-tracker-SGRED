@@ -18,6 +18,9 @@ from social_tracker.bootstrap import (
     BUSY_TIMEOUT_ENV,
     DB_PATH_ENV,
     DEFAULT_DB_PATH,
+    MAX_BYTES_PER_FETCH_ENV,
+    MAX_BYTES_PER_SOURCE_ENV,
+    MAX_ITEMS_PER_SOURCE_ENV,
     RETENTION_DAYS_ENV,
 )
 from social_tracker.entrypoints.cli import app
@@ -61,6 +64,9 @@ def test_every_environment_variable_and_default_is_documented(readme: str):
         RETENTION_DAYS_ENV,
         ALLOW_PRIVATE_HOSTS_ENV,
         ALLOWED_PORTS_ENV,
+        MAX_ITEMS_PER_SOURCE_ENV,
+        MAX_BYTES_PER_SOURCE_ENV,
+        MAX_BYTES_PER_FETCH_ENV,
     ):
         assert f"`{name}`" in readme
     assert DEFAULT_DB_PATH in readme

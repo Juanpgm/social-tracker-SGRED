@@ -17,6 +17,10 @@ Environment:
 - `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS`: comma-separated host names (or IP addresses) the collector
   may contact although they resolve to private addresses. Empty by default, which blocks every
   loopback, private, link-local and metadata address (SSRF protection); every use is logged.
+- `SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE`, `SOCIAL_TRACKER_MAX_BYTES_PER_SOURCE`,
+  `SOCIAL_TRACKER_MAX_BYTES_PER_FETCH`: ceilings on what one feed may cost (items a source holds,
+  bytes a source holds, bytes of the items of one fetch; whole numbers from 1). Defaults are
+  generous (100000 items, 512 MiB, 16 MiB); entries beyond a ceiling are dropped and counted.
 - `SOCIAL_TRACKER_ALLOWED_PORTS`: comma-separated destination ports the collector may contact
   (feeds and every redirect hop). Default `80,443,8080,8443`; a value replaces the list.
 
@@ -35,6 +39,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from social_tracker.collector.domain import IngestLimits
 from social_tracker.collector.http_fetcher import DEFAULT_ALLOWED_PORTS, FetchLimits, HttpFetcher
 from social_tracker.collector.ports import Fetcher
 from social_tracker.collector.service import CollectorService
@@ -57,12 +62,16 @@ BUSY_TIMEOUT_ENV = "SOCIAL_TRACKER_BUSY_TIMEOUT_MS"
 RETENTION_DAYS_ENV = "SOCIAL_TRACKER_RETENTION_DAYS"
 ALLOW_PRIVATE_HOSTS_ENV = "SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS"
 ALLOWED_PORTS_ENV = "SOCIAL_TRACKER_ALLOWED_PORTS"
+MAX_ITEMS_PER_SOURCE_ENV = "SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE"
+MAX_BYTES_PER_SOURCE_ENV = "SOCIAL_TRACKER_MAX_BYTES_PER_SOURCE"
+MAX_BYTES_PER_FETCH_ENV = "SOCIAL_TRACKER_MAX_BYTES_PER_FETCH"
 DEFAULT_DB_PATH = "data/social_tracker.db"
 MAX_BUSY_TIMEOUT_MS = 600_000
 _DIGITS = re.compile(r"[0-9]{1,7}")
 _RETENTION_DIGITS = re.compile(r"[0-9]{1,4}")
 _HOST_NAME = re.compile(r"[a-z0-9._-]{1,253}")
 _PORT_DIGITS = re.compile(r"[0-9]{1,5}")
+_LIMIT_DIGITS = re.compile(r"[0-9]{1,15}")
 _BACKOFF_JITTER_FRACTION = 0.1
 CLAIM_MARGIN_S = 60.0  # what a claim may outlast the fetch deadline (parse and store) unchallenged
 
@@ -172,6 +181,25 @@ def parse_allowed_ports(raw: str) -> frozenset[int]:
     return frozenset(ports) or DEFAULT_ALLOWED_PORTS
 
 
+def _limit(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    if not _LIMIT_DIGITS.fullmatch(raw) or int(raw) < 1:
+        raise ValidationError(f"{name} must be a whole number from 1 (at most 15 digits)")
+    return int(raw)
+
+
+def parse_ingest_limits(env: Mapping[str, str]) -> IngestLimits:
+    """The ceilings on what one feed may cost, from the environment (blank: the defaults)."""
+    defaults = IngestLimits()
+    return IngestLimits(
+        _limit(env, MAX_ITEMS_PER_SOURCE_ENV, defaults.max_items_per_source),
+        _limit(env, MAX_BYTES_PER_SOURCE_ENV, defaults.max_bytes_per_source),
+        _limit(env, MAX_BYTES_PER_FETCH_ENV, defaults.max_bytes_per_fetch),
+    )
+
+
 def _random_jitter(base_s: float) -> float:
     return random.uniform(0.0, _BACKOFF_JITTER_FRACTION * base_s)
 
@@ -225,6 +253,7 @@ def build_worker(
     env = os.environ if environ is None else environ
     private_hosts = parse_private_hosts(env.get(ALLOW_PRIVATE_HOSTS_ENV, ""))
     allowed_ports = parse_allowed_ports(env.get(ALLOWED_PORTS_ENV, ""))
+    ingest_limits = parse_ingest_limits(env)
     wiring = _open(env)
     lock = WorkerLock(wiring.db.path)
     try:
@@ -244,6 +273,8 @@ def build_worker(
             wiring.clock,
             jitter=_random_jitter,
             claim_timeout_s=limits.deadline_s + CLAIM_MARGIN_S,
+            retention_days=container.items.retention_days,
+            limits=ingest_limits,
         )
         worker = Worker(
             collector,
