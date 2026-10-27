@@ -22,6 +22,7 @@ FORBIDDEN_EXTERNALS = [
     "yaml",
     "typer",
     "httpx",
+    "httpx2",
     "requests",
     "aiohttp",
     "os",
@@ -38,6 +39,7 @@ FORBIDDEN_EXTERNALS = [
     "tempfile",
     "glob",
 ]
+COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy")
 FORBIDDEN_LAYERS = ["adapters", "persistence", "entrypoints", "infrastructure", "storage"]
 
 
@@ -76,6 +78,11 @@ def _make_package(root: Path, name: str, files: dict[str, str]) -> None:
     (pkg / "entrypoints" / "web").mkdir(parents=True, exist_ok=True)
     (pkg / "entrypoints" / "__init__.py").touch()
     (pkg / "entrypoints" / "web" / "__init__.py").touch()
+    # The same goes for the collector-core contract and the modules it lists.
+    (pkg / "collector").mkdir(exist_ok=True)
+    (pkg / "collector" / "__init__.py").touch()
+    for module in COLLECTOR_CORE_MODULES:
+        (pkg / "collector" / f"{module}.py").touch()
 
 
 def _retarget_config(repo_root: Path, dest: Path, root_package: str) -> Path:
@@ -235,6 +242,7 @@ def test_entrypoints_may_use_the_composition_root_that_imports_storage(
 
 NETWORK_CLIENTS = [
     "import httpx",
+    "import httpx2",
     "import requests",
     "import aiohttp",
     "import websockets",
@@ -259,16 +267,13 @@ def test_the_web_ui_may_not_import_a_network_client(
     assert "BROKEN" in result.stdout
 
 
-def test_the_web_ui_may_parse_urls_and_the_cli_may_use_the_network_modules(
-    repo_root: Path, tmp_path: Path
-):
+def test_the_web_ui_may_parse_urls(repo_root: Path, tmp_path: Path):
     _make_package(
         tmp_path,
         "fixpkg",
         {
             "domain/model.py": "X = 1\n",
             "entrypoints/web/app.py": "from urllib.parse import parse_qsl\n",
-            "entrypoints/cli.py": "import socket\n",
         },
     )
     config = _retarget_config(repo_root, tmp_path, "fixpkg")

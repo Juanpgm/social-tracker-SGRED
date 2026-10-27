@@ -25,6 +25,7 @@ forbidden_modules =
     yaml
     typer
     httpx
+    httpx2
     requests
     aiohttp
     os
@@ -71,7 +72,8 @@ forbidden_modules =
     sqlite3
 allow_indirect_imports = True
 
-# The web UI only ever answers requests: it must not open connections of its own (G-1). Only the
+# The web UI only ever answers requests: it must not open connections of its own (G-1) and must not
+# import the collector, the worker side that does (it reaches the composition root only). Only the
 # modules of this package are checked, so the server (uvicorn) may still listen. `urllib` cannot be
 # listed (import-linter only names top-level external packages and the UI needs `urllib.parse`);
 # tests/entrypoints/web/test_no_outbound.py forbids `urllib.request` for the web package.
@@ -82,6 +84,7 @@ source_modules =
     social_tracker.entrypoints.web
 forbidden_modules =
     httpx
+    httpx2
     requests
     aiohttp
     http
@@ -89,4 +92,51 @@ forbidden_modules =
     websockets
     smtplib
     ftplib
+    social_tracker.collector
 allow_indirect_imports = True
+
+# The one outbound path (G-1): the collector's fetcher adapter is the only module of the
+# application allowed to import an HTTP client or sockets, and it may use only httpx2 and socket.
+# Everything else, the composition root included, reaches the network through the Fetcher port.
+# Indirect imports are allowed so that the composition root can wire the adapter.
+[importlinter:contract:outbound-only-in-fetcher]
+name = Only the fetcher adapter may open network connections
+type = forbidden
+source_modules =
+    social_tracker
+forbidden_modules =
+    httpx
+    httpx2
+    requests
+    aiohttp
+    socket
+    websockets
+    smtplib
+    ftplib
+allow_indirect_imports = True
+ignore_imports =
+    social_tracker.collector.http_fetcher -> httpx2
+    social_tracker.collector.http_fetcher -> socket
+unmatched_ignore_imports_alerting = none
+
+# The collector's logic (parsing, normalizing, address policy, the service and the worker loop)
+# does no I/O of its own: no storage, no sockets, no processes. It gets a Fetcher and the
+# repositories through constructor injection.
+[importlinter:contract:collector-core-no-io]
+name = The collector core must not do I/O
+type = forbidden
+source_modules =
+    social_tracker.collector.feed
+    social_tracker.collector.normalize
+    social_tracker.collector.netpolicy
+forbidden_modules =
+    social_tracker.persistence
+    social_tracker.entrypoints
+    sqlite3
+    socket
+    ssl
+    subprocess
+    httpx
+    httpx2
+    requests
+    aiohttp
