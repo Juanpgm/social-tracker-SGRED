@@ -394,3 +394,67 @@ forbidden_modules =
     uuid
     logging
     threading
+
+# The gold set (G-1): labeled texts kept on this machine, measured against the cascade and
+# exported only when the operator asks for a file. The module opens no connection, process or mail
+# client, knows neither the storage adapter nor the entrypoints nor the model adapter (the judge is
+# handed to the calibration as a function). `yaml` is allowed for the codec only (`yaml_io`); the
+# vocabulary and the ports are also pure and deterministic.
+[importlinter:contract:gold-no-io]
+name = The gold set must do no I/O of its own and send nothing out
+type = forbidden
+source_modules =
+    social_tracker.gold
+forbidden_modules =
+    social_tracker.persistence
+    social_tracker.entrypoints
+    social_tracker.bootstrap
+    social_tracker.collector
+    social_tracker.llm.ollama
+    sqlite3
+    socket
+    ssl
+    subprocess
+    smtplib
+    ftplib
+    httpx
+    httpx2
+    httpcore2
+    requests
+    aiohttp
+    websockets
+    urllib
+    http
+    os
+    pathlib
+    io
+    shutil
+    tempfile
+    glob
+    typer
+    asyncio
+    importlib
+    ctypes
+    multiprocessing
+# The service reads the topic vocabulary through the classification service, which (via its own
+# codec) reaches modules this contract forbids to the gold set itself; only direct imports count.
+allow_indirect_imports = True
+
+[importlinter:contract:gold-core-pure]
+name = The gold vocabulary and ports must be pure and deterministic
+type = forbidden
+source_modules =
+    social_tracker.gold.domain
+    social_tracker.gold.ports
+forbidden_modules =
+    social_tracker.control
+    social_tracker.llm
+    social_tracker.gold.service
+    social_tracker.gold.yaml_io
+    yaml
+    random
+    time
+    secrets
+    uuid
+    logging
+    threading

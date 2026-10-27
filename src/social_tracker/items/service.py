@@ -28,6 +28,8 @@ from social_tracker.items.domain import (
 )
 from social_tracker.items.ports import ItemRepository
 from social_tracker.shared.clock import Clock
+from social_tracker.shared.errors import NotFoundError
+from social_tracker.shared.ids import is_valid_slug
 from social_tracker.shared.uow import UnitOfWork
 
 OUT_OF_SCOPE_GRACE = timedelta(hours=24)
@@ -56,6 +58,13 @@ class ItemService:
         self, *, source_id: str | None = None, limit: int = DEFAULT_LIST_LIMIT
     ) -> list[Item]:
         return self._items.list(source_id=source_id, limit=limit)
+
+    def get(self, item_id: str) -> Item:
+        """One stored item, or `NotFoundError`."""
+        found = self._items.get(item_id) if is_valid_slug(item_id) else None
+        if found is None:
+            raise NotFoundError("item not found")
+        return found
 
     def search(self, query: str, *, limit: int = DEFAULT_LIST_LIMIT) -> list[Item]:
         return self._items.search(query, limit=limit)

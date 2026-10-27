@@ -55,7 +55,7 @@ def test_a_database_at_the_previous_version_keeps_everything_when_migrated(tmp_p
         versions = [
             r[0] for r in migrated.query("SELECT version FROM schema_migrations ORDER BY 1")
         ]
-        assert versions == list(range(1, 11))
+        assert versions == list(range(1, len(load_migrations()) + 1))
     finally:
         migrated.close()
 
@@ -72,7 +72,9 @@ def test_opening_twice_applies_it_once_and_keeps_its_data(tmp_path: Path):
     second = Database(path)
     try:
         assert second.query("SELECT item_id FROM alert_forgotten")[0][0] == "itm_a"
-        assert second.query("SELECT count(*) FROM schema_migrations")[0][0] == 10
+        assert second.query("SELECT count(*) FROM schema_migrations")[0][0] == len(
+            load_migrations()
+        )
     finally:
         second.close()
 
@@ -96,7 +98,9 @@ def test_two_processes_opening_a_database_at_the_previous_version_apply_it_once(
         t.join()
     try:
         assert errors == []
-        assert opened[0].query("SELECT count(*) FROM schema_migrations")[0][0] == 10
+        assert opened[0].query("SELECT count(*) FROM schema_migrations")[0][0] == len(
+            load_migrations()
+        )
     finally:
         for db in opened:
             db.close()

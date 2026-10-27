@@ -115,6 +115,7 @@ from social_tracker.collector.ports import Fetcher
 from social_tracker.collector.service import CollectorService
 from social_tracker.collector.worker import DEFAULT_TICK_S, Worker
 from social_tracker.control.service import ControlService
+from social_tracker.gold.service import GoldService
 from social_tracker.items.domain import DEFAULT_RETENTION_DAYS, validate_retention_days
 from social_tracker.items.service import ItemService
 from social_tracker.llm.domain import (
@@ -136,6 +137,7 @@ from social_tracker.persistence.classification_repo import (
 )
 from social_tracker.persistence.control_repo import SqliteControlRepository
 from social_tracker.persistence.db import DEFAULT_BUSY_TIMEOUT_MS, Database
+from social_tracker.persistence.gold_repo import SqliteGoldRepository
 from social_tracker.persistence.items_repo import SqliteItemRepository
 from social_tracker.persistence.llm_repo import SqliteEscalationRepository
 from social_tracker.persistence.sources_repo import SqliteSourceRepository
@@ -219,6 +221,7 @@ class Container:
     llm_settings: LlmSettings
     alerts: AlertService
     alert_settings: AlertSettings
+    gold: GoldService
     _db: Database
 
     @property
@@ -722,6 +725,7 @@ def _open(env: Mapping[str, str]) -> _Wiring:
         llm_settings,
         alerts,
         alert_settings,
+        GoldService(SqliteGoldRepository(db), topics, uow, clock, settings=classifier_settings),
         db,
     )
     return _Wiring(

@@ -36,7 +36,8 @@ from social_tracker.alerts.domain import Alert, AlertFilter, AlertPage, SyncRepo
 from social_tracker.alerts.service import AlertDetail
 from social_tracker.bootstrap import build_catalog, build_container, build_llm, build_worker
 from social_tracker.catalog.service import CatalogStatus, Outcome, RefreshReport
-from social_tracker.classification.domain import Classification, ClassificationStats
+from social_tracker.classification.calibration import LABEL_ORDER
+from social_tracker.classification.domain import Classification, ClassificationStats, Label
 from social_tracker.classification.service import DEFAULT_BATCH, RECLASSIFIABLE, ClassifyReport
 from social_tracker.classification.yaml_io import MAX_CONFIG_BYTES
 from social_tracker.collector.service import CollectOutcome
@@ -50,6 +51,10 @@ from social_tracker.entrypoints.inputs import (
     write_export,
 )
 from social_tracker.entrypoints.signals import stop_on_signals
+from social_tracker.gold.domain import MAX_GOLD_EXAMPLES
+from social_tracker.gold.service import CalibrationRun
+from social_tracker.gold.yaml_io import MAX_FILE_BYTES as MAX_GOLD_FILE
+from social_tracker.gold.yaml_io import load_document
 from social_tracker.items.domain import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, Item, ItemStatus
 from social_tracker.llm.domain import EscalationCounts, EscalationState, Judgment
 from social_tracker.llm.service import EscalationReport, LlmStatus, PingResult
@@ -101,6 +106,12 @@ llm_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(llm_app, name="llm")
+gold_app = typer.Typer(
+    help="Label texts by hand to measure the classifier. The labeled set lives in the local "
+    "database and never in the repository.",
+    no_args_is_help=True,
+)
+app.add_typer(gold_app, name="gold")
 alerts_app = typer.Typer(
     help="Look at the alerts the monitor raised, mark them and set the alert threshold. Alerts "
     "are stored and shown on this machine only: there are no external notifications.",
@@ -1153,6 +1164,367 @@ def alerts_threshold_set(
         typer.echo(f"alert threshold set to {now} (was {format_confidence(before)})")
     else:
         typer.echo(f"alert threshold unchanged: {now}")
+
+
+# ---- gold set and calibration ----
+
+_GOLD_LABELS = [label.value for label in LABEL_ORDER]
+_MAX_GOLD_FILE_BYTES = 100 * 1024
+_NO_GOLD = "No gold examples yet."
+_TEXT_CHARS = 60
+GoldLabelOption = Annotated[
+    str | None,
+    typer.Option(
+        "--label",
+        help="The label you decide it is: " + ", ".join(_GOLD_LABELS) + ".",
+    ),
+]
+TextFileOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--text-file",
+        help=f"A UTF-8 text file with the text (at most {_MAX_GOLD_FILE_BYTES} bytes).",
+    ),
+]
+ItemOption = Annotated[
+    str | None,
+    typer.Option(
+        "--item", help="Take the text of a collected item instead (see `items list --ids`)."
+    ),
+]
+NoteOption = Annotated[str, typer.Option("--note", help="Why you decided so (short, plain text).")]
+CredibilityOption = Annotated[
+    int,
+    typer.Option("--credibility", min=1, max=5, help="Credibility of the source it came from."),
+]
+UrlOption = Annotated[
+    str | None, typer.Option("--url", help="Where it was published (an http or https address).")
+]
+
+
+def _gold_text(services, text_file: Path | None, item: str | None) -> str:
+    """The text to label: a file or a collected item, exactly one of them (a usage error)."""
+    if (text_file is None) == (item is None):
+        raise typer.BadParameter("give exactly one of --text-file and --item")
+    if text_file is not None:
+        return read_import_text(text_file, max_bytes=_MAX_GOLD_FILE_BYTES, what="text file")
+    stored = services.items.get(item or "")
+    return f"{stored.title}\n{stored.text}" if stored.title else stored.text
+
+
+def _store_gold(
+    text_file: Path | None,
+    item: str | None,
+    label: str | None,
+    note: str | None,
+    credibility: int,
+    url: str | None,
+    actor: str | None,
+) -> None:
+    with _guard(), closing(build_container()) as services:
+        text = _gold_text(services, text_file, item)
+        chosen = label
+        if chosen is None:
+            typer.echo(_gold_preview(text))
+            chosen = _ask_label()
+        if note is None:
+            note = typer.prompt("Note (optional)", default="", show_default=False)
+        result = services.gold.add(
+            text,
+            chosen,
+            actor=resolve_actor(actor, os.environ),
+            note=note,
+            credibility=credibility,
+            url=url,
+        )
+    ex = result.example
+    if result.added:
+        typer.echo(f"added {ex.id} ({ex.label.value})")
+    else:
+        typer.echo(f"already in the gold set: {ex.id} ({ex.label.value})")
+
+
+def _ask_label() -> str:
+    """Ask for a label until the answer is one of the six (an interrupted prompt is an abort)."""
+    while True:
+        answer = typer.prompt("Label (" + ", ".join(_GOLD_LABELS) + ")").strip()
+        if answer in _GOLD_LABELS:
+            return answer
+        typer.echo("Error: that is not one of the labels; type its name as listed.")
+
+
+def _gold_filter(label: str | None) -> Label | None:
+    if label is None:
+        return None
+    try:
+        return Label(label)
+    except ValueError:
+        raise ValidationError("unknown label") from None
+
+
+def _gold_preview(text: str) -> str:
+    flat = " ".join(text.split())
+    return escape_unprintable(flat[:300] + ("..." if len(flat) > 300 else ""))  # noqa: PLR2004
+
+
+@gold_app.command("add")
+def gold_add(
+    label: Annotated[
+        str,
+        typer.Option(
+            "--label", help="The label you decide it is: " + ", ".join(_GOLD_LABELS) + "."
+        ),
+    ],
+    text_file: TextFileOption = None,
+    item: ItemOption = None,
+    note: NoteOption = "",
+    credibility: CredibilityOption = 3,
+    url: UrlOption = None,
+    actor: Actor = None,
+) -> None:
+    """Label a text for the gold set: the answer you want the classifier to give.
+
+    The text comes from a file or from a collected item. The same text is the same example: adding
+    it again with the same label changes nothing, with another label is refused (remove it first).
+    The set lives in the local database, never in the repository."""
+    _store_gold(text_file, item, label, note, credibility, url, actor)
+
+
+@gold_app.command("label")
+def gold_label(
+    text_file: TextFileOption = None,
+    item: ItemOption = None,
+    label: GoldLabelOption = None,
+    note: Annotated[str | None, typer.Option("--note", help="Why you decided so.")] = None,
+    credibility: CredibilityOption = 3,
+    url: UrlOption = None,
+    actor: Actor = None,
+) -> None:
+    """Label one text interactively: shows it, asks for the label (and a note) and stores it.
+
+    Without a terminal use `gold add`, which asks nothing."""
+    _store_gold(text_file, item, label, note, credibility, url, actor)
+
+
+@gold_app.command("list")
+def gold_list(
+    label: GoldLabelOption = None,
+    limit: Annotated[
+        int, typer.Option("--limit", min=1, max=MAX_GOLD_EXAMPLES, help="How many to show.")
+    ] = 100,
+    offset: Annotated[int, typer.Option("--offset", min=0, help="Skip this many.")] = 0,
+) -> None:
+    """List the labeled texts in the order they were added."""
+    with _guard(), closing(build_container()) as services:
+        found = services.gold.list(label=_gold_filter(label), limit=limit, offset=offset)
+        total = services.gold.count()
+    if not found:
+        typer.echo(_NO_GOLD)
+        return
+    lines = [f"{'ID':<20}  {'LABEL':<25}  CRED  {'CHARS':>5}  NOTE  TEXT"]
+    for e in found:
+        flat = " ".join(e.text.split())
+        if len(flat) > _TEXT_CHARS:
+            flat = flat[: _TEXT_CHARS - 3].rstrip() + "..."
+        note = escape_unprintable(e.note) or "-"
+        lines.append(
+            f"{e.id:<20}  {e.label.value:<25}  {e.credibility:>4}  {len(e.text):>5}  "
+            f"{note}  {escape_unprintable(flat)}"
+        )
+    lines.append(f"{total} example(s) in the gold set")
+    typer.echo("\n".join(lines))
+
+
+@gold_app.command("show")
+def gold_show(
+    example_id: Annotated[str, typer.Argument(metavar="ID", help="Id of an example.")],
+) -> None:
+    """Show one labeled text whole."""
+    with _guard(), closing(build_container()) as services:
+        e = services.gold.get(example_id)
+    typer.echo(
+        "\n".join(
+            [
+                f"id: {e.id}",
+                f"label: {e.label.value}",
+                f"credibility: {e.credibility}",
+                f"url: {e.url or 'none'}",
+                f"added: {e.added_at.isoformat()} by {escape_unprintable(e.actor)}",
+                f"note: {escape_unprintable(e.note) or 'none'}",
+                "text:",
+                "\n".join(escape_unprintable(line) for line in e.text.split("\n")),
+            ]
+        )
+    )
+
+
+@gold_app.command("remove")
+def gold_remove(
+    example_id: Annotated[str, typer.Argument(metavar="ID", help="Id of an example.")],
+) -> None:
+    """Forget one labeled text."""
+    with _guard(), closing(build_container()) as services:
+        services.gold.remove(example_id)
+    typer.echo(f"removed {example_id}")
+
+
+@gold_app.command("export")
+def gold_export(
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Write the YAML here instead of printing.")
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite the file if it exists.")
+    ] = False,
+    label: GoldLabelOption = None,
+) -> None:
+    """Export the labeled texts as YAML, the shape `classify calibrate --file` reads.
+
+    The file can hold real text from real sources: keep it out of version control."""
+    with _guard(), closing(build_container()) as services:
+        chosen = Label(label) if label is not None else None
+        text = services.gold.export_text(label=chosen)
+        if output is not None:
+            write_export(output, text, force=force)
+            count = text.count("\n- id: ") + text.startswith("- id: ")
+    if output is None:
+        typer.echo(text, nl=False)
+    else:
+        typer.echo(f"exported {count} example(s) to {escape_unprintable(str(output))}")
+
+
+def _threshold_text(value: float) -> str:
+    """A threshold with at least two decimals (0.50), more when it has them."""
+    text = format_confidence(value)
+    whole, _, decimals = text.partition(".")
+    return f"{whole}.{decimals.ljust(2, '0')}"
+
+
+def _pct(value: float | None) -> str:
+    return "n/a" if value is None else f"{value * 100:.1f}%"
+
+
+def _render_calibration(run: CalibrationRun, origin: str, unlabeled: int, current: float) -> str:
+    report = run.report
+    lines = [f"gold set: {report.total} example(s) from {origin}"]
+    if unlabeled:
+        lines.append(f"note: {unlabeled} example(s) without an expected label were left out")
+    lines.append(f"accuracy: {_pct(report.accuracy)} ({report.correct} of {report.total})")
+    lines.append(
+        f"escalation: {report.escalated} of {report.total} ({_pct(report.escalation_rate)}) "
+        "would go to the language model"
+    )
+    if run.asked:
+        lines.append(
+            f"the model answered {run.answered} of {run.asked} text(s) it was asked "
+            f"({run.failed} failed, {run.busy} busy); those are scored by its answer. The texts "
+            "went to the local model server on this machine and nowhere else"
+        )
+    lines.append("per label:")
+    width = max(len(label.value) for label in LABEL_ORDER)
+    for s in report.labels:
+        lines.append(
+            f"  {s.label.value:<{width}}  support {s.support:>3}  predicted {s.predicted:>3}  "
+            f"precision {_pct(s.precision):>6}  recall {_pct(s.recall):>6}  f1 {_pct(s.f1):>6}"
+        )
+    lines.append("confusion matrix (rows: expected, columns: predicted):")
+    lines.append("  " + ", ".join(f"{i} {label.value}" for i, label in enumerate(LABEL_ORDER, 1)))
+    lines.append("      " + "".join(f"{i:>5}" for i in range(1, len(LABEL_ORDER) + 1)))
+    for i, row in enumerate(report.matrix, start=1):
+        lines.append(f"  {i:>3} " + "".join(f"{n:>5}" for n in row))
+    lines.append(f"alert threshold sweep (current {_threshold_text(current)}):")
+    heading = ("THRESHOLD", "ALERTS", "RIGHT", "PRECISION", "RECALL", "F1")
+    lines.append(
+        f"  {heading[0]:<9}  {heading[1]:>6}  {heading[2]:>5}  {heading[3]:>9}  "
+        f"{heading[4]:>6}  {heading[5]:>6}"
+    )
+    rows = {r.threshold: r for r in report.sweep}
+    rows[current] = report.current
+    for threshold in sorted(rows):
+        r = rows[threshold]
+        name = f"{_threshold_text(threshold)} {'*' if threshold == current else ' '}"
+        lines.append(
+            f"  {name:<9}  {r.alerts:>6}  {r.true_alerts:>5}  "
+            f"{_pct(r.precision):>9}  {_pct(r.recall):>6}  {_pct(r.f1):>6}"
+        )
+    if report.suggested is None:
+        lines.append(
+            "suggested alert_min_confidence: none (no risky text in the set to measure by)"
+        )
+    else:
+        best = rows[report.suggested]
+        lines.append(
+            f"suggested alert_min_confidence: {_threshold_text(report.suggested)} "
+            f"(precision {_pct(best.precision)}, recall {_pct(best.recall)}, f1 {_pct(best.f1)})"
+        )
+    lines.append(
+        "report only: nothing was changed. To use a threshold: "
+        'social-tracker alerts threshold set <value> --reason "..."'
+    )
+    return "\n".join(lines)
+
+
+@classify_app.command("calibrate")
+def classify_calibrate(
+    file: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            help="A gold YAML file (what `gold export` writes, or the seed "
+            "tests/data/gold_examples.yaml) instead of the local gold set.",
+        ),
+    ] = None,
+    with_llm: Annotated[
+        bool,
+        typer.Option(
+            "--with-llm",
+            help="Also put the texts the cascade would escalate to the local language model "
+            "(never the default; needs the model server on this machine).",
+        ),
+    ] = False,
+) -> None:
+    """Measure the cascade against labeled texts: accuracy, precision and recall per label, the
+    confusion matrix, the escalation rate and a sweep of the alert threshold.
+
+    A REPORT only: no verdict, setting or file is changed, and nothing is sent anywhere (with
+    --with-llm the texts go to the model server on this machine and nowhere else). The cascade is
+    run without history (no duplicate or recycled check) and without the catalogs.
+
+    Exit status: 0 on a report, 1 when the file or the set is refused, 3 when there is nothing
+    to measure (an empty set); a model that cannot be reached is reported and the report of the
+    cascade alone still prints."""
+    stop = threading.Event()
+    unlabeled = 0
+    with _guard():
+        loaded = None
+        if file is not None:
+            loaded = load_document(
+                read_import_text(file, max_bytes=MAX_GOLD_FILE, what="gold file")
+            )
+            unlabeled = loaded.unlabeled
+        built = build_llm(stop=stop) if with_llm else build_container()
+        with closing(built) as opened:
+            services = opened.container if with_llm else opened
+            samples = loaded.samples if loaded is not None else services.gold.samples()
+            origin = "the file" if loaded is not None else "the local gold set"
+            if not samples:
+                typer.echo(
+                    "there is nothing to measure: the gold set is empty (label texts with "
+                    "`social-tracker gold add`) or the file has no labeled example",
+                    err=True,
+                )
+                raise typer.Exit(EXIT_NOTHING_ELIGIBLE)
+            current = services.control.alert_min_confidence()
+            judge = opened.service.judge_text if with_llm else None
+            with stop_on_signals(stop.set):
+                run = services.gold.calibrate(samples, current_threshold=current, judge=judge)
+    typer.echo(_render_calibration(run, origin, unlabeled, current))
+    if run.failed:
+        typer.echo(
+            f"warning: the language model could not judge {run.failed} text(s) (see "
+            "`social-tracker llm status`); they are scored by the cascade alone",
+            err=True,
+        )
 
 
 # ---- topics ----

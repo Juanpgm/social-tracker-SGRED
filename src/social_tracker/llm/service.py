@@ -345,6 +345,33 @@ class EscalationService:
             analysis_on=self._control.global_analysis_enabled(),
         )
 
+    def judge_text(self, item_id: str, text: str, evidence: JudgeEvidence) -> JudgeResponse | None:
+        """One judgment of a text that is NOT an item (the calibration of the gold set asks it).
+        It leaves no verdict, no judgment record, no failure bookkeeping and uses none of the
+        hourly budget: the answer is all there is. The server is identified first, so the text
+        goes nowhere but to a model server on this machine; the single in-flight slot is the same
+        as any judgment's, and `None` says another process holds it. An answer that breaks the
+        schema is asked for once more (RC-9); every other failure of the judge is raised as the
+        `JudgeError` it is. `ValidationError` for an id or evidence the judge cannot be asked."""
+        settings = self._settings
+        body, truncated = prompt_text("", text, settings.max_prompt_chars)
+        request = fit_request(
+            JudgeRequest(item_id, body, truncated, evidence),
+            num_ctx=settings.num_ctx,
+            output_tokens=settings.max_output_tokens,
+        )
+        with self._exclusive() as got:
+            if not got:
+                return None
+            self._judge.identify()
+            try:
+                return self._judge.judge(request)
+            except JudgeError as exc:
+                if exc.kind is not JudgeErrorKind.INVALID_OUTPUT:
+                    raise
+                problem = exc.problem
+            return self._judge.judge(replace(request, attempt=1, previous_problem=problem))
+
     def ping(self) -> PingResult:
         """One tiny harmless question to the judge, to see that it answers. It touches no verdict
         and uses no budget; it waits for the same single slot as a judgment."""

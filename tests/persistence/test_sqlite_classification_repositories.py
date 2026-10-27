@@ -15,7 +15,7 @@ from social_tracker.persistence.classification_repo import (
     SqliteSignatureRepository,
     SqliteTopicConfigRepository,
 )
-from social_tracker.persistence.db import Database
+from social_tracker.persistence.db import Database, load_migrations
 from social_tracker.shared.errors import ConflictError, StorageError
 from tests.classification.repository_contracts import (
     NOW,
@@ -404,7 +404,7 @@ def test_the_pending_items_index_exists_and_serves_the_queue(db):
 
 def test_the_migration_is_recorded(db):
     versions = [r[0] for r in db.query("SELECT version FROM schema_migrations ORDER BY 1")]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert versions == list(range(1, len(load_migrations()) + 1))
     tables = {r[0] for r in db.query("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"classifications", "item_signatures", "item_signature_bands", "topic_config"} <= tables
     assert sqlite3.sqlite_version_info >= (3, 35)

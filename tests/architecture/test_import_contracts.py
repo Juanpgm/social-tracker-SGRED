@@ -43,6 +43,7 @@ COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy", "service", "worker")
 CLASSIFICATION_CORE_MODULES = ("domain", "text", "links", "topics", "rules", "similarity")
 LLM_MODULES = ("domain", "schema", "prompt", "ports", "service", "ollama")
 ALERTS_MODULES = ("domain", "excerpt", "ports", "service")
+GOLD_MODULES = ("domain", "ports", "service", "yaml_io")
 FORBIDDEN_LAYERS = ["adapters", "persistence", "entrypoints", "infrastructure", "storage"]
 
 
@@ -101,6 +102,11 @@ def _make_package(root: Path, name: str, files: dict[str, str]) -> None:
     (pkg / "alerts" / "__init__.py").touch()
     for module in ALERTS_MODULES:
         (pkg / "alerts" / f"{module}.py").touch()
+    # And the gold-set contracts.
+    (pkg / "gold").mkdir(exist_ok=True)
+    (pkg / "gold" / "__init__.py").touch()
+    for module in GOLD_MODULES:
+        (pkg / "gold" / f"{module}.py").touch()
 
 
 def _retarget_config(repo_root: Path, dest: Path, root_package: str) -> Path:
