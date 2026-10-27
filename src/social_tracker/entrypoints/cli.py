@@ -32,6 +32,9 @@ from typing import Annotated
 import typer
 
 from social_tracker.bootstrap import build_container, build_worker
+from social_tracker.classification.domain import Classification, ClassificationStats
+from social_tracker.classification.service import DEFAULT_BATCH, ClassifyReport
+from social_tracker.classification.yaml_io import MAX_CONFIG_BYTES
 from social_tracker.collector.service import CollectOutcome
 from social_tracker.collector.worker import DEFAULT_TICK_S, PassSummary
 from social_tracker.control.domain import CollectionState, format_confidence
@@ -68,6 +71,16 @@ analysis_app = typer.Typer(
 app.add_typer(analysis_app, name="analysis")
 items_app = typer.Typer(help="Look at the items collected from the sources.", no_args_is_help=True)
 app.add_typer(items_app, name="items")
+classify_app = typer.Typer(
+    help="Run the CPU classification cascade over collected items and look at its verdicts.",
+    no_args_is_help=True,
+)
+app.add_typer(classify_app, name="classify")
+topics_app = typer.Typer(
+    help="Show and change the vocabulary that decides what the classifier looks at.",
+    no_args_is_help=True,
+)
+app.add_typer(topics_app, name="topics")
 
 SourceId = Annotated[
     str,
@@ -502,6 +515,177 @@ def items_search(
     typer.echo(_render_items(found) if found else "No items found.")
 
 
+# ---- classification ----
+
+_NO_ELIGIBLE = (
+    "no source is eligible: global analysis must be on, and a source must be enabled with its "
+    "own analysis switch on (see `social-tracker status` and `sources list`)"
+)
+_NO_VERDICTS = "No classifications yet."
+
+
+def _render_classify(report: ClassifyReport) -> str:
+    return (
+        f"classified {report.classified} item(s), {report.out_of_scope} out of scope, "
+        f"{report.skipped} skipped, {report.errors} error(s); "
+        f"{report.needs_llm} queued for the LLM"
+    )
+
+
+@classify_app.command("run")
+def classify_run(
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            min=1,
+            max=MAX_LIST_LIMIT,
+            help="How many pending items to classify, oldest published first.",
+        ),
+    ] = DEFAULT_BATCH,
+) -> None:
+    """Classify the pending items of the eligible sources (CPU only, nothing leaves the machine).
+
+    Needs global analysis on and a source that is enabled with its analysis switch on. Items of
+    other sources stay as they are. The worker does this after every collection pass; this
+    command is for a one-off run. Exit status 1 when a storage error stopped the run."""
+    with _guard(), closing(build_container()) as services:
+        report = services.classifier.classify_pending(limit)
+    if report.eligible_sources == 0:
+        typer.echo(_NO_ELIGIBLE)
+        return
+    typer.echo(_render_classify(report))
+    if report.errors:
+        typer.echo("error: a storage error stopped the run; run it again to resume", err=True)
+        raise typer.Exit(EXIT_REFUSED)
+
+
+def _render_verdict(c: Classification) -> str:
+    flags = [
+        name
+        for name, on in (
+            ("needs_llm", c.needs_llm),
+            ("low_confidence", c.low_confidence),
+            ("truncated", c.truncated),
+        )
+        if on
+    ]
+    topics = ", ".join(t.value for t in c.topics) or "none"
+    signals = ", ".join(f"{s.name} ({s.weight:g})" for s in c.signals) or "none"
+    lines = [
+        f"item: {c.item_id}",
+        f"label: {c.label.value}",
+        f"confidence: {c.confidence:.3f}",
+        f"stage: {c.stage.value}",
+        f"rationale: {escape_unprintable(c.rationale)}",
+        f"topics: {topics}",
+        f"signals: {signals}",
+        f"flags: {', '.join(flags) or 'none'}",
+    ]
+    if c.scope_reason is not None:
+        lines.append(f"reason: {c.scope_reason.value}")
+    if c.duplicate_of is not None:
+        lines.append(f"duplicate of: {c.duplicate_of}")
+    if c.recycled_of is not None:
+        lines.append(f"recycled of: {c.recycled_of}")
+    lines += [
+        f"priority: {c.priority:.4f}",
+        f"catalog: {c.catalog_status}",
+        f"source credibility used: {c.source_credibility_used}",
+        f"classified at: {c.classified_at.isoformat()}",
+        f"classifier version: {c.classifier_version}",
+    ]
+    return "\n".join(lines)
+
+
+@classify_app.command("show")
+def classify_show(
+    item_id: Annotated[str, typer.Argument(metavar="ITEM_ID", help="Id of a classified item.")],
+) -> None:
+    """Show the verdict of one item: label, confidence, deciding stage, rationale and flags."""
+    with _guard(), closing(build_container()) as services:
+        verdict = services.classifier.get(item_id)
+    typer.echo(_render_verdict(verdict))
+
+
+def _render_stats(stats: ClassificationStats) -> str:
+    lines = [f"classifications: {stats.total}", "by label:"]
+    lines += [f"  {name} {count}" for name, count in stats.by_label]
+    if stats.out_of_scope_by_reason:
+        lines.append("out of scope by reason:")
+        lines += [f"  {name} {count}" for name, count in stats.out_of_scope_by_reason]
+    lines += [
+        f"queued for the LLM: {stats.needs_llm}",
+        f"low confidence: {stats.low_confidence}",
+        f"duplicates: {stats.duplicates}",
+        f"recycled: {stats.recycled}",
+        f"truncated: {stats.truncated}",
+    ]
+    return "\n".join(lines)
+
+
+@classify_app.command("stats")
+def classify_stats() -> None:
+    """Count the stored verdicts: by label, out of scope by reason, and the flags."""
+    with _guard(), closing(build_container()) as services:
+        stats = services.classifier.stats()
+    typer.echo(_render_stats(stats) if stats.total else _NO_VERDICTS)
+
+
+# ---- topics ----
+
+
+@topics_app.command("show")
+def topics_show() -> None:
+    """Print the vocabulary in force as YAML (the shipped defaults until one is installed)."""
+    with _guard(), closing(build_container()) as services:
+        current = services.topics.current()
+        text = services.topics.show_text()
+    origin = (
+        "defaults shipped with the application (version 0)"
+        if current.version == 0
+        else f"stored version {current.version}"
+    )
+    typer.echo(f"# topics: {origin}")
+    typer.echo(text, nl=False)
+
+
+@topics_app.command("set-file")
+def topics_set_file(
+    file: Annotated[
+        Path,
+        typer.Argument(
+            metavar="PATH",
+            help=f"YAML file with the vocabulary (UTF-8, at most {MAX_CONFIG_BYTES} bytes). "
+            "Unknown keys, duplicates and oversize lists are refused.",
+        ),
+    ],
+    reason: Reason,
+    actor: Actor = None,
+) -> None:
+    """Install a vocabulary from a YAML file as a new version (audited with actor and reason).
+    The same vocabulary again changes nothing. Items already classified are not redone."""
+    with _guard():
+        text = read_import_text(file, max_bytes=MAX_CONFIG_BYTES, what="topic file")
+        with closing(build_container()) as services:
+            change = services.topics.set_text(
+                text, actor=resolve_actor(actor, os.environ), reason=reason
+            )
+    word = "updated" if change.changed else "unchanged"
+    typer.echo(f"topics {word}: version {change.version}")
+
+
+@topics_app.command("reset")
+def topics_reset(reason: Reason, actor: Actor = None) -> None:
+    """Go back to the vocabulary shipped with the application (as a new, audited version)."""
+    with _guard(), closing(build_container()) as services:
+        change = services.topics.reset(actor=resolve_actor(actor, os.environ), reason=reason)
+    if change.changed:
+        typer.echo(f"topics reset to the defaults: version {change.version}")
+    else:
+        typer.echo("topics already use the defaults")
+
+
 # ---- worker ----
 
 
@@ -539,12 +723,15 @@ def _render_pass(summary: PassSummary, *, reset_analysis: bool = True) -> str:
     counts = Counter(result.outcome for result in summary.results)
     skipped = sum(n for outcome, n in counts.items() if outcome.value.startswith("skipped"))
     new = sum(result.new for result in summary.results)
-    return (
+    line = (
         f"pass complete: {counts[CollectOutcome.COLLECTED]} collected "
         f"({new} new item(s)), {counts[CollectOutcome.NOT_MODIFIED]} not modified, "
         f"{counts[CollectOutcome.FAILED]} failed, {counts[CollectOutcome.DISCARDED]} discarded, "
         f"{skipped} skipped, {summary.errors} error(s)"
     )
+    if isinstance(summary.classification, ClassifyReport):
+        return f"{line}\nclassification: {_render_classify(summary.classification)}"
+    return line
 
 
 @app.command("run")
@@ -576,9 +763,10 @@ def run(
 
     Starting it switches global analysis OFF (audited as system:worker); turn it on afterwards
     with `social-tracker analysis on`. Each pass collects the enabled RSS sources that are due
-    (their poll interval, 600 s by default), one at a time, and removes items past the retention
-    period. Stopping lets the collection in flight finish (a second Ctrl+C or SIGTERM exits at
-    once with status 130 or 143). Run one worker per database.
+    (their poll interval, 600 s by default), one at a time, then classifies what is pending (CPU
+    only) and removes items past the retention period. Stopping lets the collection in flight
+    finish (a second Ctrl+C or SIGTERM exits at once with status 130 or 143). Run one worker per
+    database.
     """
     if not math.isfinite(interval_tick):
         raise typer.BadParameter("must be a finite number", param_hint="--interval-tick")

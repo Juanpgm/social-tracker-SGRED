@@ -112,6 +112,17 @@ def test_once_without_the_reset_collects_what_is_due_while_analysis_is_on(cli: C
         assert len(services.items.list_items()) == 2
 
 
+def test_a_pass_classifies_what_it_collected_and_says_so(cli: Cli, fetcher):
+    add_news(cli)
+    cli.ok("analysis", "on", "--reason", WHY)
+    cli.ok("analysis", "on", "--source", "src_news", "--reason", WHY)
+    result = cli.ok("run", "--once", "--no-reset-analysis")
+    assert "classification: classified 1 item(s), 1 out of scope, 0 skipped, 0 error(s)" in (
+        result.stdout
+    )
+    assert "No classifications yet." not in cli.ok("classify", "stats").stdout
+
+
 def test_once_without_the_reset_leaves_analysis_on_and_writes_no_startup_event(cli: Cli, fetcher):
     add_news(cli)
     cli.ok("analysis", "on", "--reason", WHY)

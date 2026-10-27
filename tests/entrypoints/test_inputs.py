@@ -147,6 +147,19 @@ def test_the_size_limit_is_inclusive_and_one_more_byte_is_refused(tmp_path: Path
     assert str(MAX_FILE_BYTES) in caught.value.message
 
 
+def test_the_limit_and_the_name_in_the_messages_can_be_chosen(tmp_path: Path):
+    at_limit, over = tmp_path / "at.yaml", tmp_path / "over.yaml"
+    at_limit.write_bytes(b"#" * 10)
+    over.write_bytes(b"#" * 11)
+    assert len(read_import_text(at_limit, max_bytes=10, what="topic file")) == 10
+    with pytest.raises(ValidationError) as caught:
+        read_import_text(over, max_bytes=10, what="topic file")
+    assert caught.value.message == "topic file is larger than 10 bytes"
+    with pytest.raises(ValidationError) as missing:
+        read_import_text(tmp_path / "nope.yaml", what="topic file")
+    assert missing.value.message.startswith("cannot read the topic file: ")
+
+
 def test_a_huge_file_is_never_read_beyond_the_limit(tmp_path: Path, monkeypatch):
     path = tmp_path / "huge.yaml"
     path.write_bytes(b"#" * (MAX_FILE_BYTES * 3))

@@ -65,16 +65,19 @@ def parse_fields(pairs: Sequence[str], *, reserved: frozenset[str] = frozenset()
     return fields
 
 
-def _read_failure(reason: str) -> ValidationError:
-    return ValidationError(f"cannot read the import file: {reason}")
+def _read_failure(reason: str, what: str = "import file") -> ValidationError:
+    return ValidationError(f"cannot read the {what}: {reason}")
 
 
 def _write_failure(reason: str) -> ValidationError:
     return ValidationError(f"cannot write the output file: {reason}")
 
 
-def read_import_text(path: Path) -> str:
-    """Read an import file as text, never more than `MAX_FILE_BYTES` + 1 bytes of it.
+def read_import_text(
+    path: Path, *, max_bytes: int = MAX_FILE_BYTES, what: str = "import file"
+) -> str:
+    """Read an import file as text, never more than `max_bytes` + 1 bytes of it (`what` names
+    the file in the messages).
 
     Only regular files are read (checked with `fstat` on the opened descriptor, so there is no
     check-then-open race): a FIFO, device or directory is refused instead of blocking on it or
@@ -88,22 +91,22 @@ def read_import_text(path: Path) -> str:
     try:
         fd = os.open(path, flags)
     except OSError as exc:
-        raise _read_failure(exc.strerror or "I/O error") from None
+        raise _read_failure(exc.strerror or "I/O error", what) from None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise _read_failure("not a regular file")
+            raise _read_failure("not a regular file", what)
         with os.fdopen(fd, "rb", closefd=False) as handle:
-            raw = handle.read(MAX_FILE_BYTES + 1)
+            raw = handle.read(max_bytes + 1)
     except OSError as exc:
-        raise _read_failure(exc.strerror or "I/O error") from None
+        raise _read_failure(exc.strerror or "I/O error", what) from None
     finally:
         os.close(fd)
-    if len(raw) > MAX_FILE_BYTES:
-        raise ValidationError(f"import file is larger than {MAX_FILE_BYTES} bytes")
+    if len(raw) > max_bytes:
+        raise ValidationError(f"{what} is larger than {max_bytes} bytes")
     try:
         return raw.decode("utf-8-sig")
     except UnicodeDecodeError:
-        raise ValidationError("import file is not valid UTF-8") from None
+        raise ValidationError(f"{what} is not valid UTF-8") from None
 
 
 def _existing_mode(path: Path) -> int | None:
