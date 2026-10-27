@@ -102,6 +102,8 @@ allow_indirect_imports = True
 # internet, and it may use only httpx2, httpcore2 (the connection layer under httpx2) and socket.
 # The one other client is the Ollama adapter of the LLM escalation, which talks to this machine
 # only (see `llm-adapter-loopback-only`) and may import httpx2 and nothing else of this list.
+# Both clients enforce their wall-clock deadline inside the I/O through `shared.iodeadline`, the
+# one module besides them that names httpx2 and httpcore2 (it opens no connection of its own).
 # Everything else, the composition root included, reaches the network through the Fetcher and
 # LlmJudge ports.
 # Indirect imports are allowed so that the composition root can wire the adapter.
@@ -125,6 +127,8 @@ ignore_imports =
     social_tracker.collector.http_fetcher -> httpx2
     social_tracker.collector.http_fetcher -> httpcore2
     social_tracker.collector.http_fetcher -> socket
+    social_tracker.shared.iodeadline -> httpx2
+    social_tracker.shared.iodeadline -> httpcore2
     social_tracker.llm.ollama -> httpx2
 unmatched_ignore_imports_alerting = none
 
@@ -279,8 +283,12 @@ forbidden_modules =
 
 # The Ollama adapter is the only plain-http client of the application and it may talk to this
 # machine only: which address is accepted is decided in `llm.domain.parse_loopback_url`
-# (tests/llm pin it, and that the adapter source names no other host). It may use httpx2 and the
-# standard library; it never touches storage, other clients, sockets of its own or the collector.
+# (tests/llm pin it, and that the adapter source names no other host). It may use httpx2, the
+# deadline layer it shares with the fetcher (`shared.iodeadline`, which is what touches httpcore2
+# and ssl on its behalf) and the standard library; it never touches storage, other clients,
+# sockets of its own, process, thread or event-loop machinery, dynamic imports or native code, or
+# the collector. tests/architecture/test_llm_contracts.py also reads its imports and allows httpx2
+# as the one network client.
 [importlinter:contract:llm-adapter-loopback-only]
 name = The Ollama adapter must stay a loopback-only HTTP client
 type = forbidden
@@ -300,7 +308,11 @@ forbidden_modules =
     ssl
     subprocess
     httpx
+    httpcore
     httpcore2
+    h11
+    anyio
+    urllib3
     requests
     aiohttp
     urllib
@@ -310,3 +322,11 @@ forbidden_modules =
     typer
     yaml
     random
+    importlib
+    ctypes
+    asyncio
+    multiprocessing
+ignore_imports =
+    social_tracker.shared.iodeadline -> httpcore2
+    social_tracker.shared.iodeadline -> ssl
+unmatched_ignore_imports_alerting = none

@@ -131,7 +131,7 @@ def test_a_raw_output_is_kept_truncated_for_the_audit():
         (JudgeErrorKind.UNREACHABLE, False),
         (JudgeErrorKind.MODEL_NOT_FOUND, False),
         (JudgeErrorKind.TIMEOUT, True),
-        (JudgeErrorKind.SERVER_ERROR, True),
+        (JudgeErrorKind.SERVER_ERROR, False),  # a crashing server is judge level, not the item's
         (JudgeErrorKind.BAD_RESPONSE, True),
         (JudgeErrorKind.INVALID_OUTPUT, False),
     ],

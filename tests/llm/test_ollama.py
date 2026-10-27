@@ -72,7 +72,9 @@ def test_a_call_posts_the_prompt_with_the_schema_deterministic_options_and_keep_
     assert body["keep_alive"] == "300s"
     assert body["options"]["temperature"] == 0
     assert body["options"]["num_predict"] == 512
-    assert "think" not in body  # a Gemma model has no thinking switch to turn off
+    assert body["think"] is False  # sent for every model; a server that rejects it is asked again
+    assert body["options"]["num_ctx"] == 8192
+    assert body["options"]["seed"] == 0
 
 
 def test_the_same_request_sends_the_same_bytes():
@@ -88,7 +90,7 @@ def test_the_same_request_sends_the_same_bytes():
     assert bodies[0] == bodies[1]
 
 
-def test_a_qwen_model_is_asked_not_to_think():
+def test_a_qwen_model_is_asked_not_to_think():  # kept: Qwen is the model that needs it most
     seen: list[dict] = []
 
     def handler(req: httpx2.Request) -> httpx2.Response:
@@ -198,7 +200,7 @@ def test_nothing_listening_is_unreachable():
     fails(JudgeErrorKind.UNREACHABLE, make(handler))
 
 
-def test_a_connect_timeout_is_unreachable_but_a_read_timeout_is_a_timeout():
+def test_a_connect_timeout_is_unreachable_but_a_read_timeout_is_a_load_timeout():
     def connect(req: httpx2.Request) -> httpx2.Response:
         raise httpx2.ConnectTimeout("slow", request=req)
 
@@ -206,7 +208,8 @@ def test_a_connect_timeout_is_unreachable_but_a_read_timeout_is_a_timeout():
         raise httpx2.ReadTimeout("slow", request=req)
 
     fails(JudgeErrorKind.UNREACHABLE, make(connect))
-    fails(JudgeErrorKind.TIMEOUT, make(read))
+    # the first call has to load the model: its timeout is the server's, not the item's
+    fails(JudgeErrorKind.LOAD_TIMEOUT, make(read))
 
 
 def test_a_connection_dropped_in_the_middle_is_a_bad_response():
@@ -276,7 +279,7 @@ def test_a_model_that_cannot_be_loaded_also_falls_back():
     assert make(handler).judge(request()).model == "st-qwen35-4b"
 
 
-def test_the_fallback_gets_the_qwen_thinking_switch():
+def test_the_fallback_gets_the_thinking_switch_too():
     seen: list[dict] = []
 
     def handler(req: httpx2.Request) -> httpx2.Response:
@@ -287,7 +290,7 @@ def test_the_fallback_gets_the_qwen_thinking_switch():
         return ok()
 
     make(handler).judge(request())
-    assert "think" not in seen[0]
+    assert seen[0]["think"] is False
     assert seen[1]["think"] is False
 
 
@@ -420,11 +423,11 @@ def test_a_slow_trickle_hits_the_wall_clock_deadline_not_the_per_read_timeout():
         return httpx2.Response(200, stream=stream)
 
     judge = OllamaJudge(
-        LlmSettings(call_deadline_s=60),
+        LlmSettings(call_deadline_s=60, load_deadline_s=60),
         transport=httpx2.MockTransport(handler),
         monotonic=lambda: clock["now"],
     )
-    fails(JudgeErrorKind.TIMEOUT, judge)
+    fails(JudgeErrorKind.LOAD_TIMEOUT, judge)
     assert clock["now"] <= 100.0  # gave up after three or four chunks, not a hundred
 
 
@@ -454,11 +457,11 @@ def test_the_fallback_shares_the_deadline_of_the_call():
         return httpx2.Response(404, json={"error": "model not found"})
 
     judge = OllamaJudge(
-        LlmSettings(call_deadline_s=60),
+        LlmSettings(call_deadline_s=60, load_deadline_s=60),
         transport=httpx2.MockTransport(handler),
         monotonic=lambda: clock["now"],
     )
-    fails(JudgeErrorKind.TIMEOUT, judge)
+    fails(JudgeErrorKind.LOAD_TIMEOUT, judge)
     assert models == ["st-gemma4-e4b"]  # no time left for the second model
 
 

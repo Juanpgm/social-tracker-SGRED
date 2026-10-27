@@ -6,6 +6,7 @@ import of a module goes in ONE file and `lint-imports` reports each of them, so 
 few linters and no rule is a rule that only looks like one.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -57,6 +58,15 @@ ADAPTER_FORBIDDEN = {
     "import os": "os",
     "import pathlib": "pathlib",
     "import sqlite3": "sqlite3",
+    "import importlib": "importlib",
+    "import ctypes": "ctypes",
+    "import asyncio": "asyncio",
+    "import multiprocessing": "multiprocessing",
+    "import h11": "h11",
+    "import anyio": "anyio",
+    "import urllib3": "urllib3",
+    "import httpcore": "httpcore",
+    "import httpcore2": "httpcore2",
     "from fixpkg.persistence import thing": "fixpkg.persistence.thing",
     "from fixpkg.collector import thing": "fixpkg.collector.thing",
     "from fixpkg.control import thing": "fixpkg.control.thing",
@@ -165,3 +175,64 @@ def test_the_adapter_names_no_host_but_the_loopback_one(repo_root: Path):
     source = path.read_text(encoding="utf-8")
     for needle in ("http://", "https://", "www.", ".com", ".org", ".net"):
         assert needle not in source, needle
+
+
+NETWORK_CLIENTS = frozenset(
+    {
+        "httpx",
+        "httpx2",
+        "httpcore",
+        "httpcore2",
+        "requests",
+        "urllib3",
+        "aiohttp",
+        "h11",
+        "anyio",
+        "websockets",
+        "socket",
+        "ssl",
+        "http",
+        "urllib",
+    }
+)
+DYNAMIC = frozenset({"__import__", "importlib", "eval", "exec", "compile", "ctypes"})
+
+
+def _imported(path: Path) -> tuple[set[str], set[str]]:
+    """The top-level packages a file imports and the dynamic-code names it uses."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imports: set[str] = set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imports.add(node.module.split(".")[0])
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    return imports, names & DYNAMIC
+
+
+def test_the_only_network_client_the_adapter_imports_is_httpx2(repo_root: Path):
+    path = repo_root / "src" / "social_tracker" / "llm" / "ollama.py"
+    imports, dynamic = _imported(path)
+    assert imports & NETWORK_CLIENTS == {"httpx2"}
+    assert dynamic == set()
+
+
+def test_the_deadline_layer_touches_the_http_stack_but_opens_no_socket(repo_root: Path):
+    path = repo_root / "src" / "social_tracker" / "shared" / "iodeadline.py"
+    imports, dynamic = _imported(path)
+    assert imports & NETWORK_CLIENTS == {"httpx2", "httpcore2", "ssl"}
+    assert dynamic == set()
+
+
+def test_no_other_shared_module_names_a_network_client(repo_root: Path):
+    shared = repo_root / "src" / "social_tracker" / "shared"
+    for path in sorted(shared.glob("*.py")):
+        if path.name == "iodeadline.py":
+            continue
+        imports, _ = _imported(path)
+        assert not imports & NETWORK_CLIENTS, path.name

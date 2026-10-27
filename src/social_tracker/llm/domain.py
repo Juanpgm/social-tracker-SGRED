@@ -29,7 +29,8 @@ from social_tracker.shared.errors import DomainError, ValidationError
 DEFAULT_BASE_URL: Final = "http://127.0.0.1:11434"
 DEFAULT_MODEL: Final = "st-gemma4-e4b"
 DEFAULT_FALLBACK_MODEL: Final = "st-qwen35-4b"
-PROMPT_VERSION: Final = "judge-1"
+PROMPT_VERSION: Final = "judge-2"
+JUDGE_SEED: Final = 0  # seed of the first attempt; a retry adds its attempt number
 LOOPBACK_ADDRESS: Final = "127.0.0.1"
 
 # The labels the model may answer with (RC-3 and `no_risk`); `unclassified` and `out_of_scope`
@@ -40,6 +41,8 @@ JUDGE_LABELS: Final = (
     Label.RECYCLED_CONTENT,
     Label.NO_RISK,
 )
+MIN_PROMPT_TOKENS: Final = 2048  # room the instruction and a short text need next to the output
+CHARS_PER_TOKEN: Final = 2.5  # a conservative estimate: real text is about 3 to 4
 MAX_EVIDENCE_ITEMS: Final = 5
 MAX_EVIDENCE_CHARS: Final = 200
 MAX_RAW_OUTPUT_CHARS: Final = 2048
@@ -113,7 +116,14 @@ class LlmSettings:
     - `max_prompt_chars`: item text longer than this is read at both ends and flagged.
       `max_response_bytes`: a larger answer is refused. `max_output_tokens`: generation cap.
     - `retry_base_s`/`retry_cap_s`: backoff after a failed call, doubling per failure.
-      `max_failures`: item-specific failures after which the item is parked for good.
+      `max_failures`: item-specific failures after which the item is parked.
+    - `load_deadline_s`: wall-clock limit of a call that has to load the model first (it is not
+      resident); a call to a resident model keeps `call_deadline_s`. `num_ctx`: the context
+      window sent to the server; the prompt is cut to fit it.
+    - `pass_budget_s`: wall-clock budget of one escalation pass (the item count bounds it too).
+    - `parked_ttl_s`: a parked item re-enters the queue after this long (`llm requeue-parked`
+      does it at once). `source_share`: the share of `queue_max` one source may hold when the
+      queue overflows; the excess of a source over it is dropped first.
     """
 
     base_url: str = DEFAULT_BASE_URL
@@ -130,6 +140,11 @@ class LlmSettings:
     retry_base_s: int = 60
     retry_cap_s: int = 3600
     max_failures: int = 3
+    load_deadline_s: float = 180.0
+    num_ctx: int = 8192
+    pass_budget_s: float = 120.0
+    parked_ttl_s: int = 86_400
+    source_share: float = 0.25
 
     def __post_init__(self) -> None:
         parse_loopback_url(self.base_url)
@@ -149,6 +164,15 @@ class LlmSettings:
             and _whole(self.retry_cap_s, 1, 604_800)
             and self.retry_cap_s >= self.retry_base_s
             and _whole(self.max_failures, 1, 100)
+            and _number(self.load_deadline_s, 0.0, 1800.0)
+            and self.load_deadline_s > 0
+            and _whole(self.num_ctx, 2048, 262_144)
+            and self.num_ctx - self.max_output_tokens >= MIN_PROMPT_TOKENS
+            and _number(self.pass_budget_s, 0.0, 86_400.0)
+            and self.pass_budget_s > 0
+            and _whole(self.parked_ttl_s, 60, 2_592_000)
+            and _number(self.source_share, 0.0, 1.0)
+            and self.source_share > 0
         )
         if not valid:
             raise ValidationError("invalid language model settings")
@@ -156,6 +180,22 @@ class LlmSettings:
     @property
     def endpoint(self) -> LoopbackEndpoint:
         return parse_loopback_url(self.base_url)
+
+    @property
+    def cold_deadline_s(self) -> float:
+        """The wall-clock limit of a call that loads the model first."""
+        return max(self.load_deadline_s, self.call_deadline_s)
+
+    @property
+    def longest_judgment_s(self) -> float:
+        """The longest one judgment can take: a cold first call, then the one warm retry of an
+        invalid answer. A lease must outlive it."""
+        return self.cold_deadline_s + self.call_deadline_s
+
+    @property
+    def source_cap(self) -> int:
+        """How many waiting items one source may hold when the queue overflows."""
+        return max(1, int(self.queue_max * self.source_share))
 
     @property
     def models(self) -> tuple[str, ...]:
@@ -212,35 +252,74 @@ def prompt_text(title: str, text: str, max_chars: int) -> tuple[str, bool]:
 
 class JudgeErrorKind(StrEnum):
     UNREACHABLE = "unreachable"  # nothing is listening, or the connection could not be made
-    TIMEOUT = "timeout"  # the call, body included, outlived its deadline
+    TIMEOUT = "timeout"  # the call, body included, outlived its deadline (model resident)
+    LOAD_TIMEOUT = "load_timeout"  # the same, on a call that had to load the model first
     SERVER_ERROR = "server_error"  # the server answered 5xx
-    BAD_RESPONSE = "bad_response"  # not the shape of an answer, too large, redirected, truncated
+    BAD_RESPONSE = "bad_response"  # not the shape of an answer, too large, redirected, 4xx
     MODEL_NOT_FOUND = "model_not_found"  # no model to answer (also: it cannot be loaded)
     INVALID_OUTPUT = "invalid_output"  # the text of the model is not a valid verdict (RC-9)
+    NOT_OLLAMA = "not_ollama"  # what listens at the address does not identify as Ollama
 
 
-_ITEM_SPECIFIC = frozenset(
-    {JudgeErrorKind.TIMEOUT, JudgeErrorKind.SERVER_ERROR, JudgeErrorKind.BAD_RESPONSE}
+# Failures that say something about the SERVER and nothing about the item: they back the whole
+# judge off and never count towards parking an item. A status of 400/401/403/429/5xx on the chat
+# call (`status` is set) belongs here too: a refused, rate-limited or crashed server is no verdict
+# on the item it was asked about. All of them happen before the model produced an answer, so the
+# hourly reservation of the call is given back.
+_JUDGE_LEVEL = frozenset(
+    {
+        JudgeErrorKind.UNREACHABLE,
+        JudgeErrorKind.LOAD_TIMEOUT,
+        JudgeErrorKind.SERVER_ERROR,
+        JudgeErrorKind.MODEL_NOT_FOUND,
+        JudgeErrorKind.NOT_OLLAMA,
+    }
 )
+# The classes of an invalid answer, as fixed codes: a retry names the class to the model, never
+# what the model wrote.
+INVALID_PROBLEMS: Final = ("empty", "too_large", "not_json", "not_object", "schema", "cut")
 
 
 class JudgeError(DomainError):
-    """A judge that could not answer. `item_specific` failures may be the fault of the item (it
-    makes the model crash or never finish) and count towards parking it; the others (nothing
-    listening, no model) say nothing about the item. The message is a fixed phrase: never item
-    text, never model output."""
+    """A judge that could not answer. `judge_level` failures are the server's (down, refusing,
+    crashing, slow to load) and never count against the item. `item_specific` ones MAY be the
+    fault of the item (a warm call that never finishes, a body that is not an answer): the
+    service counts them against the item only when the judge has been answering other items.
+    The message is a fixed phrase: never item text, never model output. `status` is the HTTP
+    status of a refused call; `problem` the class of an invalid answer (`INVALID_PROBLEMS`)."""
 
-    def __init__(self, kind: JudgeErrorKind, detail: str = "", *, raw_output: str = "") -> None:
+    def __init__(
+        self,
+        kind: JudgeErrorKind,
+        detail: str = "",
+        *,
+        raw_output: str = "",
+        status: int | None = None,
+        problem: str = "",
+    ) -> None:
         super().__init__(detail or kind.value)
         self.kind = kind
         self.raw_output = raw_output[
             :MAX_RAW_OUTPUT_CHARS
         ]  # for the audit; not part of the message
+        self.status = status
+        self.problem = problem
         self.code = f"llm_{kind.value}"
 
     @property
+    def judge_level(self) -> bool:
+        return self.kind in _JUDGE_LEVEL or (
+            self.kind is JudgeErrorKind.BAD_RESPONSE and self.status is not None
+        )
+
+    @property
     def item_specific(self) -> bool:
-        return self.kind in _ITEM_SPECIFIC
+        return not self.judge_level and self.kind is not JudgeErrorKind.INVALID_OUTPUT
+
+    @property
+    def refundable(self) -> bool:
+        """The call failed before the model gave anything: its reservation is given back."""
+        return self.judge_level
 
 
 # ---- request and response ----
@@ -301,12 +380,15 @@ class JudgeEvidence:
 @dataclass(frozen=True)
 class JudgeRequest:
     """One question for the judge: the item text (untrusted data, already cleaned and bounded,
-    `text_truncated` says it was cut) and the evidence found so far."""
+    `text_truncated` says it was cut) and the evidence found so far. A retry of an invalid answer
+    has `attempt` 1 and names the class of the problem (`previous_problem`), never the text."""
 
     item_id: str
     text: str
     text_truncated: bool
     evidence: JudgeEvidence
+    attempt: int = 0
+    previous_problem: str = ""
 
     def __post_init__(self) -> None:
         valid = (
@@ -315,6 +397,9 @@ class JudgeRequest:
             and isinstance(self.text, str)
             and isinstance(self.text_truncated, bool)
             and isinstance(self.evidence, JudgeEvidence)
+            and _whole(self.attempt, 0, 3)
+            and (self.previous_problem == "" or self.previous_problem in INVALID_PROBLEMS)
+            and (self.attempt > 0 or self.previous_problem == "")
         )
         if not valid:
             raise ValidationError("invalid request for the language model")
@@ -390,6 +475,16 @@ def hour_start(moment: datetime) -> datetime:
 
 # ---- how a judgment lands ----
 
+MAX_LLM_CONFIDENCE: Final = 0.95  # a model is never more sure than this
+SUSPICIOUS_NO_RISK_CAP: Final = 0.7  # ... nor when it clears what the earlier stages suspected
+STRONG_EVIDENCE: Final = 0.6  # a risk signal or prior at least this strong is not waved away
+REQUEUED_PRIORITY_FLOOR: Final = 0.1  # a copy that has to be judged on its own queues last
+_SUSPICIOUS_SIGNALS: Final = frozenset({"obfuscated_text"})
+_REVIEW_NOTE: Final = " [needs review: earlier signals disagree]"
+_RISK = frozenset(
+    {Label.DELIBERATE_DISINFORMATION, Label.UNINTENTIONAL_RUMOR, Label.RECYCLED_CONTENT}
+)
+
 
 def llm_low_confidence(confidence: float, alert_min: float) -> bool:
     """RC-11 plus the floor of this stage: an LLM label under 0.5, or under the alert threshold,
@@ -397,52 +492,125 @@ def llm_low_confidence(confidence: float, alert_min: float) -> bool:
     return confidence < LOW_CONFIDENCE_FLOOR or confidence < alert_min
 
 
-def judged(prior: Classification, answer: JudgeResponse, alert_min: float) -> Classification:
+def contradicts_prior(prior: Classification, answer: JudgeResponse) -> bool:
+    """A `no_risk` from the model that clears something the earlier stages found suspicious: an
+    obfuscated or injection-style text, a risk signal (or a risk verdict) of at least 0.6, or a
+    claim the official catalog contradicts. A risk answer never contradicts: it only adds to the
+    suspicion. Such a `no_risk` is applied but never final (see `judged`)."""
+    if answer.label is not Label.NO_RISK:
+        return False
+    if prior.catalog_status == "mismatch":
+        return True
+    if prior.label in _RISK and prior.confidence >= STRONG_EVIDENCE:
+        return True
+    for signal in prior.signals:
+        if signal.name in _SUSPICIOUS_SIGNALS or signal.name.startswith("injection"):
+            return True
+        if signal.name == "catalog_mismatch":
+            return True
+        if signal.label in _RISK and signal.weight >= STRONG_EVIDENCE:
+            return True
+    return False
+
+
+def judged(
+    prior: Classification, answer: JudgeResponse, alert_min: float, now: datetime | None = None
+) -> Classification:
     """The verdict after a valid judgment: the label, confidence and rationale of the model,
     stage `llm`, out of the queue. Evidence, topics, catalog outcome, credibility used and the
     links are the earlier stages' and stay. The credibility of the source is never applied to a
-    judged confidence."""
+    judged confidence.
+
+    Guard rails on an answer that is valid but suspicious: the confidence is at most 0.95, and a
+    `no_risk` that clears what the earlier stages found suspicious (`contradicts_prior`) is at
+    most 0.7, flagged `low_confidence` and noted for review, so it is never taken as final."""
+    confidence = min(answer.confidence, MAX_LLM_CONFIDENCE)
+    rationale = answer.rationale
+    flagged = False
+    if contradicts_prior(prior, answer):
+        confidence = min(confidence, SUSPICIOUS_NO_RISK_CAP)
+        rationale = rationale[: MAX_RATIONALE_CHARS - len(_REVIEW_NOTE)].rstrip() + _REVIEW_NOTE
+        flagged = True
     return replace(
         prior,
         label=answer.label,
-        confidence=answer.confidence,
+        confidence=confidence,
         stage=Stage.LLM,
-        rationale=answer.rationale,
-        low_confidence=llm_low_confidence(answer.confidence, alert_min),
+        rationale=rationale,
+        low_confidence=flagged or llm_low_confidence(confidence, alert_min),
         needs_llm=False,
         priority=0.0,
+        **_settlement("llm", now),
     )
 
 
-def left_unjudged(prior: Classification) -> Classification:
+def _settlement(reason: str, now: datetime | None) -> dict[str, object]:
+    if now is None:
+        return {}
+    return {"settled_at": now, "settle_reason": reason}
+
+
+def left_unjudged(
+    prior: Classification, now: datetime | None = None, reason: str = "invalid"
+) -> Classification:
     """The verdict of the earlier stage, out of the queue and flagged low confidence, because no
     judgment will come: RC-9 (the model answered twice with something that is not a valid verdict,
     so its judgment is `unclassified` and contributes nothing), an item parked after repeated
-    failures, or one dropped from a full queue."""
-    return replace(prior, needs_llm=False, low_confidence=True, priority=0.0)
+    failures, or one dropped from a full queue. `reason` is `invalid` or `parked`."""
+    return replace(
+        prior, needs_llm=False, low_confidence=True, priority=0.0, **_settlement(reason, now)
+    )
 
 
 def reused_by_duplicate(
-    duplicate: Classification, original: Classification, alert_min: float
+    duplicate: Classification,
+    original: Classification,
+    alert_min: float,
+    now: datetime | None = None,
 ) -> Classification:
     """An exact copy that was waiting for its original: it takes the judged label and confidence
     of the original, keeps its OWN source credibility (the prior it was recorded with) and says
-    so. It was not judged itself, so its stage stays `dedup`."""
+    so. It was not judged itself, so its stage stays `dedup`. Only a copy whose text is identical
+    to the original's may be settled this way (`text_identity`)."""
     note = f"duplicate of {original.item_id}: reused its judged {original.label.value} verdict"
     return replace(
         duplicate,
         label=original.label,
         confidence=original.confidence,
         rationale=note[:MAX_RATIONALE_CHARS],
-        low_confidence=llm_low_confidence(original.confidence, alert_min),
+        low_confidence=original.low_confidence
+        or llm_low_confidence(original.confidence, alert_min),
         awaiting_original=False,
+        **_settlement("duplicate", now),
     )
 
 
-def released_duplicate(duplicate: Classification) -> Classification:
-    """The original left the queue without a verdict to copy: the duplicate keeps the provisional
-    verdict it already has and stops waiting."""
-    return replace(duplicate, awaiting_original=False)
+def released_duplicate(
+    duplicate: Classification, now: datetime | None = None, reason: str = "duplicate"
+) -> Classification:
+    """The original left the queue without a verdict to copy (invalid answer, parked, dropped):
+    the duplicate keeps the provisional verdict it already has, stops waiting and gets the same
+    low-confidence treatment as the original (`left_unjudged`)."""
+    return replace(
+        duplicate, awaiting_original=False, low_confidence=True, **_settlement(reason, now)
+    )
+
+
+def requeued_copy(copy: Classification, *, near_of: str | None, priority: float) -> Classification:
+    """A waiting copy that cannot take its original's verdict (its text differs by a character:
+    punctuation, a look-alike letter, another address) or whose original is gone: it becomes a
+    normal queued item judged on its own. The link to the original stays as a near copy, which is
+    only a prior for the judge; `None` drops it."""
+    return replace(
+        copy,
+        duplicate_of=None,
+        near_of=near_of,
+        awaiting_original=False,
+        needs_llm=True,
+        priority=max(priority, REQUEUED_PRIORITY_FLOOR),
+        settled_at=None,
+        settle_reason=None,
+    )
 
 
 # ---- what the repositories keep ----

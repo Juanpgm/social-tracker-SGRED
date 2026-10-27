@@ -39,7 +39,6 @@ import ipaddress
 import logging
 import math
 import socket
-import ssl
 import threading
 import time
 import zlib
@@ -47,7 +46,6 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-import httpcore2
 import httpx2
 
 from social_tracker.collector.domain import (
@@ -65,6 +63,7 @@ from social_tracker.collector.netpolicy import (
     usable_addresses,
 )
 from social_tracker.shared.clock import Clock
+from social_tracker.shared.iodeadline import DeadlineTransport as _DeadlineTransport
 
 USER_AGENT = "social-tracker/0.1 (local observation; read-only)"
 _ACCEPT = (
@@ -158,77 +157,6 @@ def _bare(request: FetchRequest) -> FetchRequest:
 @dataclass(frozen=True)
 class _Redirect:
     url: str
-
-
-class _DeadlineStream(httpcore2.NetworkStream):
-    """A connection whose every operation gets at most the budget that is left."""
-
-    def __init__(self, inner: httpcore2.NetworkStream, remaining: Callable[[], float]) -> None:
-        self._inner = inner
-        self._remaining = remaining
-
-    def _budget(self, timeout: float | None, expired: type[Exception]) -> float:
-        left = self._remaining()
-        if left <= 0:
-            raise expired("fetch deadline reached")
-        return left if timeout is None else min(timeout, left)
-
-    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
-        return self._inner.read(max_bytes, self._budget(timeout, httpcore2.ReadTimeout))
-
-    def write(self, buffer: bytes, timeout: float | None = None) -> None:
-        self._inner.write(buffer, self._budget(timeout, httpcore2.WriteTimeout))
-
-    def close(self) -> None:
-        self._inner.close()
-
-    def start_tls(
-        self,
-        ssl_context: ssl.SSLContext,
-        server_hostname: str | None = None,
-        timeout: float | None = None,
-    ) -> httpcore2.NetworkStream:
-        budget = self._budget(timeout, httpcore2.ConnectTimeout)
-        wrapped = self._inner.start_tls(ssl_context, server_hostname, budget)
-        return _DeadlineStream(wrapped, self._remaining)
-
-    def get_extra_info(self, info: str) -> Any:
-        return self._inner.get_extra_info(info)
-
-
-class _DeadlineBackend(httpcore2.NetworkBackend):
-    def __init__(self, inner: httpcore2.NetworkBackend, remaining: Callable[[], float]) -> None:
-        self._inner = inner
-        self._remaining = remaining
-
-    def connect_tcp(
-        self,
-        host: str,
-        port: int,
-        timeout: float | None = None,
-        local_address: str | None = None,
-        socket_options: Iterable[Any] | None = None,
-    ) -> httpcore2.NetworkStream:
-        left = self._remaining()
-        if left <= 0:
-            raise httpcore2.ConnectTimeout("fetch deadline reached")
-        budget = left if timeout is None else min(timeout, left)
-        stream = self._inner.connect_tcp(host, port, budget, local_address, socket_options)
-        return _DeadlineStream(stream, self._remaining)
-
-
-class _DeadlineTransport(httpx2.HTTPTransport):
-    """The default HTTP transport with its connections wrapped in the deadline of one fetch."""
-
-    def __init__(self, ssl_context: ssl.SSLContext, remaining: Callable[[], float]) -> None:
-        super().__init__(verify=ssl_context, trust_env=False)
-        self._pool.close()  # replaced below by a pool over the deadline-aware backend
-        self._pool = httpcore2.ConnectionPool(
-            ssl_context=ssl_context,
-            network_backend=_DeadlineBackend(httpcore2.SyncBackend(), remaining),
-            http2=False,
-            retries=0,
-        )
 
 
 class HttpFetcher:

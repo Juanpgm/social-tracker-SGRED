@@ -15,8 +15,9 @@ import httpx2
 import pytest
 
 from social_tracker.collector.domain import FetchError, FetchErrorKind, FetchRequest
-from social_tracker.collector.http_fetcher import FetchLimits, HttpFetcher, _DeadlineBackend
+from social_tracker.collector.http_fetcher import FetchLimits, HttpFetcher
 from social_tracker.shared.clock import FixedClock
+from social_tracker.shared.iodeadline import DeadlineBackend as _DeadlineBackend
 from tests.collector.netserver import Server, read_request, trickle
 from tests.collector.test_http_fetcher import FakeResolver, build, failure, ok, reply
 
