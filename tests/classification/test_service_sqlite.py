@@ -1,6 +1,7 @@
 """The classifier on SQLite: concurrency, a locked database, scale and the retention interplay."""
 
 import threading
+from dataclasses import replace
 
 from social_tracker.classification.domain import Label
 from social_tracker.classification.similarity import band_keys, pack
@@ -175,6 +176,9 @@ def test_a_copy_of_a_purged_original_is_still_recognised_by_its_signature(tmp_pa
         world.add_source("src_b")
         original = world.add("a", long_text(5), source_id="src_a")
         world.service.classify_pending(10)
+        queued = world.verdict(original)
+        if queued.needs_llm:  # an item still waiting for the language model is not purged
+            assert world.classifications.settle(replace(queued, needs_llm=False, priority=0.0))
         ItemService(world.items, world.uow, world.clock, retention_days=0).purge_expired()
         assert world.items.get(original.id) is None
         copy = world.add("b", long_text(5), source_id="src_b", published_at=PUBLISHED + days(8))
