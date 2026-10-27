@@ -111,17 +111,17 @@ MUTANTS = [
     ),
     m("prompt text head", DOMAIN, "head = max_chars // 2", "head = max_chars // 2 + 1"),
     m("sanitize cap", DOMAIN, "[:limit].rstrip()", "[: limit + 1].rstrip()"),
-    m(
+    m(  # the first of two identical lines in the file: the one of JudgeResponse
         "rationale length",
         DOMAIN,
-        '_text(self.rationale, 1, MAX_RATIONALE_CHARS, "the rationale")\n        if not isinstance(self.evidence, tuple) or len(self.evidence) > MAX_EVIDENCE_ITEMS:\n            raise ValidationError(f"at most',
-        '_text(self.rationale, 1, MAX_RATIONALE_CHARS + 1, "the rationale")\n        if not isinstance(self.evidence, tuple) or len(self.evidence) > MAX_EVIDENCE_ITEMS:\n            raise ValidationError(f"at most',
+        '_text(self.rationale, 1, MAX_RATIONALE_CHARS, "the rationale")',
+        '_text(self.rationale, 1, MAX_RATIONALE_CHARS + 1, "the rationale")',
     ),
-    m(
+    m(  # same: the first of two identical lines
         "evidence count",
         DOMAIN,
-        'if not isinstance(self.evidence, tuple) or len(self.evidence) > MAX_EVIDENCE_ITEMS:\n            raise ValidationError(f"at most',
-        'if not isinstance(self.evidence, tuple) or len(self.evidence) >= MAX_EVIDENCE_ITEMS:\n            raise ValidationError(f"at most',
+        "len(self.evidence) > MAX_EVIDENCE_ITEMS",
+        "len(self.evidence) >= MAX_EVIDENCE_ITEMS",
     ),
     m(
         "hourly cap range",
