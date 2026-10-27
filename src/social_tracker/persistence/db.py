@@ -201,8 +201,8 @@ def _check_history(applied: dict[int, str], known: Sequence[Migration]) -> None:
 
 
 def _rollback(conn: sqlite3.Connection) -> None:
-    if conn.in_transaction:
-        with suppress(sqlite3.Error):
+    with suppress(sqlite3.Error):
+        if conn.in_transaction:
             conn.execute("ROLLBACK")
 
 
@@ -274,6 +274,7 @@ class Database:
         self._path = Path(path)
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
+        self._tx_depth = 0  # only touched while holding `_lock`, i.e. by the owning thread
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self._path, isolation_level=None, check_same_thread=False)
@@ -322,13 +323,28 @@ class Database:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        """Exclusive write transaction. Rolls back on any exception, re-raising it."""
+        """Exclusive write transaction. Rolls back on any exception, re-raising it.
+
+        Joinable: while a thread holds a transaction, a nested `transaction()` on that thread
+        runs inside a SAVEPOINT. The inner block releases it on success; on failure it rolls
+        back to it, so the outer code can catch the error and keep its own writes. Rolling back
+        the outer transaction undoes the inner work too. Other threads never join: they wait
+        for the lock until the owner finishes.
+        """
         with self._lock:
             conn = self._connection()
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-            except sqlite3.Error as exc:
-                raise map_sqlite_error(exc) from None
+            if self._tx_depth == 0:
+                yield from self._outermost(conn)
+            else:
+                yield from self._nested(conn)
+
+    def _outermost(self, conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise map_sqlite_error(exc) from None
+        self._tx_depth = 1
+        try:
             try:
                 yield conn
             except BaseException as exc:
@@ -341,6 +357,34 @@ class Database:
             except sqlite3.Error as exc:
                 _rollback(conn)
                 raise map_sqlite_error(exc) from None
+        finally:
+            self._tx_depth = 0
+
+    def _nested(self, conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+        self._tx_depth += 1
+        name = f"st_sp_{self._tx_depth}"
+        try:
+            try:
+                conn.execute(f"SAVEPOINT {name}")
+            except sqlite3.Error as exc:
+                raise map_sqlite_error(exc) from None
+            try:
+                yield conn
+            except BaseException as exc:
+                # SQLite may already have rolled everything back (RAISE(ROLLBACK), disk errors);
+                # then there is no savepoint left and the outer COMMIT reports the failure.
+                with suppress(sqlite3.Error):
+                    conn.execute(f"ROLLBACK TO {name}")
+                    conn.execute(f"RELEASE {name}")
+                if isinstance(exc, sqlite3.Error):
+                    raise map_sqlite_error(exc) from None
+                raise
+            try:
+                conn.execute(f"RELEASE {name}")
+            except sqlite3.Error as exc:
+                raise map_sqlite_error(exc) from None
+        finally:
+            self._tx_depth -= 1
 
     def close(self) -> None:
         with self._lock:

@@ -28,6 +28,13 @@ COUNTER = Migration(
     "CREATE TABLE counter (id INTEGER PRIMARY KEY, n INTEGER NOT NULL);"
     "INSERT INTO counter VALUES (1, 0);",
 )
+DEFERRED_FK = Migration(
+    1,
+    "fk",
+    "CREATE TABLE parent (id INTEGER PRIMARY KEY);"
+    "CREATE TABLE child (id INTEGER PRIMARY KEY, "
+    "parent_id INTEGER REFERENCES parent (id) DEFERRABLE INITIALLY DEFERRED);",
+)
 UNIQUE_T = Migration(
     1,
     "t",
@@ -374,12 +381,166 @@ def test_a_failed_statement_rolls_back_the_whole_transaction(tmp_path, opened):
     assert db.query("SELECT count(*) FROM t")[0][0] == 0
 
 
-def test_nested_transaction_on_one_thread_is_a_storage_error_not_a_deadlock(tmp_path, opened):
-    db = opened(tmp_path / "t.db", migrations=[COUNTER])
-    with pytest.raises(StorageError), db.transaction(), db.transaction():
-        pytest.fail("the inner body must not run")
-    with db.transaction() as conn:  # the outer transaction was rolled back and released
-        conn.execute("UPDATE counter SET n = 1")
+# ---- nested (joined) transactions ----
+
+LOG = Migration(
+    1,
+    "log",
+    "CREATE TABLE log (id INTEGER PRIMARY KEY, msg TEXT UNIQUE);"
+    "CREATE TABLE guarded (x INTEGER);"
+    "CREATE TRIGGER guarded_abort BEFORE INSERT ON guarded WHEN NEW.x < 0 "
+    "BEGIN SELECT RAISE(ROLLBACK, 'whole transaction rolled back'); END;",
+)
+
+
+def logged(db: Database) -> list[str]:
+    return [r["msg"] for r in db.query("SELECT msg FROM log ORDER BY id")]
+
+
+def test_a_nested_transaction_joins_the_outer_one_and_commits_with_it(tmp_path, opened):
+    db = opened(tmp_path / "j.db", migrations=[LOG])
+    with db.transaction() as outer:
+        outer.execute("INSERT INTO log (msg) VALUES ('outer')")
+        with db.transaction() as inner:
+            assert inner is outer  # one connection, one transaction
+            inner.execute("INSERT INTO log (msg) VALUES ('inner')")
+        assert db.query("SELECT count(*) FROM log")[0][0] == 2  # visible to the outer code
+    assert logged(db) == ["outer", "inner"]
+
+
+def test_rolling_back_the_outer_transaction_undoes_the_joined_inner_one(tmp_path, opened):
+    db = opened(tmp_path / "j.db", migrations=[LOG])
+    with pytest.raises(RuntimeError), db.transaction() as outer:  # noqa: PT012 - the body is the scenario
+        outer.execute("INSERT INTO log (msg) VALUES ('outer')")
+        with db.transaction() as inner:
+            inner.execute("INSERT INTO log (msg) VALUES ('inner')")
+        raise RuntimeError("late failure")
+    assert logged(db) == []
+
+
+def test_an_inner_failure_caught_by_the_outer_code_keeps_only_the_outer_writes(tmp_path, opened):
+    db = opened(tmp_path / "j.db", migrations=[LOG])
+    with db.transaction() as outer:
+        outer.execute("INSERT INTO log (msg) VALUES ('outer')")
+        with pytest.raises(ConflictError), db.transaction() as inner:  # noqa: PT012 - the body is the scenario
+            inner.execute("INSERT INTO log (msg) VALUES ('partial')")
+            inner.execute("INSERT INTO log (msg) VALUES ('outer')")  # unique violation
+        outer.execute("INSERT INTO log (msg) VALUES ('after')")
+    assert logged(db) == ["outer", "after"]
+
+
+def test_an_inner_failure_that_is_not_caught_rolls_everything_back(tmp_path, opened):
+    db = opened(tmp_path / "j.db", migrations=[LOG])
+    boom = RuntimeError("boom")
+    with pytest.raises(RuntimeError) as info, db.transaction() as outer:  # noqa: PT012 - the body is the scenario
+        outer.execute("INSERT INTO log (msg) VALUES ('outer')")
+        with db.transaction() as inner:
+            inner.execute("INSERT INTO log (msg) VALUES ('inner')")
+            raise boom
+    assert info.value is boom
+    assert logged(db) == []
+
+
+def test_a_keyboard_interrupt_in_a_nested_transaction_undoes_only_the_inner_part(tmp_path, opened):
+    db = opened(tmp_path / "j.db", migrations=[LOG])
+    with db.transaction() as outer:
+        outer.execute("INSERT INTO log (msg) VALUES ('outer')")
+        with pytest.raises(KeyboardInterrupt), db.transaction() as inner:  # noqa: PT012 - the body is the scenario
+            inner.execute("INSERT INTO log (msg) VALUES ('inner')")
+            raise KeyboardInterrupt
+    assert logged(db) == ["outer"]
+
+
+def test_nesting_works_several_levels_deep_and_for_siblings(tmp_path, opened):
+    db = opened(tmp_path / "j.db", migrations=[LOG])
+    with db.transaction() as conn:
+        with db.transaction():
+            conn.execute("INSERT INTO log (msg) VALUES ('a')")
+            with db.transaction():
+                conn.execute("INSERT INTO log (msg) VALUES ('b')")
+                with pytest.raises(RuntimeError), db.transaction():  # noqa: PT012 - the body is the scenario
+                    conn.execute("INSERT INTO log (msg) VALUES ('lost')")
+                    raise RuntimeError
+        with db.transaction():  # a sibling reuses the savepoint name after the first was released
+            conn.execute("INSERT INTO log (msg) VALUES ('c')")
+    assert logged(db) == ["a", "b", "c"]
+
+
+def test_a_failure_that_makes_sqlite_roll_back_everything_surfaces_at_the_outer_commit(
+    tmp_path, opened
+):
+    db = opened(tmp_path / "j.db", migrations=[LOG])
+    with pytest.raises(StorageError), db.transaction() as outer:  # noqa: PT012 - the body is the scenario
+        outer.execute("INSERT INTO log (msg) VALUES ('outer')")
+        with pytest.raises(StorageError), db.transaction() as inner:
+            inner.execute("INSERT INTO guarded VALUES (-1)")  # RAISE(ROLLBACK) in the trigger
+    assert logged(db) == []
+    with db.transaction() as conn:  # the connection is usable and not stuck in a transaction
+        conn.execute("INSERT INTO log (msg) VALUES ('fresh')")
+    assert logged(db) == ["fresh"]
+
+
+def test_depth_bookkeeping_resets_after_exceptions(tmp_path, opened):
+    path = tmp_path / "j.db"
+    db = opened(path, migrations=[LOG])
+    other = opened(path, migrations=[LOG], busy_timeout_ms=100)
+    for _ in range(3):
+        with pytest.raises(RuntimeError), db.transaction(), db.transaction():
+            raise RuntimeError
+    # A new top-level transaction is a real BEGIN IMMEDIATE: it excludes other connections.
+    with db.transaction() as conn:  # no write yet: only BEGIN IMMEDIATE already holds the lock
+        with pytest.raises(StorageError) as info, other.transaction():
+            pytest.fail("the other connection must not get the write lock")
+        assert "SQLITE_BUSY" in str(info.value)
+        conn.execute("INSERT INTO log (msg) VALUES ('mine')")
+    assert logged(db) == ["mine"]
+
+
+def test_a_failed_outer_commit_resets_the_depth_too(tmp_path, opened):
+    db = opened(tmp_path / "j.db", migrations=[DEFERRED_FK])
+    with pytest.raises(StorageError), db.transaction() as conn:
+        conn.execute("INSERT INTO child (parent_id) VALUES (99)")  # violated at COMMIT
+    assert db.query("SELECT count(*) FROM child")[0][0] == 0
+    with db.transaction() as conn:  # a plain top-level transaction again, not a savepoint
+        conn.execute("INSERT INTO parent (id) VALUES (1)")
+        assert conn.in_transaction
+    assert db.query("SELECT count(*) FROM parent")[0][0] == 1
+
+
+def test_another_thread_does_not_join_a_transaction_it_does_not_own(tmp_path, opened):
+    db = opened(tmp_path / "j.db", migrations=[LOG])
+    holding, finished = threading.Event(), threading.Event()
+    errors: list[BaseException] = []
+
+    def other_thread():
+        try:
+            holding.wait(timeout=5)
+            with db.transaction() as conn:  # must wait for the owner, not join it
+                conn.execute("INSERT INTO log (msg) VALUES ('other')")
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assert below
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=other_thread)
+    thread.start()
+    with pytest.raises(RuntimeError), db.transaction() as conn:  # noqa: PT012 - the body is the scenario
+        conn.execute("INSERT INTO log (msg) VALUES ('owner')")
+        holding.set()
+        assert not finished.wait(timeout=0.3)  # blocked while the owner's transaction is open
+        raise RuntimeError("owner rolls back")
+    thread.join(timeout=10)
+    assert errors == []
+    # The other thread's own transaction committed; the owner's rollback did not touch it.
+    assert logged(db) == ["other"]
+
+
+def test_nested_use_after_close_is_a_storage_error(tmp_path):
+    db = Database(tmp_path / "j.db", migrations=[LOG])
+    with pytest.raises(StorageError), db.transaction():  # noqa: PT012 - the body is the scenario
+        db.close()
+        with db.transaction():
+            pytest.fail("the body must not run on a closed database")
 
 
 def test_threads_sharing_one_instance_never_lose_updates(tmp_path, opened):
