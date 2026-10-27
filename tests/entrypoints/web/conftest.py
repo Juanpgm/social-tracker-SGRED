@@ -62,7 +62,7 @@ class Web:
 
     def csrf(self) -> str:
         """A valid token for the client's current session (the client keeps the cookie)."""
-        found = TOKEN_FIELD.search(self.client.get("/sources/new/news_rss").text)
+        found = TOKEN_FIELD.search(self.client.get("/").text)
         assert found
         return found.group(1)
 
@@ -71,6 +71,10 @@ class Web:
     ) -> Any:
         body = {"csrf_token": self.csrf() if token is None else token, **(data or {})}
         return self.client.post(path, data=body, follow_redirects=False)
+
+    def post_htmx(self, path: str, data: Mapping[str, str] | None = None) -> Any:
+        body = {"csrf_token": self.csrf(), **(data or {})}
+        return self.client.post(path, data=body, headers={"HX-Request": "true"})
 
     def seed(self, source_id: str = "src_one", type_: str = "news_rss", **extra: Any) -> None:
         with closing(self.services()) as services:

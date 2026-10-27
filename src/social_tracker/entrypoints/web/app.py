@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException
 
 from social_tracker.entrypoints.web import routes
 from social_tracker.entrypoints.web.pages import (
+    BUSY_TEXT,
     ContainerFactory,
     WebContext,
     build_environment,
@@ -39,14 +40,13 @@ _STATUS_TEXT = {
     413: "The request was too large.",
     415: "The request used an unsupported content type.",
 }
-_BUSY_TEXT = "The database is busy or unavailable. Wait a moment and try again."
 
 
 def _domain_error(request: Request, exc: Exception) -> Response:
     if isinstance(exc, NotFoundError):
         return error_page(request, 404, "That source does not exist.")
     if isinstance(exc, StorageError):
-        return error_page(request, 503, _BUSY_TEXT)
+        return error_page(request, 503, BUSY_TEXT)
     status = 409 if isinstance(exc, ConflictError) else 400
     assert isinstance(exc, DomainError)
     return error_page(request, status, exc.message or _STATUS_TEXT[400])

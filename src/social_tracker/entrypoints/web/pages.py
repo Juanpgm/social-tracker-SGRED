@@ -13,6 +13,7 @@ from social_tracker.bootstrap import Container
 from social_tracker.entrypoints.web.security import CsrfTokens
 
 ContainerFactory = Callable[[], Container]
+BUSY_TEXT = "The database is busy or unavailable. Wait a moment and try again."
 
 
 @dataclass
