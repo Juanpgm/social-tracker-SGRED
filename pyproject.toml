@@ -9,10 +9,8 @@ dependencies = [
     "typer",
 ]
 
-# NOTE: the `social-tracker` console script
-# (social_tracker.entrypoints.cli:app) is intentionally NOT declared yet.
-# The entrypoints package does not exist until unit 1e; declaring it earlier
-# would install a broken launcher. Add `[project.scripts]` when 1e lands.
+[project.scripts]
+social-tracker = "social_tracker.entrypoints.cli:app"
 
 [dependency-groups]
 dev = [
