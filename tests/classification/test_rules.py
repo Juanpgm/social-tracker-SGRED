@@ -68,6 +68,8 @@ def sig(name: str, weight: float | None = None) -> Signal:
         "va a temblar muy fuerte",
         "Habrá otro sismo mucho más fuerte",
         "Un científico predijo un terremoto en Cali",
+        "Temblor fuerte mañana en Cali",  # the quake first, the day after
+        "Se espera un sismo esta noche",
     ],
 )
 def test_a_prediction_of_an_earthquake_is_a_signal(text):
@@ -139,7 +141,14 @@ def test_pseudo_authority_is_an_anonymous_scientist_or_the_nasa(text, expected):
 
 
 @pytest.mark.parametrize(
-    "text", ["Compartan este mensaje", "REENVÍA a todos tus contactos", "URGENTE sismo", "Pásalo"]
+    "text",
+    [
+        "Compartan este mensaje",
+        "REENVÍA a todos tus contactos",
+        "URGENTE sismo",
+        "Pásalo",
+        "Corre la voz sobre el sismo",
+    ],
 )
 def test_virality_phrases(text):
     assert "virality_phrases" in names(text)

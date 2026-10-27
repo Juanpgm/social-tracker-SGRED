@@ -45,7 +45,7 @@ def test_setting_a_configuration_stores_version_one_and_audits_it(world):
     )
     [event] = events(world)
     assert (event["actor"], event["reason"]) == (WHO["actor"], WHO["reason"])
-    assert (event["from"], event["to"]) == (0, 1)
+    assert (event["from"], event["to"], event["action"]) == (0, 1, "set")
     stored = world.topic_repo.latest()
     assert (stored.actor, stored.reason, stored.created_at) == (
         WHO["actor"],
@@ -68,12 +68,19 @@ def test_a_reordered_but_equal_file_is_not_a_change(world):
     assert again.changed is False
 
 
+@pytest.mark.parametrize("bad", ["version: 1", None, {"version": 1}, 5])
+def test_only_a_topic_configuration_can_be_set(world, bad):
+    with pytest.raises(ValidationError):
+        world.topics.set_config(bad, **WHO)
+    assert world.topic_repo.latest() is None
+
+
 def test_each_real_change_is_a_new_version(world):
     world.clock.advance(timedelta(minutes=1))
     assert world.topics.set_text(CUSTOM, **WHO).version == 1
     assert world.topics.set_text("version: 1\nearthquake: [temblor]\n", **WHO).version == 2
     assert [v.version for v in world.topic_repo.versions(10)] == [2, 1]
-    assert [e["to"] for e in events(world)] == [1, 2]
+    assert [(e["from"], e["to"]) for e in events(world)] == [(0, 1), (1, 2)]
 
 
 def test_resetting_stores_the_defaults_as_a_new_version(world):

@@ -17,6 +17,7 @@ from social_tracker.classification.domain import (
 from social_tracker.classification.similarity import signature, similarity
 from social_tracker.classification.text import tokens
 from social_tracker.items.domain import ItemStatus
+from tests.actors import WHO
 from tests.classification.harness import (
     OFF_TOPIC,
     PREDICTION,
@@ -156,6 +157,8 @@ def test_a_recycled_copy_references_the_original_with_a_confidence():
     assert "identical" in verdict.rationale
     assert "8 days" in verdict.rationale
     assert world.signatures.get(copy.id) is None
+    assert {s.name for s in verdict.signals} >= {"prediction_claim", "virality_phrases"}
+    assert verdict.priority == 0.0  # settled, so not queued
 
 
 @pytest.mark.parametrize(("credibility", "confidence"), [(1, 0.96), (3, 0.9), (5, 0.84)])
@@ -168,6 +171,40 @@ def test_the_credibility_prior_moves_the_confidence_of_a_recycled_item(credibili
     run(world)
     assert world.verdict(copy).confidence == confidence
     assert world.verdict(copy).source_credibility_used == credibility
+
+
+@pytest.mark.parametrize(("threshold", "low"), [(0.9, False), (0.91, True)])
+def test_a_recycled_item_is_low_confidence_below_the_alert_threshold(threshold, low):
+    world = three_sources()
+    world.control.set_alert_min_confidence(threshold, **WHO)
+    world.add("a", PREDICTION, source_id="src_a")
+    copy = world.add("b", PREDICTION, source_id="src_b", published_at=PUBLISHED + days(8))
+    run(world)
+    assert world.verdict(copy).low_confidence is low
+
+
+@pytest.mark.parametrize(("threshold", "low"), [(0.56, False), (0.57, True)])
+def test_a_duplicate_is_low_confidence_below_the_alert_threshold(threshold, low):
+    world = three_sources()
+    world.control.set_alert_min_confidence(threshold, **WHO)
+    world.add("a", PREDICTION, source_id="src_a")
+    copy = world.add("b", PREDICTION, source_id="src_b", published_at=PUBLISHED + days(1))
+    run(world)
+    assert world.verdict(copy).low_confidence is low
+
+
+def test_a_recycled_copy_the_cascade_cannot_settle_is_queued_with_a_priority():
+    world = three_sources(settings=ClassifierSettings(near_duplicate_threshold=0.5))
+    base = long_text(4)
+    original = world.add("a", base, source_id="src_a")
+    edited = world.add("b", changed(base, 12), source_id="src_b", published_at=PUBLISHED + days(9))
+    run(world)
+    verdict = world.verdict(edited)
+    assert verdict.recycled_of == original.id
+    assert 0.4 <= verdict.confidence < 0.8
+    assert verdict.needs_llm is True
+    # the confidence of the recycled evidence, and the topic score of "sismo" in "Cali": 0.6
+    assert verdict.priority == round(0.6 * verdict.confidence + 0.3 * 0.6, 4)
 
 
 def test_the_oldest_match_is_the_original_of_every_later_copy():

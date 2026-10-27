@@ -267,3 +267,11 @@ def test_the_stored_json_round_trips_and_a_corrupt_one_is_refused():
     for bad in ("", "not json", "[]", '{"version": 7}', "{" * 100000):
         with pytest.raises(ValidationError):
             TopicConfig.from_json(bad)
+
+
+def test_every_phrase_that_starts_at_a_word_is_found_not_only_the_first():
+    found = verdict("dijo la Secretaría de Gestión del Riesgo de Emergencias y Desastres hoy")
+    assert found.matched_terms == (
+        "secretaria de gestion del riesgo",
+        "secretaria de gestion del riesgo de emergencias y desastres",
+    )

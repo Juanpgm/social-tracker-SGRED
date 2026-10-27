@@ -80,7 +80,6 @@ from social_tracker.shared.errors import (
     DomainError,
     NotFoundError,
     StorageError,
-    ValidationError,
 )
 from social_tracker.shared.ids import validate_slug
 from social_tracker.shared.uow import UnitOfWork
@@ -151,8 +150,6 @@ class TopicConfigService:
 
     def set_config(self, config: TopicConfig, *, actor: str, reason: str) -> ConfigChange:
         actor, reason = validate_actor(actor), validate_reason(reason)
-        if not isinstance(config, TopicConfig):
-            raise ValidationError("a topic configuration is required")
         with self._uow.transaction():
             now = self._clock.now()
             current = self.current()

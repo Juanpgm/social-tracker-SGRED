@@ -193,6 +193,23 @@ def test_a_bad_batch_size_is_refused(world, limit):
         world.service.classify_pending(limit)
 
 
+def test_a_bad_batch_size_is_refused_even_when_nothing_is_eligible():
+    world = memory_world()
+    with pytest.raises(ValidationError):
+        world.service.classify_pending(0)
+
+
+def test_a_source_deleted_after_the_listing_leaves_its_items_untouched():
+    items = HookedItems()
+    world = memory_world(items=items)
+    world.ready()
+    added = [world.add(f"n{n}", long_text(n)) for n in range(2)]
+    items.after_list = lambda found: world.registry.delete("src_news", **WHO)
+    report = run(world)
+    assert (report.classified, report.skipped, report.errors) == (0, 2, 0)
+    assert {world.status(i) for i in added} == {ItemStatus.NEW}
+
+
 def test_the_default_batch_is_used_when_none_is_given(world):
     world.add("a", PREDICTION)
     assert world.service.classify_pending().classified == 1
@@ -214,6 +231,8 @@ def test_an_off_topic_item_is_dropped_and_counted_by_reason(world):
     assert verdict.scope_reason is OutOfScopeReason.NO_TOPIC_MATCH
     assert (verdict.needs_llm, verdict.low_confidence, verdict.topics) == (False, False, ())
     assert world.verdict(crime).scope_reason is OutOfScopeReason.CRIME_PUBLIC_ORDER
+    assert "no earthquake, secretariat or disaster term" in verdict.rationale
+    assert "crime or public order" in world.verdict(crime).rationale
     assert world.status(off) is world.status(crime) is ItemStatus.OUT_OF_SCOPE
     assert world.signatures.get(off.id) is None  # nothing to compare later items with
     stats = world.service.stats()
