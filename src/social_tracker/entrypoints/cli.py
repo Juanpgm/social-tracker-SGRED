@@ -33,7 +33,7 @@ import typer
 
 from social_tracker.bootstrap import build_container, build_worker
 from social_tracker.classification.domain import Classification, ClassificationStats
-from social_tracker.classification.service import DEFAULT_BATCH, ClassifyReport
+from social_tracker.classification.service import DEFAULT_BATCH, RECLASSIFIABLE, ClassifyReport
 from social_tracker.classification.yaml_io import MAX_CONFIG_BYTES
 from social_tracker.collector.service import CollectOutcome
 from social_tracker.collector.worker import DEFAULT_TICK_S, PassSummary
@@ -46,19 +46,20 @@ from social_tracker.entrypoints.inputs import (
     write_export,
 )
 from social_tracker.entrypoints.signals import stop_on_signals
-from social_tracker.items.domain import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, Item
+from social_tracker.items.domain import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, Item, ItemStatus
 from social_tracker.shared.errors import DomainError, ValidationError
 from social_tracker.shared.text import escape_unprintable
 from social_tracker.sources.service import ImportConflictError, ImportReport
 from social_tracker.sources.yaml_io import MAX_FILE_BYTES
 
 EXIT_REFUSED = 1
+EXIT_NOTHING_ELIGIBLE = 3  # `classify run` with no source it may classify
 EXIT_UNEXPECTED = 70  # sysexits.h EX_SOFTWARE: an internal error, i.e. a bug
 
 app = typer.Typer(
     help="Manage the sources of the social risk monitor and the analysis switches.\n\n"
     "Exit status: 0 success, 1 refused (invalid input, conflict, storage failure...), "
-    "2 usage error, 70 unexpected failure (a bug).",
+    "2 usage error, 3 `classify run` found no eligible source, 70 unexpected failure (a bug).",
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_show_locals=False,  # a traceback must never print local secrets
@@ -531,11 +532,18 @@ _NO_VERDICTS = "No classifications yet."
 
 
 def _render_classify(report: ClassifyReport) -> str:
-    return (
+    line = (
         f"classified {report.classified} item(s), {report.out_of_scope} out of scope, "
-        f"{report.skipped} skipped, {report.errors} error(s); "
+        f"{report.skipped} skipped, {report.errors + report.storage_errors} error(s); "
         f"{report.needs_llm} queued for the LLM"
     )
+    if report.failed:
+        line += f"; {report.failed} parked as classification_failed"
+    if report.candidate_cap_hits:
+        line += (
+            f"; the near-duplicate candidate limit was reached {report.candidate_cap_hits} time(s)"
+        )
+    return line
 
 
 @classify_app.command("run")
@@ -554,16 +562,27 @@ def classify_run(
 
     Needs global analysis on and a source that is enabled with its analysis switch on. Items of
     other sources stay as they are. The worker does this after every collection pass; this
-    command is for a one-off run. Exit status 1 when a storage error stopped the run."""
+    command is for a one-off run.
+
+    Exit status: 0 when it ran (also when nothing was pending), 1 when a storage error stopped
+    the run (run it again to resume), 3 when no source is eligible so nothing could be done. An
+    item that fails is retried by the next run and parked as classification_failed after three
+    consecutive errors; that is reported but does not change the exit status."""
     with _guard(), closing(build_container()) as services:
         report = services.classifier.classify_pending(limit)
     if report.eligible_sources == 0:
-        typer.echo(_NO_ELIGIBLE)
-        return
+        typer.echo(_NO_ELIGIBLE, err=True)
+        raise typer.Exit(EXIT_NOTHING_ELIGIBLE)
     typer.echo(_render_classify(report))
-    if report.errors:
+    if report.storage_errors:
         typer.echo("error: a storage error stopped the run; run it again to resume", err=True)
         raise typer.Exit(EXIT_REFUSED)
+    if report.errors:
+        typer.echo(
+            f"warning: {report.errors} item(s) could not be classified; they are tried again "
+            "on the next run and parked after repeated errors (see `classify stats`)",
+            err=True,
+        )
 
 
 def _render_verdict(c: Classification) -> str:
@@ -591,7 +610,10 @@ def _render_verdict(c: Classification) -> str:
     if c.scope_reason is not None:
         lines.append(f"reason: {c.scope_reason.value}")
     if c.duplicate_of is not None:
-        lines.append(f"duplicate of: {c.duplicate_of}")
+        waiting = " (its original still waits for the LLM)" if c.awaiting_original else ""
+        lines.append(f"duplicate of: {c.duplicate_of}{waiting}")
+    if c.near_of is not None:
+        lines.append(f"near copy of: {c.near_of}")
     if c.recycled_of is not None:
         lines.append(f"recycled of: {c.recycled_of}")
     lines += [
@@ -614,6 +636,43 @@ def classify_show(
     typer.echo(_render_verdict(verdict))
 
 
+@classify_app.command("reclassify")
+def classify_reclassify(
+    status: Annotated[
+        str,
+        typer.Option(
+            "--status",
+            help="Which items to send back: out_of_scope (after changing the vocabulary) or "
+            "classification_failed (to retry them).",
+        ),
+    ],
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit", min=1, max=MAX_LIST_LIMIT, help="How many items to send back at most."
+        ),
+    ] = DEFAULT_BATCH,
+) -> None:
+    """Send items back to the queue so that the next run classifies them again.
+
+    Their verdict is forgotten and they become `new`; the next `classify run` (or the worker's
+    next pass) judges them with the vocabulary and the rules in force. Use it after
+    `topics set-file` for the items the old vocabulary called out of scope."""
+    try:
+        chosen = ItemStatus(status)
+    except ValueError:
+        raise typer.BadParameter(
+            "must be out_of_scope or classification_failed", param_hint="--status"
+        ) from None
+    if chosen not in RECLASSIFIABLE:
+        raise typer.BadParameter(
+            "must be out_of_scope or classification_failed", param_hint="--status"
+        )
+    with _guard(), closing(build_container()) as services:
+        count = services.classifier.reclassify(chosen, limit)
+    typer.echo(f"{count} item(s) sent back to the queue; `classify run` classifies them again")
+
+
 def _render_stats(stats: ClassificationStats) -> str:
     lines = [f"classifications: {stats.total}", "by label:"]
     lines += [f"  {name} {count}" for name, count in stats.by_label]
@@ -624,8 +683,11 @@ def _render_stats(stats: ClassificationStats) -> str:
         f"queued for the LLM: {stats.needs_llm}",
         f"low confidence: {stats.low_confidence}",
         f"duplicates: {stats.duplicates}",
+        f"waiting for their original's judgment: {stats.awaiting_original}",
+        f"near copies: {stats.near_duplicates}",
         f"recycled: {stats.recycled}",
         f"truncated: {stats.truncated}",
+        f"parked as classification_failed: {stats.failed}",
     ]
     return "\n".join(lines)
 

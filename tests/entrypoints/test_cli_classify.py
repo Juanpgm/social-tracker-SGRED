@@ -53,16 +53,17 @@ def write(tmp_path: Path, text: str, name: str = "topics.yaml") -> Path:
 def test_run_explains_why_nothing_is_classified_while_nothing_is_eligible(cli: Cli):
     cli.add()
     seed(cli, *sample())
-    result = cli.ok("classify", "run")
-    assert "no source is eligible" in result.stdout
-    assert "global analysis" in result.stdout
-    assert result.stderr == ""
+    result = cli("classify", "run")
+    assert result.exit_code == 3  # nothing could be done: distinct from success and from refusal
+    assert "no source is eligible" in result.stderr
+    assert "global analysis" in result.stderr
+    assert result.stdout == ""
 
 
 def test_run_classifies_the_pending_items_and_reports_the_counts(ready: Cli):
     result = ready.ok("classify", "run")
     assert result.stdout.strip() == (
-        "classified 2 item(s), 1 out of scope, 0 skipped, 0 error(s); 2 queued for the LLM"
+        "classified 2 item(s), 1 out of scope, 0 skipped, 0 error(s); 1 queued for the LLM"
     )
     again = ready.ok("classify", "run")
     assert again.stdout.strip() == (
@@ -89,7 +90,8 @@ def test_run_leaves_items_of_a_source_with_analysis_off_alone(cli: Cli):
     cli.ok("sources", "enable", "src_news", "--reason", WHY)
     cli.ok("analysis", "on", "--reason", WHY)  # the source's own switch stays off
     seed(cli, *sample())
-    assert "no source is eligible" in cli.ok("classify", "run").stdout
+    result = cli("classify", "run")
+    assert (result.exit_code, "no source is eligible" in result.stderr) == (3, True)
     assert "No classifications yet." in cli.ok("classify", "stats").stdout
 
 
@@ -122,7 +124,7 @@ def test_show_prints_the_verdict_of_an_item(ready: Cli):
     assert "flags: needs_llm" in out
     assert "catalog: unavailable" in out
     assert "source credibility used: 3" in out
-    assert "classifier version: cascade-1/topics-0" in out
+    assert "classifier version: cascade-2/topics-0" in out
     assert "rationale: unintentional_rumor candidate from rules" in out
 
 
@@ -152,6 +154,110 @@ def test_show_refuses_an_unknown_or_invalid_id(ready: Cli):
     assert (bad.exit_code, bad.stdout) == (1, "")
 
 
+def test_run_exits_zero_when_a_source_is_eligible_but_nothing_is_pending(ready: Cli):
+    ready.ok("classify", "run")
+    again = ready("classify", "run")
+    assert again.exit_code == 0  # eligible sources exist: "nothing to do" is not a failure
+    assert again.stdout.startswith("classified 0 item(s)")
+    assert again.stderr == ""
+
+
+class _Container:
+    def __init__(self, report):
+        self.classifier = self
+        self._report = report
+
+    def classify_pending(self, limit):
+        return self._report
+
+    def close(self):
+        pass
+
+
+def run_with_report(monkeypatch, cli: Cli, **fields):
+    from social_tracker.classification.service import ClassifyReport
+    from social_tracker.entrypoints import cli as module
+
+    report = ClassifyReport(eligible_sources=1, **fields)
+    monkeypatch.setattr(module, "build_container", lambda: _Container(report))
+    return cli("classify", "run")
+
+
+def test_a_storage_error_and_item_errors_are_told_apart(monkeypatch, cli: Cli):
+    storage = run_with_report(monkeypatch, cli, storage_errors=1)
+    assert storage.exit_code == 1
+    assert "a storage error stopped the run" in storage.stderr
+    assert "1 error(s)" in storage.stdout
+
+    items = run_with_report(monkeypatch, cli, errors=2, classified=3)
+    assert items.exit_code == 0  # the run completed; the items are retried
+    assert "a storage error" not in items.stderr
+    assert "2 item(s) could not be classified" in items.stderr
+    assert "2 error(s)" in items.stdout
+
+
+def test_parked_items_and_a_reached_candidate_limit_are_reported(monkeypatch, cli: Cli):
+    result = run_with_report(monkeypatch, cli, failed=1, candidate_cap_hits=4, classified=1)
+    assert "1 parked as classification_failed" in result.stdout
+    assert "candidate limit was reached 4 time(s)" in result.stdout
+
+
+def test_a_clean_report_mentions_neither(monkeypatch, cli: Cli):
+    result = run_with_report(monkeypatch, cli, classified=2)
+    assert "parked" not in result.stdout
+    assert "candidate limit" not in result.stdout
+    assert result.stderr == ""
+
+
+# ---- classify reclassify ----
+
+
+def test_reclassify_sends_out_of_scope_items_back_and_the_next_run_uses_the_new_vocabulary(
+    ready: Cli, tmp_path: Path
+):
+    ready.ok("classify", "run")
+    old = ready.ok("classify", "show", item_id("c")).stdout
+    assert "label: out_of_scope" in old
+    path = write(tmp_path, "version: 1\nearthquake: [sismo]\nother_disaster: [estadio]\n")
+    ready.ok("topics", "set-file", str(path), "--reason", WHY)
+    result = ready.ok("classify", "reclassify", "--status", "out_of_scope")
+    assert result.stdout.startswith("1 item(s) sent back to the queue")
+    assert "No classifications" not in ready.ok("classify", "stats").stdout
+    ready.ok("classify", "run")
+    shown = ready.ok("classify", "show", item_id("c")).stdout
+    assert "topics: other_disaster" in shown  # the stadium is now vocabulary
+    assert "classifier version: cascade-2/topics-1" in shown
+
+
+def test_reclassify_honours_the_limit_and_says_when_there_is_nothing_to_redo(ready: Cli):
+    seed(ready, make_item("o2", title="Fútbol", text=OFF_TOPIC + " otra vez", published_at=NOW))
+    ready.ok("classify", "run")
+    assert ready.ok(
+        "classify", "reclassify", "--status", "out_of_scope", "--limit", "1"
+    ).stdout.startswith("1 item(s)")
+    assert ready.ok(
+        "classify", "reclassify", "--status", "classification_failed"
+    ).stdout.startswith("0 item(s)")
+
+
+@pytest.mark.parametrize("status", ["classified", "new", "bogus", "", "OUT_OF_SCOPE"])
+def test_reclassify_refuses_any_other_status_as_a_usage_error(ready: Cli, status: str):
+    result = ready("classify", "reclassify", "--status", status)
+    assert result.exit_code == 2
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("limit", ["0", "-1", "1001", "abc"])
+def test_reclassify_refuses_a_bad_limit(ready: Cli, limit: str):
+    assert (
+        ready("classify", "reclassify", "--status", "out_of_scope", "--limit", limit).exit_code == 2
+    )
+
+
+def test_reclassify_needs_a_status(ready: Cli):
+    assert ready("classify", "reclassify").exit_code == 2
+
+
 # ---- classify stats ----
 
 
@@ -163,9 +269,12 @@ def test_stats_summarize_the_stored_verdicts(ready: Cli):
     assert "out_of_scope 1" in out
     assert "unintentional_rumor 1" in out
     assert "no_topic_match 1" in out
-    assert "queued for the LLM: 2" in out
+    assert "queued for the LLM: 1" in out
     assert "low confidence: 0" in out
     assert "duplicates: 0" in out
+    assert "waiting for their original's judgment: 0" in out
+    assert "near copies: 0" in out
+    assert "parked as classification_failed: 0" in out
 
 
 def test_stats_of_an_empty_store(cli: Cli):
@@ -208,7 +317,7 @@ def test_the_new_vocabulary_applies_to_the_next_classification(ready: Cli, tmp_p
     ready.ok("classify", "run")
     shown = ready.ok("classify", "show", make_item("h").id).stdout
     assert "topics: other_disaster" in shown
-    assert "classifier version: cascade-1/topics-1" in shown
+    assert "classifier version: cascade-2/topics-1" in shown
 
 
 @pytest.mark.parametrize(

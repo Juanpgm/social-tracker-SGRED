@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from social_tracker.bootstrap import (
+    CLASSIFICATION_RETENTION_DAYS_ENV,
     DB_PATH_ENV,
+    NEAR_DUPLICATE_CANDIDATES_ENV,
     NEAR_DUPLICATE_THRESHOLD_ENV,
     RECYCLE_DAYS_ENV,
     build_container,
@@ -26,8 +28,47 @@ def env(tmp_path: Path, **extra: str) -> dict[str, str]:
 
 def test_settings_default_when_the_variables_are_blank_or_absent():
     assert parse_classifier_settings({}) == ClassifierSettings()
-    blank = {RECYCLE_DAYS_ENV: "  ", NEAR_DUPLICATE_THRESHOLD_ENV: ""}
+    blank = {
+        RECYCLE_DAYS_ENV: "  ",
+        NEAR_DUPLICATE_THRESHOLD_ENV: "",
+        NEAR_DUPLICATE_CANDIDATES_ENV: " ",
+        CLASSIFICATION_RETENTION_DAYS_ENV: "",
+    }
     assert parse_classifier_settings(blank) == ClassifierSettings()
+
+
+@pytest.mark.parametrize(
+    ("name", "field", "raw", "value"),
+    [
+        (NEAR_DUPLICATE_CANDIDATES_ENV, "candidate_limit", "1", 1),
+        (NEAR_DUPLICATE_CANDIDATES_ENV, "candidate_limit", " 1000 ", 1000),
+        (CLASSIFICATION_RETENTION_DAYS_ENV, "classification_retention_days", "1", 1),
+        (CLASSIFICATION_RETENTION_DAYS_ENV, "classification_retention_days", "3650", 3650),
+    ],
+)
+def test_the_candidate_limit_and_the_verdict_retention_come_from_the_environment(
+    name, field, raw, value
+):
+    assert getattr(parse_classifier_settings({name: raw}), field) == value
+
+
+@pytest.mark.parametrize("name", [NEAR_DUPLICATE_CANDIDATES_ENV, CLASSIFICATION_RETENTION_DAYS_ENV])
+@pytest.mark.parametrize("raw", ["0", "-1", "3651", "1.5", "abc", "1e2", "7 days", "+7", "٣"])
+def test_an_invalid_candidate_limit_or_retention_is_refused_with_the_variable_name(name, raw):
+    with pytest.raises(ValidationError) as caught:
+        parse_classifier_settings({name: raw})
+    assert name in caught.value.message
+
+
+def test_the_candidate_limit_stops_at_one_thousand_and_the_retention_does_not():
+    with pytest.raises(ValidationError):
+        parse_classifier_settings({NEAR_DUPLICATE_CANDIDATES_ENV: "1001"})
+    assert (
+        parse_classifier_settings(
+            {CLASSIFICATION_RETENTION_DAYS_ENV: "1001"}
+        ).classification_retention_days
+        == 1001
+    )
 
 
 @pytest.mark.parametrize(("raw", "days"), [("1", 1), ("7", 7), (" 14 ", 14), ("3650", 3650)])
@@ -103,3 +144,56 @@ def test_a_worker_pass_collects_then_classifies(tmp_path):
         assert verdict.label in (Label.UNCLASSIFIED, Label.NO_RISK)
     finally:
         built.close()
+
+
+def test_the_hourly_purge_also_forgets_old_verdicts_of_items_that_are_gone(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from social_tracker.bootstrap import _purge_everything
+    from social_tracker.classification.domain import Classification, Stage
+
+    container = build_container(env(tmp_path))
+    try:
+        repo = container.classifier._classifications
+        old = datetime.now(UTC) - timedelta(days=400)
+        recent = datetime.now(UTC) - timedelta(days=10)
+        for name, when in (("itm_oldverdict", old), ("itm_newverdict", recent)):
+            repo.add(
+                Classification(
+                    item_id=name,
+                    label=Label.NO_RISK,
+                    confidence=0.6,
+                    stage=Stage.RULES,
+                    rationale="r",
+                    classified_at=when,
+                    classifier_version="v",
+                )
+            )
+        _purge_everything(container)()
+        assert repo.get("itm_oldverdict") is None  # older than 180 days and no item behind it
+        assert repo.get("itm_newverdict") is not None
+    finally:
+        container.close()
+
+
+def test_the_verdict_history_is_pruned_even_when_the_item_purge_fails(tmp_path):
+    from social_tracker.bootstrap import _purge_everything
+
+    container = build_container(env(tmp_path))
+    calls = []
+
+    class Boom:
+        def purge_expired(self):
+            raise RuntimeError("boom")
+
+    class Spy:
+        def prune_history(self):
+            calls.append("pruned")
+
+    try:
+        fake = type("C", (), {"items": Boom(), "classifier": Spy()})()
+        with pytest.raises(RuntimeError):
+            _purge_everything(fake)()
+        assert calls == ["pruned"]
+    finally:
+        container.close()

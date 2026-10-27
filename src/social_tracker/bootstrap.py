@@ -21,9 +21,15 @@ Environment:
   `SOCIAL_TRACKER_MAX_BYTES_PER_FETCH`: ceilings on what one feed may cost (items a source holds,
   bytes a source holds, bytes of the items of one fetch; whole numbers from 1). Defaults are
   generous (100000 items, 512 MiB, 16 MiB); entries beyond a ceiling are dropped and counted.
-- `SOCIAL_TRACKER_RECYCLE_DAYS`: content seen or published STRICTLY more than this many days ago is
-  "recycled" when it comes back (default 7, accepted range 1..3650). A blank value means the
+- `SOCIAL_TRACKER_RECYCLE_DAYS`: content first SEEN here STRICTLY more than this many days apart
+  is "recycled" when it comes back (default 7, accepted range 1..3650). A blank value means the
   default.
+- `SOCIAL_TRACKER_NEAR_DUPLICATE_CANDIDATES`: how many near-duplicate candidates are verified per
+  item, the best-ranked first (default 500, accepted range 1..1000). A blank value means the
+  default.
+- `SOCIAL_TRACKER_CLASSIFICATION_RETENTION_DAYS`: how long the verdict of an item that no longer
+  exists is kept (default 180, accepted range 1..3650); the hourly retention purge forgets the
+  older ones. A blank value means the default.
 - `SOCIAL_TRACKER_NEAR_DUPLICATE_THRESHOLD`: the estimated similarity (a decimal above 0 up to 1,
   at most four decimals) from which two texts are near duplicates, inclusive (default 0.8). A
   blank value means the default.
@@ -78,6 +84,8 @@ ALLOW_PRIVATE_HOSTS_ENV = "SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS"
 ALLOWED_PORTS_ENV = "SOCIAL_TRACKER_ALLOWED_PORTS"
 RECYCLE_DAYS_ENV = "SOCIAL_TRACKER_RECYCLE_DAYS"
 NEAR_DUPLICATE_THRESHOLD_ENV = "SOCIAL_TRACKER_NEAR_DUPLICATE_THRESHOLD"
+NEAR_DUPLICATE_CANDIDATES_ENV = "SOCIAL_TRACKER_NEAR_DUPLICATE_CANDIDATES"
+CLASSIFICATION_RETENTION_DAYS_ENV = "SOCIAL_TRACKER_CLASSIFICATION_RETENTION_DAYS"
 MAX_ITEMS_PER_SOURCE_ENV = "SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE"
 MAX_BYTES_PER_SOURCE_ENV = "SOCIAL_TRACKER_MAX_BYTES_PER_SOURCE"
 MAX_BYTES_PER_FETCH_ENV = "SOCIAL_TRACKER_MAX_BYTES_PER_FETCH"
@@ -225,19 +233,37 @@ def parse_classifier_settings(env: Mapping[str, str]) -> ClassifierSettings:
     """The tunable thresholds of the classification cascade from the environment (blank or absent:
     the defaults)."""
     defaults = ClassifierSettings()
-    days_text = env.get(RECYCLE_DAYS_ENV, "").strip()
     threshold_text = env.get(NEAR_DUPLICATE_THRESHOLD_ENV, "").strip()
-    days, threshold = defaults.recycle_days, defaults.near_duplicate_threshold
-    if days_text:
-        if not _DAY_DIGITS.fullmatch(days_text) or not 1 <= int(days_text) <= 3650:
-            raise ValidationError(f"{RECYCLE_DAYS_ENV} must be a whole number of days (1..3650)")
-        days = int(days_text)
+    threshold = defaults.near_duplicate_threshold
+    days = _whole_setting(env, RECYCLE_DAYS_ENV, defaults.recycle_days, 3650, "of days")
+    kept = _whole_setting(
+        env, CLASSIFICATION_RETENTION_DAYS_ENV, defaults.classification_retention_days, 3650,
+        "of days",
+    )  # fmt: skip
+    candidates = _whole_setting(
+        env, NEAR_DUPLICATE_CANDIDATES_ENV, defaults.candidate_limit, 1000, "of candidates"
+    )
     if threshold_text:
         if not _THRESHOLD.fullmatch(threshold_text) or not 0 < float(threshold_text) <= 1:
             message = f"{NEAR_DUPLICATE_THRESHOLD_ENV} must be a decimal above 0 up to 1"
             raise ValidationError(message)
         threshold = float(threshold_text)
-    return ClassifierSettings(recycle_days=days, near_duplicate_threshold=threshold)
+    return ClassifierSettings(
+        recycle_days=days,
+        near_duplicate_threshold=threshold,
+        candidate_limit=candidates,
+        classification_retention_days=kept,
+    )
+
+
+def _whole_setting(env: Mapping[str, str], name: str, default: int, high: int, what: str) -> int:
+    """A whole number from 1 to `high` in the environment (blank or absent: `default`)."""
+    text = env.get(name, "").strip()
+    if not text:
+        return default
+    if not _DAY_DIGITS.fullmatch(text) or not 1 <= int(text) <= high:
+        raise ValidationError(f"{name} must be a whole number {what} (1..{high})")
+    return int(text)
 
 
 def _random_jitter(base_s: float) -> float:
@@ -295,6 +321,20 @@ def _open(env: Mapping[str, str]) -> _Wiring:
     return _Wiring(db, sources, control, items, uow, clock, container)
 
 
+def _purge_everything(container: Container) -> Callable[[], object]:
+    """The worker's hourly housekeeping: the raw items past their retention, then the verdicts
+    (and error counters) of items that no longer exist and are older than their own retention.
+    The second step runs even when the first fails, and a failure of either is raised after."""
+
+    def purge() -> object:
+        try:
+            return container.items.purge_expired()
+        finally:
+            container.classifier.prune_history()
+
+    return purge
+
+
 def build_container(environ: Mapping[str, str] | None = None) -> Container:
     """Open the database (running pending migrations) and wire the services around it."""
     return _open(os.environ if environ is None else environ).container
@@ -342,7 +382,7 @@ def build_worker(
             stop or threading.Event(),
             sleeper=sleeper,
             tick_s=tick_s,
-            purge=container.items.purge_expired,
+            purge=_purge_everything(container),
             classify=container.classifier.classify_pending,
         )
     except BaseException:
