@@ -423,3 +423,10 @@ def test_hostile_text_is_read_in_bounded_time(text):
     claims = extract_claims(text, EVENING)
     assert len(claims.magnitudes) <= MAX_MAGNITUDES
     assert time.perf_counter() - started < 2.0
+
+
+def test_a_pair_that_crosses_the_cap_is_trimmed_to_the_cap():
+    text = "sismo de 4.1, otro de 4.3, otro de 4.5, otro de 4.7, sismo de 5.0 y 5.5"
+    found = mags(text)
+    assert len(found) == MAX_MAGNITUDES
+    assert found == [(4.1, 4.1), (4.3, 4.3), (4.5, 4.5), (4.7, 4.7), (5.0, 5.0)]

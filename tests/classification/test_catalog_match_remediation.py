@@ -337,3 +337,46 @@ def test_the_verdict_does_not_depend_on_the_order_of_the_events():
             shuffled = list(events)
             random.Random(seed).shuffle(shuffled)
             assert check(claim, shuffled) == first
+
+
+# ---- which event the finding reports ----
+
+
+@pytest.mark.parametrize("order", [0, 1, 2])
+def test_among_equal_differences_the_finding_reports_the_event_nearest_in_time(order):
+    events = [point(minutes=-10, magnitude=6.0), point(minutes=-5, magnitude=6.0)]
+    random.Random(order).shuffle(events)
+    finding = check(claims(6.0), events)
+    assert (finding.status, finding.seconds) == (CONSISTENT, 300)
+
+
+def test_the_finding_reports_the_closest_magnitude_before_the_nearest_time():
+    far_exact = point(minutes=-60, magnitude=6.0)
+    near_off = point(minutes=-1, magnitude=5.5)
+    finding = check(claims(6.0), [near_off, far_exact])
+    assert (finding.event_magnitude, finding.delta_magnitude, finding.seconds) == (6.0, 0.0, 3600)
+
+
+def test_a_tie_in_everything_is_broken_by_the_origin_time_then_the_position():
+    a = point(minutes=-5, magnitude=6.0, where=(3.0, -76.0))
+    b = point(minutes=-5, magnitude=6.0, where=(3.9, -76.9), source="emsc")
+    results = {check(claims(6.0), order).event_magnitude for order in ([a, b], [b, a])}
+    assert results == {6.0}
+
+
+def test_with_several_claims_the_finding_reports_the_best_difference_first():
+    exact_far = point(minutes=-10, magnitude=6.0)
+    off_near = point(minutes=-5, magnitude=5.5)
+    finding = check(claims(6.0, 5.0), [exact_far, off_near])
+    assert finding.status == CONSISTENT
+    assert (finding.delta_magnitude, finding.event_magnitude, finding.seconds) == (0.0, 6.0, 600)
+
+
+@pytest.mark.parametrize("order", [0, 1])
+def test_with_several_claims_an_equal_difference_reports_the_nearest_event(order):
+    far = point(minutes=-10, magnitude=6.0)
+    near = point(minutes=-5, magnitude=5.0)
+    events = [far, near]
+    random.Random(order).shuffle(events)
+    finding = check(claims(6.0, 5.0), events)
+    assert (finding.delta_magnitude, finding.seconds) == (0.0, 300)

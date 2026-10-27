@@ -10,6 +10,7 @@ a boundary no test pins. The source is always restored, even on an interrupt.
 Exit status: 0 when every mutant was killed, 1 when some survived.
 """
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -21,8 +22,10 @@ TESTS = [
     "tests/catalog",
     "tests/classification/test_claims.py",
     "tests/classification/test_claims_boundaries.py",
+    "tests/classification/test_claims_remediation.py",
     "tests/classification/test_catalog_match.py",
     "tests/classification/test_catalog_match_boundaries.py",
+    "tests/classification/test_catalog_match_remediation.py",
     "tests/classification/test_rules_catalog.py",
     "tests/collector/test_http_fetcher_allowlist.py",
     "tests/entrypoints/test_cli_catalog.py",
@@ -59,14 +62,14 @@ MUTANTS = [
     m(
         "claims range span inclusive",
         CLAIMS,
-        "low <= upper <= low + MAX_RANGE_SPAN",
-        "low <= upper < low + MAX_RANGE_SPAN",
+        "if round(upper - low, 2) > MAX_RANGE_SPAN:",
+        "if round(upper - low, 2) >= MAX_RANGE_SPAN:",
     ),
     m(
         "claims range may be backwards",
         CLAIMS,
-        "low <= upper <= low",
-        "upper <= low + MAX_RANGE_SPAN <= low",
+        "                if upper >= low:",
+        "                if True:",
     ),
     m(
         "claims magnitude max inclusive",
@@ -97,8 +100,8 @@ MUTANTS = [
     m(
         "claims magnitude cap",
         CLAIMS,
-        "if len(claims) == MAX_MAGNITUDES:",
-        "if len(claims) == MAX_MAGNITUDES + 1:",
+        "return tuple(claims[:MAX_MAGNITUDES])",
+        "return tuple(claims[: MAX_MAGNITUDES + 1])",
     ),
     m(
         "claims utc marker",
@@ -115,8 +118,8 @@ MUTANTS = [
     m(
         "match delta threshold",
         MATCH,
-        "delta >= settings.max_magnitude_delta",
-        "delta > settings.max_magnitude_delta",
+        "row[0] < settings.max_magnitude_delta for row",
+        "row[0] <= settings.max_magnitude_delta for row",
     ),
     m(
         "match delta rounding",
@@ -134,8 +137,8 @@ MUTANTS = [
     m(
         "match window inclusive",
         MATCH,
-        "if abs(event.origin_time - reference) <= window and",
-        "if abs(event.origin_time - reference) < window and",
+        "            if abs(event.origin_time - reference) <= window\n",
+        "            if abs(event.origin_time - reference) < window\n",
     ),
     m(
         "match future inclusive",
@@ -163,7 +166,12 @@ MUTANTS = [
     ),
     m("match duplicate km", MATCH, "<= settings.duplicate_km", "< settings.duplicate_km"),
     m("match same source merge", MATCH, "point.source not in {p.source for p in group}", "True"),
-    m("match complete flag", MATCH, "MISMATCH if complete else UNAVAILABLE", "MISMATCH"),
+    m(
+        "match complete flag",
+        MATCH,
+        "MISMATCH if complete and local and not lagging else UNAVAILABLE",
+        "MISMATCH",
+    ),
     m("match historic", MATCH, "or claims.when.kind is TimeKind.HISTORIC", ""),
     m("match tie by delta", MATCH, "key=lambda row: (row[0], row[1],", "key=lambda row: (row[0],"),
     m(
@@ -220,7 +228,7 @@ MUTANTS = [
     m(
         "refresher claims before fetch",
         SERVICE,
-        "if not dry_run and not self._repo.try_claim",
+        "if claimed and not self._repo.try_claim",
         "if False and not self._repo.try_claim",
     ),
     m(
@@ -232,7 +240,12 @@ MUTANTS = [
     m("parser future inclusive", PARSERS, "when > now + MAX_FUTURE", "when >= now + MAX_FUTURE"),
     m("parser old inclusive", PARSERS, "when < now - MAX_AGE", "when <= now - MAX_AGE"),
     m("parser feature cap", PARSERS, "> MAX_FEATURES", ">= MAX_FEATURES"),
-    m("parser nothing readable", PARSERS, "if features and not kept:", "if False:"),
+    m(
+        "parser nothing readable",
+        PARSERS,
+        "if features and not kept and not not_earthquake:",
+        "if False:",
+    ),
     m("parser json constants", PARSERS, "parse_constant=_reject_constant", "parse_constant=None"),
     m("parser place length", PARSERS, "[:MAX_PLACE_LENGTH]", "[: MAX_PLACE_LENGTH + 1]"),
     m(
@@ -277,6 +290,7 @@ def run_tests() -> bool:
     done = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *TESTS],
         cwd=ROOT,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},  # no stale .pyc after a restore
         capture_output=True,
         text=True,
         check=False,
