@@ -1,5 +1,8 @@
 """Input helpers of the CLI: actor resolution, `--set` parsing, bounded file reading/writing."""
 
+import errno
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -147,20 +150,23 @@ def test_a_huge_file_is_never_read_beyond_the_limit(tmp_path: Path, monkeypatch)
     path = tmp_path / "huge.yaml"
     path.write_bytes(b"#" * (MAX_FILE_BYTES * 3))
     seen: list[int] = []
-    real_open = Path.open
+    real_fdopen = os.fdopen
 
-    def spying_open(self, *args, **kwargs):
-        handle = real_open(self, *args, **kwargs)
-        real_read = handle.read
+    class Spy:
+        def __init__(self, handle):
+            self._handle = handle
 
-        def read(size=-1):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            self._handle.close()
+
+        def read(self, size=-1):
             seen.append(size)
-            return real_read(size)
+            return self._handle.read(size)
 
-        handle.read = read  # type: ignore[method-assign]
-        return handle
-
-    monkeypatch.setattr(Path, "open", spying_open)
+    monkeypatch.setattr(os, "fdopen", lambda *a, **k: Spy(real_fdopen(*a, **k)))
     with pytest.raises(ValidationError):
         read_import_text(path)
     assert seen == [MAX_FILE_BYTES + 1]
@@ -220,3 +226,229 @@ def test_export_to_a_missing_directory_or_over_a_directory_is_a_clean_error(tmp_
             with pytest.raises((ValidationError, ConflictError)) as caught:
                 write_export(target, "x", force=force)
             assert str(tmp_path) not in caught.value.message
+
+
+# ---- writing the export: atomic, no partial file, no symlinks ------------------------------
+
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits and FIFOs")
+
+
+def _names(directory: Path) -> list[str]:
+    return sorted(p.name for p in directory.iterdir())
+
+
+def _fail_with(errno_code: int = errno.ENOSPC):
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno_code, os.strerror(errno_code))
+
+    return fail
+
+
+def test_a_failure_while_writing_with_force_leaves_the_old_file_and_no_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "out.yaml"
+    path.write_text("precious", encoding="utf-8")
+    monkeypatch.setattr(os, "fsync", _fail_with())
+    with pytest.raises(ValidationError) as caught:
+        write_export(path, "replacement", force=True)
+    assert caught.value.message.startswith("cannot write the output file")
+    assert str(tmp_path) not in caught.value.message
+    assert path.read_text(encoding="utf-8") == "precious"
+    assert _names(tmp_path) == ["out.yaml"]
+
+
+def test_a_failure_while_writing_without_force_leaves_nothing_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(os, "fsync", _fail_with())
+    with pytest.raises(ValidationError):
+        write_export(tmp_path / "out.yaml", "x", force=False)
+    assert _names(tmp_path) == []
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_a_failure_while_publishing_the_file_leaves_no_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+):
+    monkeypatch.setattr(os, "replace" if force else "link", _fail_with(errno.EIO))
+    with pytest.raises(ValidationError):
+        write_export(tmp_path / "out.yaml", "x", force=force)
+    assert _names(tmp_path) == []
+
+
+def test_an_interrupt_while_writing_also_cleans_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / "out.yaml"
+    path.write_text("precious", encoding="utf-8")
+
+    def interrupt(*_args: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "fsync", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        write_export(path, "replacement", force=True)
+    assert path.read_text(encoding="utf-8") == "precious"
+    assert _names(tmp_path) == ["out.yaml"]
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_a_successful_export_leaves_only_the_target(tmp_path: Path, force: bool):
+    write_export(tmp_path / "out.yaml", "data", force=force)
+    assert _names(tmp_path) == ["out.yaml"]
+
+
+def test_the_data_is_flushed_to_disk_in_the_target_directory_before_it_is_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    journal: list[tuple[str, str]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        journal.append(("fsync", ""))
+        real_fsync(fd)
+
+    def replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        journal.append(("replace", str(Path(src).parent)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    write_export(tmp_path / "out.yaml", "data", force=True)
+    assert journal == [("fsync", ""), ("replace", str(tmp_path))]
+
+
+def test_a_file_created_while_the_export_runs_is_never_clobbered_without_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "out.yaml"
+    real_link = os.link
+
+    def racing_link(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        Path(dst).write_text("won the race", encoding="utf-8")
+        real_link(src, dst)
+
+    monkeypatch.setattr(os, "link", racing_link)
+    with pytest.raises(ConflictError) as caught:
+        write_export(path, "mine", force=False)
+    assert "--force" in caught.value.message
+    assert path.read_text(encoding="utf-8") == "won the race"
+    assert _names(tmp_path) == ["out.yaml"]
+
+
+def _fake_lstat(monkeypatch: pytest.MonkeyPatch, target: Path, mode: int) -> None:
+    real = os.lstat
+
+    def lstat(path: str | os.PathLike[str], *args: object, **kwargs: object) -> os.stat_result:
+        if Path(path) == target:
+            return os.stat_result((mode, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+        return real(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "lstat", lstat)
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_a_symbolic_link_target_is_refused_even_where_symlinks_cannot_be_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+):
+    path = tmp_path / "link.yaml"
+    _fake_lstat(monkeypatch, path, stat.S_IFLNK | 0o777)
+    with pytest.raises(ValidationError) as caught:
+        write_export(path, "x", force=force)
+    assert "symbolic link" in caught.value.message
+    assert _names(tmp_path) == []
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("dangling", [False, True])
+def test_a_real_symlink_is_refused_and_what_it_points_to_is_untouched(
+    tmp_path: Path, force: bool, dangling: bool
+):
+    victim = tmp_path / "victim.txt"
+    if not dangling:
+        victim.write_text("do not touch", encoding="utf-8")
+    link = tmp_path / "link.yaml"
+    try:
+        link.symlink_to(victim)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not permitted on this platform")
+    with pytest.raises(ValidationError) as caught:
+        write_export(link, "x", force=force)
+    assert "symbolic link" in caught.value.message
+    assert link.is_symlink()
+    assert not victim.exists() or victim.read_text(encoding="utf-8") == "do not touch"
+    assert _names(tmp_path) == sorted(["link.yaml"] + ([] if dangling else ["victim.txt"]))
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_an_existing_device_or_other_non_regular_target_is_never_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+):
+    path = tmp_path / "special"
+    _fake_lstat(monkeypatch, path, stat.S_IFCHR | 0o666)
+    with pytest.raises(ValidationError) as caught:
+        write_export(path, "x", force=force)
+    assert "not a regular file" in caught.value.message
+    assert _names(tmp_path) == []
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("force", [False, True])
+def test_the_export_is_private_to_its_owner(tmp_path: Path, force: bool):
+    path = tmp_path / "out.yaml"
+    if force:
+        path.write_text("old", encoding="utf-8")
+        path.chmod(0o644)
+    write_export(path, "data", force=force)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("name", ["a" * 200 + ".yaml", "with space.yaml", "ünï.yaml"])
+def test_unusual_but_valid_file_names_work(tmp_path: Path, name: str):
+    write_export(tmp_path / name, "data", force=False)
+    assert (tmp_path / name).read_text(encoding="utf-8") == "data"
+    assert _names(tmp_path) == [name]
+
+
+def test_a_relative_target_is_written_in_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.chdir(tmp_path)
+    write_export(Path("rel.yaml"), "data", force=False)
+    assert _names(tmp_path) == ["rel.yaml"]
+
+
+# ---- reading the import file: regular files only -------------------------------------------
+
+
+def test_a_device_is_refused_instead_of_read():
+    with pytest.raises(ValidationError) as caught:
+        read_import_text(Path(os.devnull))
+    assert caught.value.message == "cannot read the import file: not a regular file"
+
+
+@POSIX_ONLY
+def test_a_fifo_is_refused_without_blocking_on_a_writer(tmp_path: Path):
+    fifo = tmp_path / "pipe.yaml"
+    os.mkfifo(fifo)
+    with pytest.raises(ValidationError) as caught:
+        read_import_text(fifo)
+    assert caught.value.message == "cannot read the import file: not a regular file"
+
+
+@POSIX_ONLY
+def test_a_directory_is_refused_as_not_a_regular_file(tmp_path: Path):
+    with pytest.raises(ValidationError) as caught:
+        read_import_text(tmp_path)
+    assert caught.value.message.startswith("cannot read the import file")
+    assert str(tmp_path) not in caught.value.message
+
+
+def test_a_symlink_to_a_regular_file_is_read(tmp_path: Path):
+    real = tmp_path / "real.yaml"
+    real.write_text("sources: []\n", encoding="utf-8")
+    link = tmp_path / "link.yaml"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not permitted on this platform")
+    assert read_import_text(link) == "sources: []\n"

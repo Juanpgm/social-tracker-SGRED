@@ -4,8 +4,12 @@ Every failure is a `DomainError` with a fixed message. Messages never echo optio
 or file contents (a mistyped `--set` may well be a pasted secret) and never include paths.
 """
 
+import contextlib
 import getpass
 import json
+import os
+import stat
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -57,19 +61,39 @@ def parse_fields(pairs: Sequence[str], *, reserved: frozenset[str] = frozenset()
     return fields
 
 
+def _read_failure(reason: str) -> ValidationError:
+    return ValidationError(f"cannot read the import file: {reason}")
+
+
+def _write_failure(reason: str) -> ValidationError:
+    return ValidationError(f"cannot write the output file: {reason}")
+
+
 def read_import_text(path: Path) -> str:
     """Read an import file as text, never more than `MAX_FILE_BYTES` + 1 bytes of it.
 
-    The limit is on bytes read from disk, applied BEFORE decoding or parsing, so an oversized or
-    endless file cannot exhaust memory. A UTF-8 byte order mark is accepted and dropped.
+    Only regular files are read (checked with `fstat` on the opened descriptor, so there is no
+    check-then-open race): a FIFO, device or directory is refused instead of blocking on it or
+    reading from it forever. The file is opened non-blocking so a FIFO without a writer cannot
+    hang the open itself. A symbolic link to a regular file is followed.
+
+    The size limit is on bytes read from disk, applied BEFORE decoding or parsing, so an oversized
+    or endless file cannot exhaust memory. A UTF-8 byte order mark is accepted and dropped.
     """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     try:
-        with path.open("rb") as handle:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise _read_failure(exc.strerror or "I/O error") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _read_failure("not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
             raw = handle.read(MAX_FILE_BYTES + 1)
     except OSError as exc:
-        raise ValidationError(
-            f"cannot read the import file: {exc.strerror or 'I/O error'}"
-        ) from None
+        raise _read_failure(exc.strerror or "I/O error") from None
+    finally:
+        os.close(fd)
     if len(raw) > MAX_FILE_BYTES:
         raise ValidationError(f"import file is larger than {MAX_FILE_BYTES} bytes")
     try:
@@ -78,16 +102,58 @@ def read_import_text(path: Path) -> str:
         raise ValidationError("import file is not valid UTF-8") from None
 
 
+def _existing_mode(path: Path) -> int | None:
+    try:
+        return os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+
+
 def write_export(path: Path, text: str, *, force: bool) -> None:
-    """Write `text` as UTF-8 bytes (no newline translation). An existing file is only replaced
-    with `force`; without it the file is created exclusively, so a race cannot clobber one."""
+    """Write `text` as UTF-8 bytes (no newline translation) so that the target is never left
+    partial or empty.
+
+    The bytes go to a private temporary file in the target's directory (created exclusively with
+    mode 0600 where the platform has modes), are flushed to disk, and only then published under
+    the target name: `os.replace` with `force`, a hard link without it (which fails if the name
+    exists, so a race cannot clobber a file; a filesystem without hard links needs `--force`).
+    On any failure, interrupts included, the temporary file is removed and an existing target is
+    left as it was. A symbolic link or any other non-regular file as target is refused. The
+    published file keeps the temporary file's owner-only mode, not the mode of a replaced file.
+    """
     data = text.encode("utf-8")
     try:
-        with path.open("wb" if force else "xb") as handle:
-            handle.write(data)
-    except FileExistsError:
-        raise ConflictError("output file already exists; use --force to overwrite it") from None
+        _publish(path, data, force=force)
     except OSError as exc:
-        raise ValidationError(
-            f"cannot write the output file: {exc.strerror or 'I/O error'}"
-        ) from None
+        raise _write_failure(exc.strerror or "I/O error") from None
+
+
+def _publish(path: Path, data: bytes, *, force: bool) -> None:
+    mode = _existing_mode(path)
+    if mode is not None:
+        if stat.S_ISLNK(mode):
+            raise _write_failure("refusing to write through a symbolic link")
+        if not stat.S_ISREG(mode):
+            raise _write_failure("not a regular file")
+        if not force:
+            raise _exists()
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".export-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if force:
+            os.replace(temporary, path)
+        else:
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                raise _exists() from None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+
+
+def _exists() -> ConflictError:
+    return ConflictError("output file already exists; use --force to overwrite it")
