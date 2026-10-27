@@ -113,6 +113,8 @@ def test_name_rejects_bad_values(name):
         "a\nb",
         "a\rb",
         "a\x1bb",
+        "\x1fa",  # not whitespace for pydantic, so never trimmed away
+        "a\x1f",
     ],
 )
 def test_name_rejects_control_characters_anywhere_inside(name: str):
