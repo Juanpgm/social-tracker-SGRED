@@ -16,8 +16,11 @@
    Global analysis turned off meanwhile does not waste the unit already fetched (PC-6).
 4. FAILURE (one transaction) for any error in steps 2-3: `collection_failed` with exponential
    backoff, the sanitized reason stored as the source's last error, and `Retry-After` honoured
-   as a minimum wait (the domain caps every wait at one hour). The fifth consecutive failure
-   ends in `failed`. A refusal (401/403/429) is the same transition with its reason (CI-6).
+   as a minimum wait: the exponential
+   delay stops at one hour, but an explicit `Retry-After` may ask for more, up to
+   `MAX_RETRY_AFTER_S` (7 days; a larger value is clamped and the clamp is logged). The fifth
+   consecutive failure ends in `failed`. A refusal (401/403/429) is the same transition with its
+   reason (CI-6).
 
 The reasons stored and audited come from a fixed vocabulary (`FetchError.message`, `FeedError`
 text) and go through `sanitize_error`: never a URL, a header or a response body.
@@ -32,7 +35,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
-from social_tracker.collector.domain import FetchError, FetchRequest, FetchResponse, is_due
+from social_tracker.collector.domain import (
+    MAX_RETRY_AFTER_S,
+    FetchError,
+    FetchRequest,
+    FetchResponse,
+    is_due,
+)
 from social_tracker.collector.feed import FeedError, parse_feed
 from social_tracker.collector.normalize import NormalizeReport, normalize_entries
 from social_tracker.collector.ports import Fetcher
@@ -227,11 +236,9 @@ class CollectorService:
         )
         return CollectResult(source_id, outcome, new, duplicate, discarded)
 
-    def _wait_extra(self, base_s: float, retry_after_s: float | None) -> float:
-        """Seconds added to the exponential delay: what `Retry-After` asks beyond it, and jitter."""
+    def _safe_jitter(self, base_s: float) -> float:
         jitter = self._jitter(base_s)
-        safe_jitter = jitter if math.isfinite(jitter) and jitter > 0 else 0.0
-        return max(0.0, (retry_after_s or 0.0) - base_s) + safe_jitter
+        return jitter if math.isfinite(jitter) and jitter > 0 else 0.0
 
     def _fail(self, source_id: str, message: str, retry_after_s: float | None) -> CollectResult:
         text = sanitize_error(message)
@@ -244,8 +251,15 @@ class CollectorService:
                 source_id,
                 actor=ACTOR,
                 reason=text,
-                jitter_s=self._wait_extra(base, retry_after_s),
+                jitter_s=self._safe_jitter(base),
+                retry_after_s=retry_after_s,
             )
+            if retry_after_s is not None and retry_after_s >= MAX_RETRY_AFTER_S:
+                _LOG.info(
+                    "source=%s: Retry-After clamped to the maximum of %d s",
+                    source_id,
+                    MAX_RETRY_AFTER_S,
+                )
             previous = self._repo.get_fetch_status(source_id)
             self._repo.save_fetch_status(
                 FetchStatus(

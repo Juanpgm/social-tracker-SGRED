@@ -13,11 +13,16 @@ from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from typing import Any
 
-from social_tracker.control.domain import CollectionState, FetchStatus, SourceState
+from social_tracker.control.domain import (
+    MAX_RETRY_AFTER_S,
+    CollectionState,
+    FetchStatus,
+    SourceState,
+)
 from social_tracker.shared.errors import DomainError
 from social_tracker.sources.domain import NewsRssSource, Source
 
-MAX_RETRY_AFTER_S = 7 * 24 * 3600  # a larger wait is clamped; the scheduler caps it further
+__all__ = ["MAX_RETRY_AFTER_S"]  # the clamp lives with the state machine that applies it
 _MAX_RETRY_AFTER_TEXT = 100
 _SECONDS_RE = re.compile(r"[0-9]+")
 _DEGRADED_STATUSES = frozenset({401, 403, 429})
@@ -129,8 +134,10 @@ def is_due(
 
     Only enabled RSS sources are collected here. An idle source is due when it never fetched
     successfully or its poll interval (the source's own setting, default 600 s) has passed since
-    the last successful fetch; one in backoff is due once its retry time has come. A source that
-    is collecting, failed (the operator must reset it), disabled or without state is never due.
+    the last successful fetch (a last fetch AFTER now means the clock moved backwards: the source
+    is due, never parked until the clock catches up); one in backoff is due once its retry time
+    has come. A source that is collecting, failed (the operator must reset it), disabled or
+    without state is never due.
     """
     if not isinstance(source, NewsRssSource) or not source.enabled or state is None:
         return False
@@ -139,5 +146,7 @@ def is_due(
     if state.state is not CollectionState.IDLE:
         return False
     if fetch is None or fetch.last_fetch_at is None:
+        return True
+    if fetch.last_fetch_at > now:  # the clock moved backwards: do not wait for it to catch up
         return True
     return now >= fetch.last_fetch_at + timedelta(seconds=source.poll_interval_s)

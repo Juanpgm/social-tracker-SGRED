@@ -43,9 +43,12 @@ def test_the_poll_interval_comes_from_the_source_configuration(ago_s, due):
     assert is_due(configured, idle(), fetched(timedelta(seconds=ago_s)), NOW) is due
 
 
-def test_a_fetch_in_the_future_does_not_make_a_source_due():
-    status = FetchStatus("src_one", NOW + timedelta(hours=1))
-    assert is_due(source(), idle(), status, NOW) is False
+@pytest.mark.parametrize("ahead", [timedelta(seconds=1), timedelta(hours=1), timedelta(days=400)])
+def test_a_fetch_in_the_future_means_the_clock_moved_back_so_the_source_is_due(ahead):
+    # A stored time after "now" must not park the source until the clock catches up (it could
+    # be a year): it is clamped to now, so the interval counts from now and the source is due.
+    status = FetchStatus("src_one", NOW + ahead)
+    assert is_due(source(), idle(), status, NOW) is True
 
 
 @pytest.mark.parametrize(("offset_s", "due"), [(-1, False), (0, True), (1, True)])

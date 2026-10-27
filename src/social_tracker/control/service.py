@@ -325,7 +325,14 @@ class ControlService:
         )
 
     def apply_collection_event(
-        self, source_id: str, event: Event, *, actor: str, reason: str, jitter_s: float = 0.0
+        self,
+        source_id: str,
+        event: Event,
+        *,
+        actor: str,
+        reason: str,
+        jitter_s: float = 0.0,
+        retry_after_s: float | None = None,
     ) -> CollectionChange:
         """Apply one WORKER event to a source, auditing it when it changes something.
 
@@ -345,7 +352,9 @@ class ControlService:
                 raise InvalidTransition("the source is disabled")
             stored = self._control.get_source_state(source_id)
             current = stored or SourceState(source_id, CollectionState.DISABLED)
-            result = apply_event(current, domain_event, now, jitter_s=jitter_s)
+            result = apply_event(
+                current, domain_event, now, jitter_s=jitter_s, retry_after_s=retry_after_s
+            )
             if not result.changed:
                 return CollectionChange(current, changed=False)
             new = result.state
@@ -371,10 +380,21 @@ class ControlService:
         return self.apply_collection_event(source_id, Event.SUCCEED, actor=actor, reason=reason)
 
     def fail_collection(
-        self, source_id: str, *, actor: str, reason: str, jitter_s: float = 0.0
+        self,
+        source_id: str,
+        *,
+        actor: str,
+        reason: str,
+        jitter_s: float = 0.0,
+        retry_after_s: float | None = None,
     ) -> CollectionChange:
         return self.apply_collection_event(
-            source_id, Event.FAIL, actor=actor, reason=reason, jitter_s=jitter_s
+            source_id,
+            Event.FAIL,
+            actor=actor,
+            reason=reason,
+            jitter_s=jitter_s,
+            retry_after_s=retry_after_s,
         )
 
     def retry_collection(self, source_id: str, *, actor: str, reason: str) -> CollectionChange:

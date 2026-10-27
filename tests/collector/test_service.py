@@ -5,7 +5,12 @@ from datetime import timedelta
 
 import pytest
 
-from social_tracker.collector.domain import FetchError, FetchErrorKind, FetchResponse
+from social_tracker.collector.domain import (
+    MAX_RETRY_AFTER_S,
+    FetchError,
+    FetchErrorKind,
+    FetchResponse,
+)
 from social_tracker.collector.service import CollectOutcome, CollectResult
 from social_tracker.control.domain import MAX_CONSECUTIVE_FAILURES, CollectionState, FetchStatus
 from social_tracker.shared.errors import NotFoundError, StorageError, ValidationError
@@ -323,15 +328,35 @@ def test_refusals_are_failures_with_a_clear_reason(world, status):
         (120.0, 120),
         (3000.0, 3000),
         (3600.0, 3600),
-        (99_999.0, 3600),
-        (604_800.0, 3600),
+        (3601.0, 3601),  # an explicit Retry-After may exceed the exponential cap...
+        (99_999.0, 99_999),
+        (MAX_RETRY_AFTER_S, MAX_RETRY_AFTER_S),
+        (MAX_RETRY_AFTER_S + 1.0, MAX_RETRY_AFTER_S),  # ...up to MAX_RETRY_AFTER_S, no further
+        (10.0**12, MAX_RETRY_AFTER_S),
     ],
 )
-def test_retry_after_lengthens_the_wait_but_never_beyond_the_cap(world, retry_after, expected_s):
+def test_retry_after_lengthens_the_wait_up_to_its_own_maximum(world, retry_after, expected_s):
     world.ready()
     world.fetcher.then(FetchError.http(429, retry_after_s=retry_after))
     collect(world)
     assert (world.state().next_run_at - START).total_seconds() == expected_s
+
+
+def test_a_retry_after_beyond_its_maximum_is_clamped_and_the_clamp_is_logged(world, caplog):
+    world.ready()
+    world.fetcher.then(FetchError.http(429, retry_after_s=MAX_RETRY_AFTER_S * 2.0))
+    with caplog.at_level("INFO", logger="social_tracker.collector"):
+        collect(world)
+    assert any("clamped" in record.getMessage() for record in caplog.records)
+    assert "src_news" in caplog.text
+
+
+def test_a_retry_after_within_its_maximum_logs_no_clamp(world, caplog):
+    world.ready()
+    world.fetcher.then(FetchError.http(429, retry_after_s=MAX_RETRY_AFTER_S - 1.0))
+    with caplog.at_level("INFO", logger="social_tracker.collector"):
+        collect(world)
+    assert "clamped" not in caplog.text
 
 
 def test_retry_after_is_compared_with_the_exponential_delay_of_the_next_failure(world):

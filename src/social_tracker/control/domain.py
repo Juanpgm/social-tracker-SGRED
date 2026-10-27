@@ -23,6 +23,9 @@ from social_tracker.shared.text import has_control_chars, has_unsafe_chars, is_b
 MAX_CONSECUTIVE_FAILURES = 5
 BACKOFF_BASE_S = 60
 BACKOFF_CAP_S = 3600  # hard upper bound on the FINAL delay, jitter included
+# A server that says exactly how long to wait (`Retry-After`) is believed, even beyond the
+# exponential cap, but never for more than this.
+MAX_RETRY_AFTER_S = 7 * 24 * 3600
 _MAX_EXPONENT = 12  # 60 * 2**12 is far above the cap; avoids huge integers for big inputs
 
 
@@ -129,6 +132,19 @@ def backoff_delay_s(failures_before: int, jitter_s: float = 0.0) -> float:
     return min(float(BACKOFF_BASE_S * 2**exponent) + jitter, float(BACKOFF_CAP_S))
 
 
+def _check_retry_after(retry_after_s: Any) -> float:
+    if retry_after_s is None:
+        return 0.0
+    if (
+        isinstance(retry_after_s, bool)
+        or not isinstance(retry_after_s, int | float)
+        or not math.isfinite(retry_after_s)
+        or retry_after_s < 0
+    ):
+        raise ValidationError("retry_after_s must be a finite number >= 0")
+    return float(min(retry_after_s, MAX_RETRY_AFTER_S))
+
+
 def _noop(current: SourceState) -> TransitionResult:
     return TransitionResult(current, changed=False)
 
@@ -147,9 +163,17 @@ def _moved(
 
 
 def apply_event(
-    current: SourceState, event: Event | str, now: datetime, *, jitter_s: float = 0.0
+    current: SourceState,
+    event: Event | str,
+    now: datetime,
+    *,
+    jitter_s: float = 0.0,
+    retry_after_s: float | None = None,
 ) -> TransitionResult:
-    """Apply `event` to `current`. Redundant requests are no-ops; illegal ones raise."""
+    """Apply `event` to `current`. Redundant requests are no-ops; illegal ones raise.
+
+    On `FAIL`, `retry_after_s` (what the server asked for) raises the wait to at least that many
+    seconds, even above `BACKOFF_CAP_S`, but never above `MAX_RETRY_AFTER_S`."""
     now = ensure_utc(now)
     event = _coerce(Event, event, "event")
     state = current.state
@@ -169,10 +193,11 @@ def apply_event(
         return _moved(current, S.IDLE, failures=0)
     if event is Event.FAIL and state is S.COLLECTING:
         jitter = _check_jitter(jitter_s)  # validated whatever the outcome, even into FAILED
+        asked = _check_retry_after(retry_after_s)
         failures = current.consecutive_failures + 1
         if failures >= MAX_CONSECUTIVE_FAILURES:
             return _moved(current, S.FAILED, failures=failures)
-        delay = backoff_delay_s(current.consecutive_failures, jitter)
+        delay = max(backoff_delay_s(current.consecutive_failures, jitter), asked)
         return _moved(
             current,
             S.BACKOFF,

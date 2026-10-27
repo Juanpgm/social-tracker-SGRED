@@ -8,6 +8,7 @@ import pytest
 from social_tracker.control.domain import (
     BACKOFF_CAP_S,
     MAX_CONSECUTIVE_FAILURES,
+    MAX_RETRY_AFTER_S,
     CollectionState,
     Event,
     GlobalState,
@@ -263,6 +264,32 @@ def test_valid_jitter_is_accepted_when_the_failure_ends_in_failed():
 def test_failure_delay_never_exceeds_the_cap_even_with_jitter():
     result = apply_event(state(S.COLLECTING, failures=3), E.FAIL, NOW, jitter_s=10_000)
     assert result.state.next_run_at == NOW + timedelta(seconds=BACKOFF_CAP_S)
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected"),
+    [
+        (None, 60.0),
+        (0.0, 60.0),
+        (59.0, 60.0),
+        (60.0, 60.0),
+        (61.0, 61.0),
+        (BACKOFF_CAP_S + 1.0, BACKOFF_CAP_S + 1.0),
+        (MAX_RETRY_AFTER_S, MAX_RETRY_AFTER_S),
+        (MAX_RETRY_AFTER_S + 1.0, MAX_RETRY_AFTER_S),
+    ],
+)
+def test_an_explicit_retry_after_raises_the_delay_above_the_cap_up_to_its_maximum(
+    retry_after, expected
+):
+    result = apply_event(state(S.COLLECTING), E.FAIL, NOW, retry_after_s=retry_after)
+    assert result.state.next_run_at == NOW + timedelta(seconds=expected)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0, True, "5"])
+def test_a_bad_retry_after_is_rejected(bad):
+    with pytest.raises(ValidationError, match="retry_after_s"):
+        apply_event(state(S.COLLECTING), E.FAIL, NOW, retry_after_s=bad)
 
 
 # ---- SourceState invariants ------------------------------------------------------------

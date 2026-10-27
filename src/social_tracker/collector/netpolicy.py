@@ -6,8 +6,9 @@ address it resolves to is a public one: a name that answers with a loopback, pri
 refused whole, so a mixed answer cannot be used to smuggle one in. IPv6 addresses that wrap an
 IPv4 one (`::ffff:a.b.c.d`, the IPv4-translated `::ffff:0:a.b.c.d`, the deprecated IPv4-compatible
 `::a.b.c.d`, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) are judged by the IPv4 address inside; the
-deprecated site-local range `fec0::/10` is refused. Numeric spellings of an IPv4 address (`2130706433`, `0x7f.1`, `127.1`) are refused as
-URLs rather than interpreted. The operator may allow named private hosts (see the fetcher).
+deprecated site-local range `fec0::/10` is refused. Numeric spellings of an IPv4 address
+(`2130706433`, `0x7f.1`, `127.1`) are refused as URLs rather than interpreted. The operator may
+allow named private hosts (see the fetcher).
 """
 
 import ipaddress
