@@ -458,7 +458,7 @@ def test_a_symlink_to_a_regular_file_is_read(tmp_path: Path):
 # ---- a replace that races another one (Windows reports it as a passing "access denied") ----
 
 
-def _flaky_replace(monkeypatch: pytest.MonkeyPatch, failures: int) -> list[int]:
+def _flaky_replace(monkeypatch: pytest.MonkeyPatch, failures: int) -> tuple[list[int], list[float]]:
     calls: list[int] = []
     real = os.replace
 
@@ -469,17 +469,19 @@ def _flaky_replace(monkeypatch: pytest.MonkeyPatch, failures: int) -> list[int]:
         real(src, dst)
 
     monkeypatch.setattr(os, "replace", replace)
-    monkeypatch.setattr(inputs.time, "sleep", lambda _seconds: None)
-    return calls
+    pauses: list[float] = []
+    monkeypatch.setattr(inputs.time, "sleep", pauses.append)
+    return calls, pauses
 
 
 def test_on_windows_a_replace_denied_for_a_moment_is_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(inputs, "_IS_WINDOWS", True)
-    calls = _flaky_replace(monkeypatch, failures=3)
+    calls, pauses = _flaky_replace(monkeypatch, failures=3)
     write_export(tmp_path / "out.yaml", "data", force=True)
     assert len(calls) == 4
+    assert pauses == [inputs._REPLACE_PAUSE_S] * 3  # it waits between attempts, not after
     assert (tmp_path / "out.yaml").read_text(encoding="utf-8") == "data"
     assert _names(tmp_path) == ["out.yaml"]
 
@@ -488,13 +490,14 @@ def test_on_windows_a_replace_denied_for_good_gives_up_cleanly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(inputs, "_IS_WINDOWS", True)
-    calls = _flaky_replace(monkeypatch, failures=10_000)
+    calls, pauses = _flaky_replace(monkeypatch, failures=10_000)
     path = tmp_path / "out.yaml"
     path.write_text("precious", encoding="utf-8")
     with pytest.raises(ValidationError) as caught:
         write_export(path, "new", force=True)
     assert caught.value.message.startswith("cannot write the output file")
     assert len(calls) == inputs._REPLACE_ATTEMPTS
+    assert len(pauses) == inputs._REPLACE_ATTEMPTS - 1
     assert path.read_text(encoding="utf-8") == "precious"
     assert _names(tmp_path) == ["out.yaml"]
 
@@ -503,8 +506,23 @@ def test_elsewhere_a_denied_replace_is_a_real_permission_problem_and_not_retried
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(inputs, "_IS_WINDOWS", False)
-    calls = _flaky_replace(monkeypatch, failures=1)
+    calls, pauses = _flaky_replace(monkeypatch, failures=1)
     with pytest.raises(ValidationError):
         write_export(tmp_path / "out.yaml", "data", force=True)
     assert len(calls) == 1
+    assert pauses == []
     assert _names(tmp_path) == []
+
+
+def test_an_existing_target_without_force_is_refused_before_any_temporary_file_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "out.yaml"
+    path.write_text("precious", encoding="utf-8")
+
+    def no_temporary_files(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a temporary file was created for a write that is refused up front")
+
+    monkeypatch.setattr(inputs.tempfile, "mkstemp", no_temporary_files)
+    with pytest.raises(ConflictError):
+        write_export(path, "new", force=False)

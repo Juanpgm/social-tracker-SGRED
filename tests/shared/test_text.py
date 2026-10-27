@@ -108,6 +108,9 @@ def test_text_with_a_visible_character_is_not_blank(text: str):
         ("a\ufeffb", "a\\ufeffb"),
         ("a\ud800b", "a\\ud800b"),  # lone surrogate
         ("\U000e0041", "\\U000e0041"),  # tag character
+        ("a­b", "a\\xadb"),  # soft hyphen: the last escape that fits two digits
+        ("a؀b", "a\\u0600b"),  # Arabic number sign (Cf): the first that needs four
+        ("a\U0001d173b", "a\\U0001d173b"),  # musical begin beam (Cf): needs eight
     ],
 )
 def test_control_and_hidden_characters_are_shown_as_escapes(raw: str, escaped: str):
