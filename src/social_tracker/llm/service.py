@@ -619,9 +619,10 @@ class EscalationService:
         original = self._classifications.get(original_id)
         return original is not None and original.stage is Stage.LLM
 
-    def _judge_has_answered(self, now: datetime, tally: _Tally) -> bool:
-        """The judge gave a valid verdict for some item in this pass or in the last hour."""
-        return tally.judged > 0 or self._escalations.judged_since(now - SUCCESS_WINDOW) > 0
+    def _judge_has_answered(self, now: datetime) -> bool:
+        """The judge gave a valid verdict for some item in the last hour (this pass included: a
+        judgment is stored the moment it is made)."""
+        return self._escalations.judged_since(now - SUCCESS_WINDOW) > 0
 
     # ---- writing the outcome (one short transaction each) ----
 
@@ -825,7 +826,7 @@ class EscalationService:
         item only while the judge answers other items; anything else may be the item's."""
         now = self._clock.now()
         if exc.kind is JudgeErrorKind.INVALID_OUTPUT:
-            if self._judge_has_answered(now, tally):
+            if self._judge_has_answered(now):
                 return self._settle_invalid(current, item, exc, alert_min, tally)
             # Nothing valid has come out of the judge for anyone: a sick judge, not a bad item.
             return self._judge_failed(current, exc.code, tally, refund=None)
@@ -837,7 +838,7 @@ class EscalationService:
     def _on_trouble(self, current: Classification, code: str, tally: _Tally) -> bool:
         """A failure that may be the item's: it counts against the item only while the judge is
         answering other items; otherwise it is the judge's."""
-        if self._judge_has_answered(self._clock.now(), tally):
+        if self._judge_has_answered(self._clock.now()):
             return self._fail_item(current, code, tally)
         return self._judge_failed(current, code, tally, refund=None)
 

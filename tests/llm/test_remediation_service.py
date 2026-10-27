@@ -1172,3 +1172,56 @@ def _state(item_id: str, **changes):
 def _overview_with(w: LlmWorld, stored: Classification):
     """The real overview, so that the item's source still counts as eligible for listing."""
     return type(w.base.control).overview(w.base.control)
+
+
+# ---- what the first sweep found unpinned ----
+
+
+def test_a_failure_of_the_judge_makes_the_next_pass_ask_who_is_there_again():
+    w = world()
+    w.seed(1, priority=0.9)
+    w.seed(2, priority=0.5)
+    w.judge.script.extend([None, status_error("server_error", 500)])
+    w.escalate()
+    assert w.judge.identified == 1  # one check served both items
+    w.clock.advance(timedelta(seconds=121))  # the judge has rested; the identity was still fresh
+    w.escalate()
+    assert w.judge.identified == 2  # but a failure puts it in doubt: it is asked again
+
+
+def test_a_copy_whose_source_is_switched_off_between_listing_and_release_is_left_alone():
+    w = copies_world()
+    original = w.seed(1, needs_llm=False, priority=0.0)
+    copy = waiting_copy(w, 2, original)
+    real = w.escalations.orphaned_copies
+
+    def switch_off_after_listing(**kwargs):
+        listed = real(**kwargs)
+        w.base.control.set_source_analysis(COPIES, False, **WHO)
+        return listed
+
+    w.escalations.orphaned_copies = switch_off_after_listing
+    report = w.escalate()
+    assert report.released == 0
+    after = w.verdict(copy)
+    assert (after.awaiting_original, after.needs_llm) == (True, False)
+
+
+def test_items_that_cannot_be_put_to_the_judge_do_not_end_the_batch_like_failed_calls_do(
+    monkeypatch,
+):
+    w = world(LlmSettings(max_failures=5))
+    broken = [w.seed(n, priority=0.9 - n / 100) for n in range(1, 4)]
+    last = w.seed(9, priority=0.1)
+
+    def boom(verdict):
+        if verdict.item_id == last.item_id:
+            return real(verdict)
+        raise ValidationError("invalid evidence for the language model")
+
+    real = service_module.evidence_of
+    monkeypatch.setattr(service_module, "evidence_of", boom)
+    report = w.escalate()
+    assert (report.failed, report.judged, w.judge.calls) == (3, 1, 1)
+    assert all(w.escalations.get_state(b.item_id) is not None for b in broken)
+    assert w.verdict(last).stage is Stage.LLM

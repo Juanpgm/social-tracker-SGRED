@@ -27,8 +27,11 @@ What it does, in order:
   escalation, `EscalationService.escalate`), the items the cascade could not settle are sent to
   the local language model, a bounded batch per pass. It comes last because it is the slowest
   and the only optional stage: a judge that is down or slow costs this step and nothing else
-  (the CPU verdicts are already stored), and it checks the stop flag between items. It follows
-  the global analysis switch too.
+  (the CPU verdicts are already stored). The step is bounded by the item count AND by a
+  wall-clock budget (`SOCIAL_TRACKER_LLM_PASS_BUDGET_S`, enforced by the escalation service), and
+  it checks the stop flag between items and between the two calls of one judgment. A judge that
+  failed rests (doubling, capped) across passes: the hook returns at once until it is over. It
+  follows the global analysis switch too.
 - STOP (`request_stop`, wired to SIGINT/SIGTERM by the entrypoint): no new collection starts; the
   one in flight is completed and committed, never abandoned half-written (PC-6). The wait for
   it is bounded by the fetcher's deadline (a wall-clock budget enforced inside every connect,

@@ -82,7 +82,13 @@ CLASSIFIER = "classification/service.py"
 # Known equivalent mutants, left out on purpose (no input can tell them apart):
 # - `keep = min(keep - 1, keep - over)` of the prompt cut: `keep - 1` alone reaches the same cut,
 #   only more slowly;
-# - the exact number of seconds of the margin of a lease beyond the longest judgment.
+# - the exact number of seconds of the margin of a lease beyond the longest judgment;
+# - the floor of `num_ctx` (2048): a window of 2048 can never leave the 2048 tokens the prompt
+#   needs next to an answer of at least one token, so 2049 is the real floor;
+# - `excess <= 0` and `over > 0` of the queue bound: at 0 there is nothing to drop whichever
+#   branch is taken;
+# - `tally.judged > 0` of the success check, removed from the code: a judgment is stored the
+#   moment it is made, so the table already says it.
 MUTANTS = [
     # ---- settings ----
     m(
@@ -91,13 +97,6 @@ MUTANTS = [
         DOMAIN,
         "and self.num_ctx - self.max_output_tokens >= MIN_PROMPT_TOKENS",
         "and self.num_ctx - self.max_output_tokens > MIN_PROMPT_TOKENS",
-    ),
-    m(
-        "settings num_ctx floor",
-        "domain",
-        DOMAIN,
-        "_whole(self.num_ctx, 2048, 262_144)",
-        "_whole(self.num_ctx, 2049, 262_144)",
     ),
     m(
         "settings num_ctx ceiling",
@@ -534,18 +533,18 @@ MUTANTS = [
         "SUCCESS_WINDOW = timedelta(hours=2)",
     ),
     m(
-        "a success in this pass vouches",
-        "service",
-        SERVICE,
-        "return tally.judged > 0 or self._escalations.judged_since(now - SUCCESS_WINDOW) > 0",
-        "return self._escalations.judged_since(now - SUCCESS_WINDOW) > 0",
-    ),
-    m(
         "a recent success vouches",
         "service",
         SERVICE,
-        "return tally.judged > 0 or self._escalations.judged_since(now - SUCCESS_WINDOW) > 0",
-        "return tally.judged > 0",
+        "return self._escalations.judged_since(now - SUCCESS_WINDOW) > 0",
+        "return False",
+    ),
+    m(
+        "a success vouches from its moment",
+        "service",
+        SERVICE,
+        "return self._escalations.judged_since(now - SUCCESS_WINDOW) > 0",
+        "return self._escalations.judged_since(now) > 0",
     ),
     m("the breaker", "service", SERVICE, "BREAKER = 2", "BREAKER = 3"),
     m(
@@ -690,20 +689,6 @@ MUTANTS = [
         "shares = answer is not None",
     ),
     m(
-        "the queue bound is exclusive",
-        "service",
-        SERVICE,
-        "        if excess <= 0:\n            return\n        cap =",
-        "        if excess < 0:\n            return\n        cap =",
-    ),
-    m(
-        "the fair share only binds above it",
-        "service",
-        SERVICE,
-        "if over > 0 and excess > 0:",
-        "if over >= 0 and excess > 0:",
-    ),
-    m(
         "the fair share never drops more than the excess",
         "service",
         SERVICE,
@@ -843,8 +828,8 @@ MUTANTS = [
         "an original in an ineligible source is gone",
         "repos",
         LLM_REPO,
-        '"OR oi.source_id NOT IN ({marks}) ORDER BY c.item_id LIMIT ?"',
-        '"ORDER BY c.item_id LIMIT ?"',
+        '"OR oi.source_id NOT IN ({marks})) ORDER BY c.item_id LIMIT ?"',
+        '") ORDER BY c.item_id LIMIT ?"',
     ),
     m(
         "only a parked verdict reopens",

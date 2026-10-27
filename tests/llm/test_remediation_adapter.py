@@ -578,3 +578,61 @@ def test_identify_sends_no_item_text_and_no_chat_request():
     make(handler).identify()
     assert all(r.method == "GET" and r.url.path != "/api/chat" for r in seen)
     assert all(not r.content for r in seen)
+
+
+# ---- what the first sweep found unpinned ----
+
+
+def test_a_422_that_names_think_also_gets_the_retry_without_it():
+    seen: list[dict] = []
+
+    def reply(body):
+        if "think" in body:
+            return httpx2.Response(422, json={"error": "unprocessable: think"})
+        return ok()
+
+    judge = make(_bodies(seen, reply), fallback_model=None)
+    assert judge.judge(request()).label is Label.DELIBERATE_DISINFORMATION
+    assert ["think" in b for b in seen] == [True, False]
+
+
+def test_a_400_about_think_on_another_path_is_a_plain_bad_response():
+    seen: list[str] = []
+
+    def handler(req):
+        seen.append(req.url.path)
+        return httpx2.Response(400, json={"error": "think is not a thing"})
+
+    judge = make(handler)
+    with pytest.raises(JudgeError) as caught:
+        judge.list_models()
+    assert caught.value.kind is JudgeErrorKind.BAD_RESPONSE
+    assert caught.value.status == 400
+    assert seen == ["/api/tags"]
+
+
+def test_the_fallback_model_gets_what_is_left_of_the_hard_cap_of_the_call():
+    clock = Clock()
+    reads: list[float] = []
+
+    def handler(req):
+        reads.append(req.extensions["timeout"]["read"])
+        clock.now += 10.0
+        if json.loads(req.content)["model"] == "st-gemma4-e4b":
+            return httpx2.Response(404, json={"error": "model not found"})
+        return ok()
+
+    make(handler, clock=clock, call_deadline_s=60, load_deadline_s=180).judge(request())
+    # both models have to be loaded: the second may use the cold budget, less the 10 s gone
+    assert reads == [180.0, 170.0]
+
+
+def test_a_root_page_that_fails_for_real_is_not_papered_over_by_the_version_page():
+    def handler(req):
+        if req.url.path == "/":
+            raise httpx2.ReadTimeout("slow", request=req)
+        return httpx2.Response(200, json={"version": "0.6.2"})
+
+    with pytest.raises(JudgeError) as caught:
+        make(handler).identify()
+    assert caught.value.kind is JudgeErrorKind.TIMEOUT

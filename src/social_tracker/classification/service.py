@@ -10,7 +10,10 @@ have not been classified yet, oldest published first:
 3. DEDUP: content seen before, measured from when this application FIRST SAW each item (never
    from the publication date, which the feed writes). Content identical to an earlier item's:
    within `recycle_days` it is a duplicate that reuses the earlier verdict (with this source's own
-   credibility prior, and flagged when the original still waits for the LLM); further apart than
+   credibility prior, and flagged when the original still waits for the LLM); a verdict the
+   language model gave is reused only by a copy whose text is the original's to the byte (a copy
+   that differs by punctuation, case, a look-alike letter or another address runs its own rules
+   and is linked as a near copy, see `_reusable`); further apart than
    that, in either direction, it is `recycled_content`. A NEAR copy (similar, same numbers, long
    enough) never inherits a verdict: its rules run on its own text; within the window it only
    links to the original (`near_of`), beyond it it is recycled. Short texts match only identical
