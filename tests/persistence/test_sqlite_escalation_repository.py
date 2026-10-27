@@ -37,9 +37,10 @@ class TestSqliteEscalationRepositoryContract(EscalationRepositoryContract):
         )
 
 
-def test_the_schema_is_the_ninth_migration():
-    assert load_migrations()[-1].name == "llm_hardening"
-    assert load_migrations()[-1].version == 9
+def test_the_ninth_migration_is_the_llm_hardening():
+    # unit 3d added a tenth migration (the alert store), so this is no longer the last one
+    assert load_migrations()[8].name == "llm_hardening"
+    assert load_migrations()[8].version == 9
 
 
 _OLD_VERDICT = (
