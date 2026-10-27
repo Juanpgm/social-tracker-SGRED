@@ -5,8 +5,10 @@ mutates its input, so behaviour is fully deterministic (jitter is injected as a 
 """
 
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
@@ -203,7 +205,14 @@ def analysis_effective(global_state: GlobalState | str, source_analysis_enabled:
 
 SETTING_GLOBAL_ANALYSIS_ENABLED = "global_analysis_enabled"
 BOOLEAN_SETTING_VALUES = frozenset({"true", "false"})  # exact, lowercase: "TRUE"/"1" are invalid
-DEFAULT_SETTINGS: dict[str, str] = {SETTING_GLOBAL_ANALYSIS_ENABLED: "false"}
+SETTING_ALERT_MIN_CONFIDENCE = "alert_min_confidence"
+DEFAULT_ALERT_MIN_CONFIDENCE = 0.5
+DEFAULT_SETTINGS: dict[str, str] = {
+    SETTING_GLOBAL_ANALYSIS_ENABLED: "false",
+    SETTING_ALERT_MIN_CONFIDENCE: str(DEFAULT_ALERT_MIN_CONFIDENCE),
+}
+MAX_ACTOR = 100
+MAX_REASON = 500
 MAX_SETTING_KEY = 100
 MAX_SETTING_VALUE = 1000
 MAX_EVENT_KIND = 64
@@ -232,6 +241,8 @@ def validate_setting(key: Any, value: Any) -> tuple[str, str]:
         raise ValidationError(
             f"setting value for {key} must be one of: {', '.join(sorted(BOOLEAN_SETTING_VALUES))}"
         )
+    if key == SETTING_ALERT_MIN_CONFIDENCE:
+        parse_confidence(value)
     return key, value
 
 
@@ -262,3 +273,62 @@ SETTING_SOURCE_ANALYSIS_PREFIX = "source_analysis."
 def source_analysis_key(source_id: str) -> str:
     """Settings key holding the per-source analysis flag ("true"/"false"; absent means off)."""
     return SETTING_SOURCE_ANALYSIS_PREFIX + validate_slug(source_id)
+
+
+# ---- alert threshold, actor and reason -----------------------------------------------------
+
+_CONFIDENCE_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?", re.ASCII)
+_MAX_CONFIDENCE_TEXT = 400  # plain-decimal text of the smallest positive float is ~326 chars
+
+
+def _bad_confidence(what: str) -> ValidationError:
+    return ValidationError(what, (SETTING_ALERT_MIN_CONFIDENCE,))
+
+
+def validate_confidence(value: Any) -> float:
+    """A finite number in [0.0, 1.0] (bools, strings and None are not numbers here)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise _bad_confidence("alert_min_confidence must be a number between 0 and 1")
+    number = float(value)
+    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+        raise _bad_confidence("alert_min_confidence must be a number between 0 and 1")
+    return number + 0.0  # turns -0.0 into 0.0
+
+
+def format_confidence(value: float) -> str:
+    """Plain decimal text that `parse_confidence` reads back to exactly `value` (no exponent)."""
+    return format(Decimal(repr(validate_confidence(value))), "f")
+
+
+def parse_confidence(text: Any) -> float:
+    """Strict reader for a stored threshold: ASCII digits with an optional fraction, in range."""
+    if (
+        not isinstance(text, str)
+        or len(text) > _MAX_CONFIDENCE_TEXT
+        or _CONFIDENCE_RE.fullmatch(text) is None
+    ):
+        raise _bad_confidence("alert_min_confidence must be a plain decimal between 0 and 1")
+    return validate_confidence(float(text))
+
+
+def _free_text(value: Any, field: str, max_len: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > max_len
+        or has_control_chars(value)
+    ):
+        raise ValidationError(
+            f"{field} must be non-blank text of at most {max_len} characters without "
+            "control characters",
+            (field,),
+        )
+    return value
+
+
+def validate_actor(value: Any) -> str:
+    return _free_text(value, "actor", MAX_ACTOR)
+
+
+def validate_reason(value: Any) -> str:
+    return _free_text(value, "reason", MAX_REASON)

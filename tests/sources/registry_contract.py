@@ -43,33 +43,11 @@ from social_tracker.sources.service import (
     SourceRegistry,
 )
 from social_tracker.sources.yaml_io import SourceFileError, dump_sources
+from tests.fakes.flaky_control import FlakyControl
 from tests.sources.factories import CANARY, T0, payload
 
 START = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
 HOUR = timedelta(hours=1)
-
-
-class FlakyControl:
-    """Delegates to a real control repository but fails the n-th call of one method."""
-
-    def __init__(self, inner: ControlRepository, method: str, on_call: int = 1) -> None:
-        self._inner = inner
-        self._method = method
-        self._on_call = on_call
-        self._calls = 0
-
-    def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._inner, name)
-        if name != self._method:
-            return attr
-
-        def flaky(*args: Any, **kwargs: Any) -> Any:
-            self._calls += 1
-            if self._calls == self._on_call:
-                raise StorageError("simulated storage failure")
-            return attr(*args, **kwargs)
-
-        return flaky
 
 
 @dataclass

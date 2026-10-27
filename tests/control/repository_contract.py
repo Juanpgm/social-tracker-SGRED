@@ -18,6 +18,7 @@ import pytest
 from social_tracker.control.domain import (
     MAX_SETTING_KEY,
     MAX_SETTING_VALUE,
+    SETTING_ALERT_MIN_CONFIDENCE,
     SETTING_GLOBAL_ANALYSIS_ENABLED,
     CollectionState,
     ControlEvent,
@@ -149,6 +150,25 @@ class ControlRepositoryContract:
             with pytest.raises(ValidationError):
                 repo.set_setting(SETTING_GLOBAL_ANALYSIS_ENABLED, value)
             assert repo.get_setting(SETTING_GLOBAL_ANALYSIS_ENABLED) == "true"
+
+    def test_alert_threshold_defaults_to_one_half(self, repo: ControlRepository):
+        assert repo.get_setting(SETTING_ALERT_MIN_CONFIDENCE) == "0.5"
+
+    @pytest.mark.parametrize("value", ["0", "0.0", "0.5", "0.75", "1", "1.0", "0.000001"])
+    def test_alert_threshold_accepts_plain_decimals_in_range(
+        self, repo: ControlRepository, value: str
+    ):
+        repo.set_setting(SETTING_ALERT_MIN_CONFIDENCE, value)
+        assert repo.get_setting(SETTING_ALERT_MIN_CONFIDENCE) == value
+
+    @pytest.mark.parametrize("value", ["", "abc", "nan", "inf", "-0.1", "1.01", "0.5e0", " 0.5"])
+    def test_alert_threshold_rejects_anything_else_and_keeps_the_old_value(
+        self, repo: ControlRepository, value: str
+    ):
+        repo.set_setting(SETTING_ALERT_MIN_CONFIDENCE, "0.9")
+        with pytest.raises(ValidationError):
+            repo.set_setting(SETTING_ALERT_MIN_CONFIDENCE, value)
+        assert repo.get_setting(SETTING_ALERT_MIN_CONFIDENCE) == "0.9"
 
     # ---- source state ----
 
