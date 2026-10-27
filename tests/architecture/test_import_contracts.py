@@ -40,6 +40,7 @@ FORBIDDEN_EXTERNALS = [
     "glob",
 ]
 COLLECTOR_CORE_MODULES = ("feed", "normalize", "netpolicy", "service", "worker")
+CLASSIFICATION_CORE_MODULES = ("domain", "text", "topics", "rules", "similarity")
 FORBIDDEN_LAYERS = ["adapters", "persistence", "entrypoints", "infrastructure", "storage"]
 
 
@@ -83,6 +84,11 @@ def _make_package(root: Path, name: str, files: dict[str, str]) -> None:
     (pkg / "collector" / "__init__.py").touch()
     for module in COLLECTOR_CORE_MODULES:
         (pkg / "collector" / f"{module}.py").touch()
+    # And the classification-core contract.
+    (pkg / "classification").mkdir(exist_ok=True)
+    (pkg / "classification" / "__init__.py").touch()
+    for module in CLASSIFICATION_CORE_MODULES:
+        (pkg / "classification" / f"{module}.py").touch()
 
 
 def _retarget_config(repo_root: Path, dest: Path, root_package: str) -> Path:

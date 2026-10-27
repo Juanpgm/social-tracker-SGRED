@@ -148,3 +148,52 @@ forbidden_modules =
     httpcore2
     requests
     aiohttp
+
+# The classification core (RC-10: the CPU stages are deterministic). Vocabulary, text folding, the
+# topic filter, the rules and the near-duplicate maths are pure: no storage, no format libraries,
+# no files or sockets, and no source of non-determinism (randomness or the wall clock). They know
+# nothing of the other modules; the service, the ports and the YAML codec stay outside this set.
+[importlinter:contract:classification-core-pure]
+name = The classification core must be pure and deterministic
+type = forbidden
+source_modules =
+    social_tracker.classification.domain
+    social_tracker.classification.text
+    social_tracker.classification.topics
+    social_tracker.classification.rules
+    social_tracker.classification.similarity
+forbidden_modules =
+    social_tracker.persistence
+    social_tracker.entrypoints
+    social_tracker.control
+    social_tracker.items
+    social_tracker.sources
+    social_tracker.collector
+    social_tracker.bootstrap
+    social_tracker.classification.service
+    social_tracker.classification.ports
+    social_tracker.classification.yaml_io
+    sqlite3
+    yaml
+    typer
+    httpx
+    httpx2
+    requests
+    aiohttp
+    os
+    pathlib
+    io
+    shutil
+    socket
+    ssl
+    subprocess
+    urllib
+    http
+    asyncio
+    importlib
+    tempfile
+    glob
+    random
+    time
+    secrets
+    uuid
