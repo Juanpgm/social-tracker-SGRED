@@ -1,6 +1,7 @@
 """Fixtures to drive the real CLI against a throwaway SQLite database."""
 
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,14 @@ from social_tracker.entrypoints.cli import app
 from social_tracker.entrypoints.inputs import ACTOR_ENV
 from social_tracker.persistence.control_repo import SqliteControlRepository
 from social_tracker.persistence.db import Database
+
+
+def scrubbed_env(**extra: str) -> dict[str, str]:
+    """The ambient environment without any `SOCIAL_TRACKER_*` variable, plus `extra`: a developer's
+    own settings (a real database path, a short busy timeout) must never reach a test process."""
+    ambient = {k: v for k, v in os.environ.items() if not k.startswith("SOCIAL_TRACKER_")}
+    return {**ambient, **extra}
+
 
 NEWS = ("--type", "news_rss", "--set", "feed_url=https://example.org/rss.xml")
 WHY = "scheduled maintenance"

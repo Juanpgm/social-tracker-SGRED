@@ -10,6 +10,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,9 @@ from social_tracker.sources.yaml_io import MAX_FILE_BYTES
 
 ACTOR_ENV = "SOCIAL_TRACKER_ACTOR"
 _UNKNOWN_USER = "unknown"
+_IS_WINDOWS = os.name == "nt"
+_REPLACE_ATTEMPTS = 40
+_REPLACE_PAUSE_S = 0.025
 
 
 def _os_user() -> str:
@@ -144,7 +148,7 @@ def _publish(path: Path, data: bytes, *, force: bool) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         if force:
-            os.replace(temporary, path)
+            _replace(temporary, path)
         else:
             try:
                 os.link(temporary, path)
@@ -153,6 +157,20 @@ def _publish(path: Path, data: bytes, *, force: bool) -> None:
     finally:
         with contextlib.suppress(OSError):
             os.unlink(temporary)
+
+
+def _replace(source: str, target: Path) -> None:
+    """`os.replace`, retried for about a second on Windows, where replacing a file that another
+    process is replacing (or has open for a moment) fails with a transient `PermissionError`.
+    Elsewhere a denied replace is a real permission problem and is raised at once."""
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if not _IS_WINDOWS or attempt == _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_REPLACE_PAUSE_S)
 
 
 def _exists() -> ConflictError:

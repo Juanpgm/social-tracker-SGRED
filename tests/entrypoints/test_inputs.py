@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from social_tracker.entrypoints import inputs
 from social_tracker.entrypoints.inputs import (
     ACTOR_ENV,
     parse_fields,
@@ -452,3 +453,58 @@ def test_a_symlink_to_a_regular_file_is_read(tmp_path: Path):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks are not permitted on this platform")
     assert read_import_text(link) == "sources: []\n"
+
+
+# ---- a replace that races another one (Windows reports it as a passing "access denied") ----
+
+
+def _flaky_replace(monkeypatch: pytest.MonkeyPatch, failures: int) -> list[int]:
+    calls: list[int] = []
+    real = os.replace
+
+    def replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        calls.append(1)
+        if len(calls) <= failures:
+            raise PermissionError(errno.EACCES, "Access is denied")
+        real(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(inputs.time, "sleep", lambda _seconds: None)
+    return calls
+
+
+def test_on_windows_a_replace_denied_for_a_moment_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(inputs, "_IS_WINDOWS", True)
+    calls = _flaky_replace(monkeypatch, failures=3)
+    write_export(tmp_path / "out.yaml", "data", force=True)
+    assert len(calls) == 4
+    assert (tmp_path / "out.yaml").read_text(encoding="utf-8") == "data"
+    assert _names(tmp_path) == ["out.yaml"]
+
+
+def test_on_windows_a_replace_denied_for_good_gives_up_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(inputs, "_IS_WINDOWS", True)
+    calls = _flaky_replace(monkeypatch, failures=10_000)
+    path = tmp_path / "out.yaml"
+    path.write_text("precious", encoding="utf-8")
+    with pytest.raises(ValidationError) as caught:
+        write_export(path, "new", force=True)
+    assert caught.value.message.startswith("cannot write the output file")
+    assert len(calls) == inputs._REPLACE_ATTEMPTS
+    assert path.read_text(encoding="utf-8") == "precious"
+    assert _names(tmp_path) == ["out.yaml"]
+
+
+def test_elsewhere_a_denied_replace_is_a_real_permission_problem_and_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(inputs, "_IS_WINDOWS", False)
+    calls = _flaky_replace(monkeypatch, failures=1)
+    with pytest.raises(ValidationError):
+        write_export(tmp_path / "out.yaml", "data", force=True)
+    assert len(calls) == 1
+    assert _names(tmp_path) == []
