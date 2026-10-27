@@ -48,6 +48,18 @@ Configuration comes from the process environment (no file is read). All variable
 | `SOCIAL_TRACKER_CATALOG_INTERVAL_S` | How often the worker refreshes the catalogs, in seconds (60..86400). | `600` |
 | `SOCIAL_TRACKER_CATALOG_MAX_AGE_S` | A cache whose last good refresh is older than this is stale and the check says `unavailable` (from the interval up to 604800). | `7200` |
 | `SOCIAL_TRACKER_CATALOG_INGEST_GRACE_S` | How long the catalogs may take to publish an earthquake, in seconds (0..86400). A claim newer than the last refresh minus this is confirmed if the cache has it and otherwise `unavailable`, never a mismatch. | `1800` |
+| `SOCIAL_TRACKER_LLM_BASE_URL` | Address of the model server (Ollama). Only `http://127.0.0.1` or `http://localhost`, with an optional port, is accepted: anything else stops the start. See [The language model](#the-language-model-stage-5). | `http://127.0.0.1:11434` |
+| `SOCIAL_TRACKER_LLM_MODEL` | Model that judges (a name known to the server). | `st-gemma4-e4b` |
+| `SOCIAL_TRACKER_LLM_FALLBACK_MODEL` | Model tried once when the first is not installed or cannot be loaded; `none` turns the fallback off. | `st-qwen35-4b` |
+| `SOCIAL_TRACKER_LLM_KEEP_ALIVE_S` | Seconds the server keeps the model loaded after a call; when they pass the GPU is freed (1..86400). | `300` |
+| `SOCIAL_TRACKER_LLM_TIMEOUT_S` | Hard deadline of one call, answer included, in seconds (1..600). | `60` |
+| `SOCIAL_TRACKER_LLM_HOURLY_CAP` | Judgments started per UTC hour (1..100000); the rest waits. | `200` |
+| `SOCIAL_TRACKER_LLM_QUEUE_MAX` | Items that may wait for the model (1..1000000); the oldest beyond it are dropped and counted. | `2000` |
+| `SOCIAL_TRACKER_LLM_BATCH` | Items judged per worker pass (1..1000). | `20` |
+| `SOCIAL_TRACKER_LLM_MAX_FAILURES` | Failures that may be the item's own (a timeout, a 5xx, a body that is not an answer) before the item is parked for good (1..100). | `3` |
+| `SOCIAL_TRACKER_LLM_RETRY_BASE_S` | Wait after the first failed call, in seconds; it doubles per failure (1..86400). | `60` |
+| `SOCIAL_TRACKER_LLM_RETRY_CAP_S` | Longest wait between two tries of the same item (at least the base, up to 604800). | `3600` |
+| `SOCIAL_TRACKER_LLM_PROMPT_CHARS` | An item text longer than this is read at both ends and flagged in the request (100..100000). | `6000` |
 | `SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE` | Most items one source may hold at a time. Over it, new entries are dropped and counted as `source_quota`. | `100000` |
 | `SOCIAL_TRACKER_MAX_BYTES_PER_SOURCE` | Most bytes (title, text and raw entry) one source may hold. Over it, new entries are dropped and counted as `source_quota`. | `536870912` (512 MiB) |
 | `SOCIAL_TRACKER_MAX_BYTES_PER_FETCH` | Most bytes of items one fetch may add. Over it, the rest of the feed is dropped and counted as `fetch_quota`. | `16777216` (16 MiB) |
@@ -124,9 +136,12 @@ resets analysis and then makes its one pass.
 | `catalog refresh [--dry-run]` | Fetch the USGS and EMSC catalogs now and store their events (one-shot; `--dry-run` fetches and reports, stores nothing). Only while global analysis is on: exit status `3` otherwise. |
 | `catalog status` | The catalog cache: events per catalog, last good refresh, failures, `[STALE]` and `[CUT SHORT]` marks. |
 | `classify run [--limit N]` | Classify the pending items of the eligible sources (CPU only). The worker does it after every collection pass. Exit status `3` when no source is eligible. |
+| `classify escalate [--limit N] [--dry-run]` | Send the items the CPU stages could not settle to the local language model (one-shot; the worker does it after every pass). `--dry-run` says how many would be sent and changes nothing. Exit status `3` when no source is eligible and `1` when the model server is not reachable. |
+| `llm status` | Whether the model server answers, which models it has and which configured ones are missing, the queue, the hourly budget and the counts of the stage. A server that is down is reported, exit status `0`. |
+| `llm ping` | One tiny harmless question to the model, to see that it answers (it loads the model). Run it yourself; nothing else ever calls it. Exit status `1` when it did not answer. |
 | `classify reclassify --status S [--limit N]` | Send the items at status `out_of_scope` (after a vocabulary change) or `classification_failed` back to the queue; the next run classifies them again. |
-| `classify show ITEM_ID` | The verdict of one item: label, confidence, deciding stage, rationale, flags. |
-| `classify stats` | Verdicts by label, out of scope by reason, the flags, near copies, duplicates waiting for their original, and the items parked as failed. |
+| `classify show ITEM_ID` | The verdict of one item: label, confidence, deciding stage, rationale, flags and, if the language model saw it, which model and prompt version. |
+| `classify stats` | Verdicts by label, out of scope by reason, the flags, near copies, duplicates waiting for their original, the items parked as failed and the counts of the language-model stage (judged, invalid answers, waiting for a retry, parked, dropped). |
 | `topics show` | The topic vocabulary in force, as YAML. |
 | `topics set-file PATH` / `topics reset` | Install a vocabulary from a YAML file / go back to the shipped one (new audited version). |
 | `serve [--host H] [--port N] [--allow-non-loopback] [--allowed-host NAME]` | Run the local web UI (see [Web UI](#web-ui)). |
@@ -141,9 +156,9 @@ Results go to stdout. The exit status says what happened:
 | Status | Meaning |
 | --- | --- |
 | `0` | Success. |
-| `1` | The operation was refused (invalid input, conflict, unknown source, storage failure...): one `error: ...` line on stderr, nothing on stdout. |
+| `1` | The operation was refused (invalid input, conflict, unknown source, storage failure...): one `error: ...` line on stderr, nothing on stdout. `classify escalate` and `llm ping` also use it when the model server did not answer (their result lines, if any, are still printed). |
 | `2` | Usage mistake (missing option, unknown command). |
-| `3` | `classify run` found no eligible source (global analysis off, or no enabled source with its own switch on), so it had nothing to do; or `catalog refresh` ran while global analysis is off. It is not a failure: a run with eligible sources and nothing pending exits `0`. |
+| `3` | `classify run` or `classify escalate` found no eligible source (global analysis off, or no enabled source with its own switch on), so it had nothing to do; or `catalog refresh` ran while global analysis is off. It is not a failure: a run with eligible sources and nothing pending exits `0`. |
 | `70` | Unexpected failure, i.e. a bug: `error: unexpected failure (<ExceptionType>); this is a bug` and the frames where it happened on stderr, never the exception message or any variable. Please report it. |
 
 Error messages never repeat the values, keys, reasons or actors you typed, so a secret pasted into
@@ -432,8 +447,8 @@ uv run social-tracker items search "sismo cali"
 ## Classifying content
 
 This is internal observation only: a verdict is stored locally and shown to you, never published
-or sent anywhere. The cascade runs on the CPU, needs no model and no network, and is
-deterministic: the same item, history and vocabulary always give the same verdict. Within one run
+or sent anywhere. The first four stages of the cascade run on the CPU, need no model and no
+network, and are deterministic: the same item, history and vocabulary always give the same verdict. Within one run
 the order the items were stored in does not matter (they are taken in the order they were first
 SEEN here); across runs the item classified first is the original of its later copies. The
 Servicio Geológico Colombiano may be NAMED in a text, but it is never a data source of this
@@ -470,8 +485,10 @@ the one seen first first; `classify run` does the same on demand):
 3. **Recycled and near-duplicate check.** See below.
 4. **Official-catalog cross-check** (earthquake items only), described below. It reads a local
    cache and runs before the item's write transaction opens, so a slow catalog never holds the
-   database. The language-model judgment is a later unit: the verdict marks what the LLM will
-   have to settle (`needs_llm`, with a `priority`).
+   database. The verdict marks what the language model will have to settle (`needs_llm`, with a
+   `priority`).
+5. **Language-model judgment** (optional, after the stages above, on this machine only), described
+   in [The language model](#the-language-model-stage-5).
 
 **Labels:** `unintentional_rumor`, `deliberate_disinformation`, `recycled_content`, `no_risk`,
 `unclassified`, `out_of_scope`. A verdict has a label, a confidence from 0 to 1, the stage that
@@ -620,7 +637,7 @@ under 0.4: weak evidence is "inconclusive" and queued too, so the queue only eve
 evidence grows. The credibility prior can move a confidence a little under 0.4 without changing
 that. The `priority` ranks the queue (strong evidence first, then how clearly on topic, with a bump
 for the secretariat and for a laundering attempt). The hourly cap on LLM judgments is applied by
-the stage that consumes the queue.
+the stage that consumes the queue (see [The language model](#the-language-model-stage-5)).
 
 **Recycled and near-duplicate content.** Time is measured from when THIS application first saw
 each item (`fetched_at`), never from the publication date, which the feed writes and can forge
@@ -721,6 +738,74 @@ stats` and a sample of `classify show` on your sources, then adjust `weights` (a
 with `topics set-file`, and the thresholds with their environment variables. A hand-labelled gold
 set and a tool to measure precision and recall against it come in a later slice; until then treat
 the confidences as relative, not as probabilities.
+
+### The language model (stage 5)
+
+The cascade settles most items on the CPU. The ones it cannot settle (`needs_llm`: inconclusive,
+conflicting, or a risk label under 0.8; 0.8 is settled, 0.79 is not; never a copy of an item that
+was already judged) go to a language model that runs **on this machine**, through
+[Ollama](https://ollama.com). It is optional: without a server the verdicts of the CPU stages
+simply stay as they are. See `docs/howto.md` for how to run Ollama and which models to install.
+
+- **What is sent, and where.** The text of the item and the evidence the earlier stages found
+  (signals, topics, the catalog outcome, the credibility of the source as a weak prior) go to the
+  address in `SOCIAL_TRACKER_LLM_BASE_URL` and nowhere else. That address is checked when the
+  application starts: only `http://127.0.0.1` or `http://localhost` (optionally with a port) is
+  accepted, and the connection is always made to the literal address 127.0.0.1. It is the only
+  plain-http address of the application. No redirect is followed, no proxy variable is honoured,
+  every call has a hard deadline (`SOCIAL_TRACKER_LLM_TIMEOUT_S`, 60 s) and an answer larger than
+  256 KiB is refused. An import-linter contract keeps every other module from opening a
+  connection.
+- **The call.** `POST /api/chat` with `stream: false`, the answer schema as `format`, temperature
+  0, a fixed seed and `keep_alive` of 300 s: the server unloads the model, freeing the GPU, 300 s
+  after the last call. A Qwen model is told not to think (`think: false`). The default model is
+  `st-gemma4-e4b`; if it is not installed or cannot be loaded, `st-qwen35-4b` is tried once.
+- **The item text is data.** It travels as one JSON string between two markers that carry a
+  digest of the text itself, after an instruction that says it is untrusted, must never be
+  followed, that there are no tools and that the only output is the schema. Text such as "ignore
+  previous instructions", a fake JSON verdict, a delimiter or a role marker cannot end the block,
+  start a line of its own or change the schema. The prompt is a request, not a boundary: the answer
+  is validated again.
+- **The answer is validated strictly.** Exactly one JSON object with one of the four labels
+  (`unintentional_rumor`, `deliberate_disinformation`, `recycled_content`, `no_risk`), a finite
+  confidence from 0 to 1, a rationale and up to five evidence strings, nothing else. Unknown
+  labels, out-of-range or non-numeric confidences, extra or missing fields, duplicate keys, prose
+  or a code fence around the JSON, truncated or empty output are invalid. Invalid output is asked
+  for **once more**; two invalid answers in a row leave the verdict of the earlier stage as it
+  was (the judgment is recorded as `invalid`, the item leaves the queue flagged
+  `low_confidence`). A rationale is cleaned of control and hidden characters and cut to 300
+  characters; nothing else of the answer can change what the application does. A judged label
+  under 0.5 is applied but flagged `low_confidence`; the credibility of the source is recorded and
+  never moves a judged confidence.
+- **Order and budget.** Highest `priority` first, the oldest first among equals, at most
+  `SOCIAL_TRACKER_LLM_BATCH` (20) per worker pass, and at most `SOCIAL_TRACKER_LLM_HOURLY_CAP`
+  (200) judgments per UTC hour; an invalid answer's one retry belongs to the same judgment. If more
+  than `SOCIAL_TRACKER_LLM_QUEUE_MAX` items wait, the **oldest** beyond it are dropped: they keep
+  the CPU verdict, are flagged `low_confidence` and are counted in `classify stats` and `llm
+  status`.
+- **When the server fails.** Nothing listening, a timeout, a 5xx or a missing model never blocks
+  the CPU stages: the item keeps its verdict, is marked `escalation_failed` and tried again after
+  60 s, 120 s, 240 s... up to one hour (`classify show` prints the next attempt). Failures that
+  may be the item's own (a timeout, a 5xx, a body that is not an answer) count; after
+  `SOCIAL_TRACKER_LLM_MAX_FAILURES` (3) the item is parked for good and keeps its CPU verdict.
+  "Nothing is listening" and "no model" say nothing about the item and never park it. A server
+  that is unreachable ends the batch at once; two failed items in a row end it too.
+- **Copies.** An exact copy that waited for its original (`awaiting_original`) takes the judged
+  label and confidence when the original is judged, keeps its OWN source credibility on its record
+  and says so in its rationale; if the original gets no valid judgment (invalid, parked, dropped)
+  the copy keeps the provisional verdict it had and stops waiting. A copy costs no call.
+- **One at a time, and never inside a transaction.** A lock in the process and a lease in the
+  database keep two workers (or a worker and `classify escalate`) from loading the GPU together
+  (a lease left by a crashed process expires). The call is made with no transaction open; the
+  answer is then written in one short transaction that first checks that the item still exists,
+  is still classified, its source may still be analysed and its verdict still waits. A source
+  switched off, an item purged or a verdict settled meanwhile discard the answer instead of
+  writing it, so a run that is repeated or races another never judges an item twice. The stop
+  flag is checked between items; global analysis off sends nothing.
+- **What is kept.** `classify show` prints which model and prompt version judged an item. The
+  judgment (label, confidence, rationale, evidence, model, prompt version, the verdict it replaced
+  and the raw answer, cut to 2,048 characters) is stored for the audit. Logs name counts, ids and
+  codes; never item text, rationales or model output.
 
 ## Audit log
 

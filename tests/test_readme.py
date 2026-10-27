@@ -19,6 +19,18 @@ from social_tracker.bootstrap import (
     CLASSIFICATION_RETENTION_DAYS_ENV,
     DB_PATH_ENV,
     DEFAULT_DB_PATH,
+    LLM_BASE_URL_ENV,
+    LLM_BATCH_ENV,
+    LLM_FALLBACK_MODEL_ENV,
+    LLM_HOURLY_CAP_ENV,
+    LLM_KEEP_ALIVE_ENV,
+    LLM_MAX_FAILURES_ENV,
+    LLM_MODEL_ENV,
+    LLM_PROMPT_CHARS_ENV,
+    LLM_QUEUE_MAX_ENV,
+    LLM_RETRY_BASE_ENV,
+    LLM_RETRY_CAP_ENV,
+    LLM_TIMEOUT_ENV,
     MAX_BYTES_PER_FETCH_ENV,
     MAX_BYTES_PER_SOURCE_ENV,
     MAX_ITEMS_PER_SOURCE_ENV,
@@ -44,7 +56,7 @@ README = Path(__file__).resolve().parent.parent / "README.md"
 FENCE = re.compile(r"```(\w+)\n(.*?)```", re.DOTALL)
 FLAG = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
 SUBCOMMAND = re.compile(
-    r"(?<![\w-])(?:(sources|analysis|items|classify|topics|catalog) ([a-z][a-z-]*)"
+    r"(?<![\w-])(?:(sources|analysis|items|classify|topics|catalog|llm) ([a-z][a-z-]*)"
     r"|(status|serve|run))\b"
 )
 FILE_SUFFIXES = {"-wal", "-shm"}  # SQLite sidecar files, written like flags in the prose
@@ -87,6 +99,18 @@ def test_every_environment_variable_and_default_is_documented(readme: str):
         NEAR_DUPLICATE_THRESHOLD_ENV,
         NEAR_DUPLICATE_CANDIDATES_ENV,
         CLASSIFICATION_RETENTION_DAYS_ENV,
+        LLM_BASE_URL_ENV,
+        LLM_MODEL_ENV,
+        LLM_FALLBACK_MODEL_ENV,
+        LLM_KEEP_ALIVE_ENV,
+        LLM_TIMEOUT_ENV,
+        LLM_HOURLY_CAP_ENV,
+        LLM_QUEUE_MAX_ENV,
+        LLM_BATCH_ENV,
+        LLM_MAX_FAILURES_ENV,
+        LLM_RETRY_BASE_ENV,
+        LLM_RETRY_CAP_ENV,
+        LLM_PROMPT_CHARS_ENV,
     ):
         assert f"`{name}`" in readme
     assert DEFAULT_DB_PATH in readme

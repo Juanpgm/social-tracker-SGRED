@@ -115,6 +115,7 @@ class EscalationReport:
     analysis_off: bool = False
     unreachable: bool = False
     storage_errors: int = 0
+    eligible_sources: int = 0
 
 
 @dataclass
@@ -131,6 +132,7 @@ class _Tally:
     stopped: bool = False
     unreachable: bool = False
     storage_errors: int = 0
+    eligible_sources: int = 0
     streak: int = field(default=0)
 
     def report(self) -> EscalationReport:
@@ -206,6 +208,11 @@ class EscalationService:
     def counts(self) -> EscalationCounts:
         return self._escalations.counts()
 
+    def state(self, item_id: str) -> EscalationState | None:
+        """The bookkeeping of an item that has no judgment (yet): a failure waiting for its retry,
+        a parked or a dropped item."""
+        return self._escalations.get_state(item_id)
+
     def status(self) -> LlmStatus:
         """Ask the server which models it has (a `GET`, no model is loaded) and put it next to the
         local figures. A server that is down is a status, not an error."""
@@ -277,7 +284,7 @@ class EscalationService:
         now = self._clock.now()
         if dry_run:
             return self._dry_run(eligible, now, count)
-        tally = _Tally()
+        tally = _Tally(eligible_sources=len(eligible))
         try:
             self._drop_overflow(tally, now)
             entries = (
@@ -310,7 +317,11 @@ class EscalationService:
         )
         used = self._escalations.calls_in_hour(hour_start(now))
         room = max(0, self._settings.hourly_cap - used)
-        return EscalationReport(candidates=min(len(entries), room), cap_reached=len(entries) > room)
+        return EscalationReport(
+            candidates=min(len(entries), room),
+            cap_reached=len(entries) > room,
+            eligible_sources=len(eligible),
+        )
 
     # ---- one item at a time ----
 

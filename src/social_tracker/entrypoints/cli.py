@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import sys
+import threading
 import traceback
 from collections import Counter
 from collections.abc import Iterator, Sequence
@@ -31,7 +32,7 @@ from typing import Annotated
 
 import typer
 
-from social_tracker.bootstrap import build_catalog, build_container, build_worker
+from social_tracker.bootstrap import build_catalog, build_container, build_llm, build_worker
 from social_tracker.catalog.service import CatalogStatus, Outcome, RefreshReport
 from social_tracker.classification.domain import Classification, ClassificationStats
 from social_tracker.classification.service import DEFAULT_BATCH, RECLASSIFIABLE, ClassifyReport
@@ -48,6 +49,8 @@ from social_tracker.entrypoints.inputs import (
 )
 from social_tracker.entrypoints.signals import stop_on_signals
 from social_tracker.items.domain import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, Item, ItemStatus
+from social_tracker.llm.domain import EscalationCounts, EscalationState, Judgment
+from social_tracker.llm.service import EscalationReport, LlmStatus, PingResult
 from social_tracker.shared.errors import DomainError, ValidationError
 from social_tracker.shared.text import escape_unprintable
 from social_tracker.sources.service import ImportConflictError, ImportReport
@@ -76,7 +79,8 @@ app.add_typer(analysis_app, name="analysis")
 items_app = typer.Typer(help="Look at the items collected from the sources.", no_args_is_help=True)
 app.add_typer(items_app, name="items")
 classify_app = typer.Typer(
-    help="Run the CPU classification cascade over collected items and look at its verdicts.",
+    help="Run the classification cascade over collected items (CPU first, then the local "
+    "language model for what it cannot settle) and look at its verdicts.",
     no_args_is_help=True,
 )
 app.add_typer(classify_app, name="classify")
@@ -90,6 +94,11 @@ catalog_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(catalog_app, name="catalog")
+llm_app = typer.Typer(
+    help="Look at the local language model that judges what the rules cannot settle.",
+    no_args_is_help=True,
+)
+app.add_typer(llm_app, name="llm")
 
 SourceId = Annotated[
     str,
@@ -593,6 +602,79 @@ def classify_run(
         )
 
 
+def _render_escalation(report: EscalationReport, waiting: int) -> str:
+    line = (
+        f"judged {report.judged} item(s), {report.invalid} invalid, "
+        f"{report.reused} settled from an original, {report.skipped} skipped, "
+        f"{report.failed} failed (retried later), {report.parked} parked, "
+        f"{report.dropped} dropped; {waiting} still waiting"
+    )
+    if report.cap_reached:
+        line += "; the hourly cap was reached, the rest waits for the next hour"
+    if report.stopped:
+        line += "; stopped on request"
+    if report.busy:
+        line += "; another worker holds the model, try again later"
+    return line
+
+
+@classify_app.command("escalate")
+def classify_escalate(
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            "--limit",
+            min=1,
+            max=1000,
+            help="How many waiting items to send to the language model at most "
+            "(default: SOCIAL_TRACKER_LLM_BATCH, 20).",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Say how many items would be sent; send and change nothing."
+        ),
+    ] = False,
+) -> None:
+    """Send the items the CPU stages could not settle to the local language model (one-shot).
+
+    The worker does this after every pass; this command is for a one-off run. The model server
+    must run on this machine (SOCIAL_TRACKER_LLM_BASE_URL, loopback only) and the text of the
+    items goes nowhere else. Needs global analysis on and an eligible source. One judgment is
+    in flight at a time: a worker that is judging makes this wait or give up. A judge that is
+    down leaves the CPU verdicts as they are and the items are tried again later with a growing
+    delay. At most the hourly cap (SOCIAL_TRACKER_LLM_HOURLY_CAP) are judged per hour.
+
+    Exit status: 0 when it ran (also when nothing was waiting), 1 when the model server was not
+    reachable or a storage error stopped the run, 3 when no source is eligible so there was
+    nothing it could do."""
+    stop = threading.Event()
+    with _guard(), closing(build_llm(stop=stop)) as built:
+        with stop_on_signals(stop.set):
+            report = built.service.escalate(limit, dry_run=dry_run)
+        waiting = built.service.counts().queued
+    if report.eligible_sources == 0:
+        typer.echo(_NO_ELIGIBLE, err=True)
+        raise typer.Exit(EXIT_NOTHING_ELIGIBLE)
+    if dry_run:
+        typer.echo(f"dry run: {report.candidates} item(s) would be sent to the language model")
+        if report.cap_reached:
+            typer.echo("the hourly cap would stop the rest until the next hour")
+        return
+    typer.echo(_render_escalation(report, waiting))
+    if report.storage_errors:
+        typer.echo("error: a storage error stopped the run; run it again to resume", err=True)
+        raise typer.Exit(EXIT_REFUSED)
+    if report.unreachable:
+        typer.echo(
+            "error: the language model server is not reachable or has no usable model "
+            "(see `social-tracker llm status`); the items stay queued and are tried again later",
+            err=True,
+        )
+        raise typer.Exit(EXIT_REFUSED)
+
+
 def _render_verdict(c: Classification) -> str:
     flags = [
         name
@@ -634,14 +716,47 @@ def _render_verdict(c: Classification) -> str:
     return "\n".join(lines)
 
 
+def _render_llm_lines(judgment: Judgment | None, state: EscalationState | None) -> list[str]:
+    """What the LLM stage kept about an item, for `classify show`."""
+    lines = []
+    if judgment is not None:
+        version = escape_unprintable(judgment.prompt_version)
+        if judgment.outcome == "judged":
+            model = escape_unprintable(judgment.llm_model or "unknown")
+            lines.append(f"llm: judged by {model} (prompt {version})")
+        elif judgment.outcome == "invalid":
+            lines.append(
+                "llm: two invalid answers; the verdict of the earlier stage stands "
+                f"(prompt {version})"
+            )
+        else:
+            how = (
+                f"judged by {escape_unprintable(judgment.llm_model)}"
+                if judgment.llm_model
+                else "its original had no valid answer"
+            )
+            lines.append(f"llm: reused from {judgment.reused_from} ({how})")
+    if state is not None:
+        detail = [f"attempt {state.attempts}"]
+        if state.next_attempt_at is not None:
+            detail.append(f"next attempt {state.next_attempt_at.isoformat()}")
+        if state.last_error:
+            detail.append(f"last error {escape_unprintable(state.last_error)}")
+        lines.append(f"escalation: {state.state} ({', '.join(detail)})")
+    return lines
+
+
 @classify_app.command("show")
 def classify_show(
     item_id: Annotated[str, typer.Argument(metavar="ITEM_ID", help="Id of a classified item.")],
 ) -> None:
-    """Show the verdict of one item: label, confidence, deciding stage, rationale and flags."""
+    """Show the verdict of one item: label, confidence, deciding stage, rationale and flags,
+    and, if it went through the language model, which model and prompt version judged it."""
     with _guard(), closing(build_container()) as services:
         verdict = services.classifier.get(item_id)
-    typer.echo(_render_verdict(verdict))
+        judgment = services.escalation.judgment(verdict.item_id)
+        state = services.escalation.state(verdict.item_id)
+    typer.echo("\n".join([_render_verdict(verdict), *_render_llm_lines(judgment, state)]))
 
 
 @classify_app.command("reclassify")
@@ -681,7 +796,7 @@ def classify_reclassify(
     typer.echo(f"{count} item(s) sent back to the queue; `classify run` classifies them again")
 
 
-def _render_stats(stats: ClassificationStats) -> str:
+def _render_stats(stats: ClassificationStats, llm: EscalationCounts | None = None) -> str:
     lines = [f"classifications: {stats.total}", "by label:"]
     lines += [f"  {name} {count}" for name, count in stats.by_label]
     if stats.out_of_scope_by_reason:
@@ -697,6 +812,15 @@ def _render_stats(stats: ClassificationStats) -> str:
         f"truncated: {stats.truncated}",
         f"parked as classification_failed: {stats.failed}",
     ]
+    if llm is not None:
+        lines += [
+            f"llm judged: {llm.judged}",
+            f"llm invalid answers: {llm.invalid}",
+            f"llm reused by copies: {llm.reused}",
+            f"llm waiting for a retry: {llm.failed_waiting}",
+            f"llm parked: {llm.parked}",
+            f"llm dropped: {llm.dropped}",
+        ]
     return "\n".join(lines)
 
 
@@ -705,7 +829,8 @@ def classify_stats() -> None:
     """Count the stored verdicts: by label, out of scope by reason, and the flags."""
     with _guard(), closing(build_container()) as services:
         stats = services.classifier.stats()
-    typer.echo(_render_stats(stats) if stats.total else _NO_VERDICTS)
+        llm = services.escalation.counts()
+    typer.echo(_render_stats(stats, llm) if stats.total else _NO_VERDICTS)
 
 
 # ---- topics ----
@@ -855,6 +980,67 @@ def catalog_status() -> None:
     with _guard(), closing(build_container()) as services:
         status = services.catalog.status()
     typer.echo(_render_catalog_status(status))
+
+
+# ---- llm ----
+
+
+def _names(models: tuple[str, ...]) -> str:
+    return ", ".join(escape_unprintable(m) for m in models) or "none"
+
+
+def _render_llm_status(status: LlmStatus) -> str:
+    reachable = "yes" if status.reachable else f"no ({escape_unprintable(status.error or '')})"
+    counts = status.counts
+    lines = [
+        f"server: {status.base_url}",
+        f"reachable: {reachable}",
+        f"configured models: {_names(status.configured)}",
+        f"installed: {_names(status.installed)}",
+        f"missing: {_names(status.missing)}",
+        f"global analysis: {'on' if status.analysis_on else 'off'}",
+        f"waiting: {status.queued}",
+        f"budget this hour: {status.used_this_hour} of {status.hourly_cap}",
+        f"judged: {counts.judged}, invalid answers: {counts.invalid}, "
+        f"settled from an original: {counts.reused}",
+        f"waiting for a retry: {counts.failed_waiting}, parked: {counts.parked}, "
+        f"dropped: {counts.dropped}",
+    ]
+    return "\n".join(lines)
+
+
+@llm_app.command("status")
+def llm_status() -> None:
+    """Show whether the model server answers, which models it has, the queue and the hourly budget.
+
+    Asks the server for its model list (nothing is loaded and no item text is sent). A server
+    that is down is reported, not an error: the exit status is 0 either way."""
+    with _guard(), closing(build_llm()) as built:
+        status = built.service.status()
+    typer.echo(_render_llm_status(status))
+
+
+def _render_ping(result: PingResult) -> str:
+    label = result.label.value if result.label is not None else "?"
+    model = escape_unprintable(result.model or "?")
+    return f"ok: {model} answered {label} in {result.elapsed_s:.1f} s"
+
+
+@llm_app.command("ping")
+def llm_ping() -> None:
+    """Ask the model one tiny harmless question to see that it answers (this loads the model).
+
+    Run it yourself: nothing else ever calls it. It touches no verdict and uses none of the
+    hourly budget. Exit status: 0 when the model answered with a valid verdict, 1 when not."""
+    with _guard(), closing(build_llm()) as built:
+        result = built.service.ping()
+    if not result.ok:
+        typer.echo(
+            f"error: the language model did not answer ({escape_unprintable(result.error or '?')})",
+            err=True,
+        )
+        raise typer.Exit(EXIT_REFUSED)
+    typer.echo(_render_ping(result))
 
 
 # ---- worker ----
