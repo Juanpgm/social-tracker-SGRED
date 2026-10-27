@@ -314,3 +314,112 @@ def test_compatibility_forms_are_folded_before_reading():
 @pytest.mark.parametrize("digits", ["٧.٥", "७.५", "৭.৫", "๗.๕"])
 def test_digits_of_other_scripts_are_not_folded_by_nfkc(digits):
     assert mags(f"magnitud {digits}") == []
+
+
+# ---- found by the mutation sweep of the review ----
+
+
+@pytest.mark.parametrize(
+    "text", ["magnitud 1.2 a 2.2", "magnitud 7.3-8.3", "magnitud entre 1.2 y 2.2"]
+)
+def test_floating_point_noise_does_not_drop_a_range_of_exactly_one_degree(text):
+    found = mags(text)
+    assert len(found) == 1
+    assert round(found[0][1] - found[0][0], 2) == 1.0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sismo de 6.2 y 5 barrios afectados",
+        "sismo de 6.2 y 5 en Cali",
+        "sismo de 6.2 e 7 personas",
+        "sismo de 6.2 y 8",
+    ],
+)
+def test_a_whole_number_after_y_is_never_a_second_magnitude(text):
+    assert mags(text) == [(6.2, 6.2)]
+
+
+def test_a_decimal_comma_after_y_is_a_second_magnitude():
+    assert mags("sismo de 4,5 y 5,5") == [(4.5, 4.5), (5.5, 5.5)]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("sismo 6.0 a las 13:00", datetime(2026, 10, 27, 18, 0, tzinfo=UTC)),
+        ("sismo 6.0 a las 13:30", datetime(2026, 10, 27, 18, 30, tzinfo=UTC)),
+        ("sismo 6.0 a las 0:00", datetime(2026, 10, 27, 5, 0, tzinfo=UTC)),
+        ("sismo 6.0 a las 12:59 pm", datetime(2026, 10, 27, 17, 59, tzinfo=UTC)),
+    ],
+)
+def test_the_first_unambiguous_24_hour_values_are_read_as_such(text, expected):
+    claim = when(text, EVENING)
+    assert (claim.kind, claim.at) == (TimeKind.ABSOLUTE, expected)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["sismo 6.0 afectó a las 14 familias", "sismo 6.0 a las 15 personas", "sismo 6.0 a las 20"],
+)
+def test_a_bare_number_after_a_las_is_not_a_time(text):
+    assert when(text, EVENING).kind is TimeKind.NONE
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("sismo 6.0 a las 6 de la noche", datetime(2026, 10, 27, 23, 0, tzinfo=UTC)),
+        ("sismo 6.0 a las 7 de la noche", datetime(2026, 10, 27, 0, 0, tzinfo=UTC)),
+    ],
+)
+def test_the_evening_starts_at_six(text, expected):
+    claim = when(text, EVENING)
+    assert (claim.kind, claim.at) == (TimeKind.ABSOLUTE, expected)
+
+
+@pytest.mark.parametrize("hour", [1, 2, 3, 4, 5])
+def test_a_small_hour_of_the_night_is_not_said_and_claims_no_time(hour):
+    assert when(f"sismo 6.0 a las {hour} de la noche", EVENING).kind is TimeKind.NONE
+
+
+@pytest.mark.parametrize(
+    ("text", "magnitude"), [("sismo M3 en Cali", 3.0), ("sismo M2 en Cali", 2.0)]
+)
+def test_a_whole_m2_or_m3_magnitude_is_still_a_magnitude(text, magnitude):
+    assert mags(text) == [(magnitude, magnitude)]
+
+
+def test_a_square_metre_after_a_number_with_blanks_is_still_not_a_magnitude():
+    assert mags("sismo dejó 120  m2 y 5   m3 de daños") == []
+
+
+@pytest.mark.parametrize("blanks", [" ", "  ", "   ", " " * 40, "\t", " \t \t"])
+def test_square_metres_are_not_a_magnitude_whatever_the_blanks(blanks):
+    assert mags(f"sismo dejó 120{blanks}m2 de daños") == []
+    assert mags(f"sismo dejó 5{blanks}m3 de escombros") == []
+
+
+# ---- hostile input stays bounded ----
+
+HOSTILE = {
+    "many sentences": "Sismo M5. " * 2000,
+    "clock sentences": "sismo. a las 3 pm. " * 1000,
+    "many clocks": "a las 3:15 pm " * 1400,
+    "many lines": "sismo\na las 3 pm\n" * 1100,
+    "many ayer": "ayer " * 4000,
+    "blank run": "sismo M5" + " " * 19_000 + "m2",
+    "m2 chain": "5 m2 " * 3500,
+    "y chain": "sismo de 4.5 y 5.5 y 6.5 " * 700,
+}
+
+
+@pytest.mark.parametrize("text", HOSTILE.values(), ids=HOSTILE.keys())
+def test_hostile_text_is_read_in_bounded_time(text):
+    import time
+
+    started = time.perf_counter()
+    claims = extract_claims(text, EVENING)
+    assert len(claims.magnitudes) <= MAX_MAGNITUDES
+    assert time.perf_counter() - started < 2.0

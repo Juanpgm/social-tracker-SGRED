@@ -157,7 +157,7 @@ def test_the_migration_is_recorded_once_and_reopening_changes_nothing(tmp_path):
         db = Database(path)
         try:
             versions = [r[0] for r in db.query("SELECT version FROM schema_migrations ORDER BY 1")]
-            assert versions == [1, 2, 3, 4, 5, 6]
+            assert versions == [1, 2, 3, 4, 5, 6, 7]
             assert db.query("SELECT count(*) FROM classifications")[0][0] == 4
         finally:
             db.close()

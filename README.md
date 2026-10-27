@@ -122,7 +122,7 @@ resets analysis and then makes its one pass.
 | `items list [--source ID] [--limit N] [--ids]` | The collected items, newest first (`--ids` shows each id, which `classify show` takes). |
 | `items search QUERY [--limit N] [--ids]` | Search titles and texts by words. |
 | `catalog refresh [--dry-run]` | Fetch the USGS and EMSC catalogs now and store their events (one-shot; `--dry-run` fetches and reports, stores nothing). Only while global analysis is on: exit status `3` otherwise. |
-| `catalog status` | The catalog cache: events per catalog, last good refresh, failures, `[STALE]` marks. |
+| `catalog status` | The catalog cache: events per catalog, last good refresh, failures, `[STALE]` and `[CUT SHORT]` marks. |
 | `classify run [--limit N]` | Classify the pending items of the eligible sources (CPU only). The worker does it after every collection pass. Exit status `3` when no source is eligible. |
 | `classify reclassify --status S [--limit N]` | Send the items at status `out_of_scope` (after a vocabulary change) or `classification_failed` back to the queue; the next run classifies them again. |
 | `classify show ITEM_ID` | The verdict of one item: label, confidence, deciding stage, rationale, flags. |
@@ -515,7 +515,7 @@ second opinion for that.
 | `news_report` | no_risk | 0.60 | a report verb with a quake and a magnitude ("el SGC reportó un sismo de magnitud 4.2", "un temblor de 4.5 grados") or an agency wording ("el Servicio Geológico Colombiano informó un temblor", "la Red Sismológica Nacional registró un sismo") |
 | `obfuscated_text` | unclassified | 0.30 | mixed scripts in one word, invisible filler characters, a word spelled letter by letter or a digit inside a word: suspicion only, no label |
 
-| `catalog_mismatch` | unintentional_rumor | 0.30 | the official-catalog cross-check contradicts the claimed magnitude (difference of 1.0 or more against the event nearest in time) or finds no event in the time window; set by the check, not read from the text. Too weak to decide a label alone: it adds to other rumor evidence and sends a clean-looking report to review |
+| `catalog_mismatch` | unintentional_rumor | 0.30 | the official-catalog cross-check contradicts the claimed magnitude (no claimed magnitude within 1.0 of any compared event) or finds no event in the time window of a complete cache; set by the check, not read from the text. Too weak to decide a label alone: it adds to other rumor evidence and sends a clean-looking report to review |
 
 **The official-catalog cross-check** (stage 4). For an in-scope earthquake item the cascade
 compares what the text claims with what two official catalogs recorded: the USGS and the EMSC
@@ -526,21 +526,37 @@ cascade itself never touches the network: the worker refreshes a local cache of 
 before the item's write transaction opens.
 
 - **What is read from the text:** a magnitude (`magnitud 7.5`, `M6.2`, `temblor de 5,8`,
-  `6.1 grados Richter`, ranges, several magnitudes; a number above 10 or with a unit after it is
-  not a magnitude), a time (`hace un momento`, `hace 5 minutos`, `a las 3:15 pm`, read as
-  Colombia time unless it says UTC; a date other than the publication day, `ayer` or `hace
-  años` is not checked) and a place. Only numbers, an instant and a plain lowercase place name
-  are kept; nothing of the text is interpreted.
-- **What is compared:** the event nearest in time to the claimed instant, within 6 hours, either
-  within 300 km of Cali (centre and radius are configurable) or of magnitude 5.5 or more anywhere
-  (an earthquake felt elsewhere). The same earthquake in both catalogs counts once, and the claim
-  is compared with the closest of its magnitudes.
-- **The outcome**, recorded as `catalog:` in the verdict: `consistent` (the difference is under
-  1.0), `mismatch` (1.0 or more, or no event in the window while both catalogs are fresh),
-  `unavailable` (no catalog refreshed successfully within the maximum age, or the cache is
-  empty, or the event is absent while a catalog is stale), `no_claim` (no magnitude, or a time the
-  cache cannot answer) and `not_checked` (out of scope). `unavailable` never blocks a
-  classification and never raises risk by itself.
+  `6.1 grados Richter`, several magnitudes such as `sismo de 5.5 y luego otro de 4.0`, and ranges
+  of at most one degree; a number above 10 or with a unit after it, such as `50 m2`, is not a
+  magnitude and a wider range such as `magnitud 4 a 7` is dropped), a time (`hace un momento`,
+  `hace 5 minutos`, `a las 3:15 pm`, `a las 3 de la tarde`, read as Colombia time unless it says
+  UTC; only when it sits in a sentence about the earthquake; a 12-hour time with no am/pm and no
+  part of the day, `12 de la mañana`, a date other than the publication day, `ayer`, `hace 3
+  días` or `hace años` claims no time or is not checked) and a place. A hypothetical, future or
+  vague text (`simulacro`, `habrá`, `podría`, `mañana`, `guía`, `qué hacer ante`, `esta
+  madrugada`, `este lunes`) claims nothing. Only numbers, an instant and a plain lowercase place
+  name are kept; nothing of the text is interpreted.
+- **What is compared:** the events within 6 hours of the claimed instant (or of the publication
+  when the text names none), either within 300 km of Cali (centre and radius are configurable)
+  or of magnitude 5.5 or more anywhere (an earthquake felt elsewhere). A claim that names a place
+  outside the region (anything but Colombia, Cali, the Valle del Cauca and the other places of
+  the default list) is compared only with the events of magnitude 5.5 or more, and a claim below
+  what the cache holds (2.5 in the region, 5.5 elsewhere) cannot be verified. With a named instant
+  the events nearest that instant are compared (those within two minutes of the nearest count
+  together, so two catalogs that disagree about one earthquake do not contradict a faithful
+  claim); with none, every event of the window is, so an aftershock does not hide the mainshock.
+  The same earthquake in both catalogs counts once, and the claim is compared with the closest
+  of its magnitudes.
+- **The outcome**, recorded as `catalog:` in the verdict: `consistent` (every claimed magnitude is
+  within 1.0 of a compared event), `mismatch` (no claimed magnitude is, or no event in the
+  window while both catalogs are fresh and answered in full), `unavailable` (no catalog
+  refreshed successfully within the maximum age, or the cache is empty, or the event is absent
+  while a catalog is stale or its last answer was cut short, or the claim is newer than the last
+  refresh minus the ingest grace so that the catalogs may not have published it yet, or it
+  names a place outside the region and no large event was recorded, or only some of the claimed
+  magnitudes match), `no_claim` (no magnitude, or a time the cache cannot answer) and
+  `not_checked` (out of scope). `unavailable` never blocks a classification and never raises
+  risk by itself.
 - **What it changes:** a `mismatch` adds the `catalog_mismatch` signal (unintentional_rumor,
   0.30): it adds to the other rumor evidence and sends a clean-looking report to review, and it
   cannot decide a label alone. A `consistent` claim lowers an `official_attribution_unlinked`
@@ -548,8 +564,14 @@ before the item's write transaction opens.
 - **The cache:** `catalog status` shows events per catalog, the last good refresh, failures and
   staleness. A failed catalog (timeout, DNS, 4xx/5xx, `Retry-After`, an answer that is not what
   was asked for, a redirect off the two hosts) is never an error of the run: it is retried with
-  exponential backoff (60 s doubling, at most an hour) and the other catalog is still stored.
-  Events older than 14 days are purged by the hourly housekeeping. Like the sources, the catalogs
+  exponential backoff (60 s doubling, at most an hour) and the other catalog is still stored. An
+  empty answer (`204 No Content`) is a quiet day, not a failure. Only earthquakes are kept
+  (quarry blasts and explosions are dropped and counted). An answer that reaches the request
+  limit may be cut short: it is stored but `catalog status` marks it `[CUT SHORT]` and the
+  cache is not complete until a shorter answer. Events a complete, non-empty answer no longer
+  lists are removed. Events older than 14 days are purged by the hourly housekeeping. The worker
+  refreshes the catalogs after the classification of each pass and stops between requests when
+  a stop is requested. Like the sources, the catalogs
   are fetched only while global analysis is on: `analysis off` stops the refresh, and `catalog
   refresh` refuses to run (exit status `3`). The cache keeps the origin time, position, magnitude
   and place of each event; the place is catalog text, stored as data and escaped where shown.

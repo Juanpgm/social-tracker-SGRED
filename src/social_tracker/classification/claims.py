@@ -129,14 +129,15 @@ def _stripped(text: str) -> str:
 
 
 _DOTTED_MERIDIEM = re.compile(r"\b([ap])\.\s?m\b")
+_BLANKS = re.compile(r"[ \t]{2,}")
 
 
 def _plain(text: str) -> str:
-    """Lowercase, without accents or format characters, `p. m.` written `pm`: the view the
-    patterns read."""
+    """Lowercase, without accents or format characters, runs of blanks as one blank, `p. m.`
+    written `pm`: the view the patterns read."""
     decomposed = unicodedata.normalize("NFKD", text.lower())
     bare = "".join(ch for ch in decomposed if unicodedata.category(ch) != _MARK)
-    return _DOTTED_MERIDIEM.sub(r"\1m", bare)
+    return _DOTTED_MERIDIEM.sub(r"\1m", _BLANKS.sub(" ", bare))
 
 
 # ---- magnitude ----
@@ -157,7 +158,7 @@ _MAGNITUDE_PATTERNS = (
     ),
     # not "50 m2" (square metres): a digit and blanks before the m rule it out
     re.compile(
-        r"(?<![a-z0-9])(?:(?<![0-9]\s)(?<![0-9]\s\s)|(?!m[23](?![.,]?[0-9])))"
+        r"(?<![a-z0-9])(?:(?<![0-9]\s)|(?!m[23](?![.,]?[0-9])))"
         rf"m(?:(?=[0-9])|[wlbsd]\s?){_NUM}(?![a-z])"
     ),
     re.compile(
@@ -351,7 +352,7 @@ def _hour(match: re.Match[str]) -> tuple[int, int] | None:
         return None
     if groups.get("m") is None and groups.get("hs") is None:
         return None  # "a las 14 personas": a bare number is not a time
-    twenty_four = hour == 0 or hour >= 13 or hour_text.startswith("0") or groups.get("utc")  # noqa: PLR2004
+    twenty_four = hour >= 13 or hour_text.startswith("0") or groups.get("utc")  # noqa: PLR2004
     return (hour, minute) if twenty_four else None  # "a las 3:15" could be either half of the day
 
 
