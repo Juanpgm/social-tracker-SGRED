@@ -148,11 +148,14 @@ def test_sql_metacharacters_in_settings_are_data(repo, db):
     assert db.query("SELECT name FROM sqlite_master WHERE name = 'settings'") != []
 
 
-def test_a_leading_nul_in_a_key_is_rejected_by_the_schema_not_stored(repo):
-    # SQLite's length() stops at the first NUL, so the CHECK sees an empty key.
-    with pytest.raises(StorageError):
-        repo.set_setting("\x00key", "v")
-    assert repo.get_setting("ab\x00cd") is None
+@pytest.mark.parametrize("key", ["\x00key", "ab\x00cd", "key\x00", "k\x1fey"])
+def test_a_control_character_in_a_key_is_refused_by_the_domain_not_stored(repo, db, key):
+    # SQLite's length() stops at the first NUL, so the schema alone cannot be the net.
+    with pytest.raises(ValidationError):
+        repo.set_setting(key, "v")
+    with pytest.raises(ValidationError):
+        repo.get_setting(key)
+    assert db.query("SELECT count(*) FROM settings")[0][0] == 0
 
 
 def test_stored_setting_that_breaks_the_rules_is_a_storage_error(repo, db):

@@ -404,15 +404,13 @@ def test_sql_metacharacters_in_lookups_match_nothing_and_change_nothing(repo, db
     assert [s.id for s in repo.list()] == ["src_one", "src_two"]
 
 
-def test_an_embedded_nul_round_trips_but_a_leading_nul_is_rejected_by_the_schema(repo):
-    # SQLite's length() stops at the first NUL, so a name that starts with one measures as empty
-    # and trips the CHECK. The domain does not forbid NUL in names; the database is the net.
-    inside = make_source("src_one", "ab\x00cd")
-    repo.add(inside)
-    assert repo.get("src_one") == inside
-    with pytest.raises(StorageError):
-        repo.add(make_source("src_two", "\x00leading"))
-    assert [s.id for s in repo.list()] == ["src_one"]
+@pytest.mark.parametrize("name", ["ab\x00cd", "\x00leading", "trailing\x00", "tab\tinside"])
+def test_control_characters_in_a_name_are_refused_by_the_domain_before_storage(repo, name):
+    # SQLite's length() stops at the first NUL, so the schema alone cannot be the net: the
+    # domain rejects control characters, which keeps the fake and SQLite in agreement.
+    with pytest.raises(ValidationError):
+        make_source("src_one", name)
+    assert repo.list() == []
 
 
 # ---- error behaviour ----

@@ -13,6 +13,7 @@ from typing import Any
 from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import InvalidTransition, ValidationError
 from social_tracker.shared.ids import validate_slug
+from social_tracker.shared.text import has_control_chars
 
 MAX_CONSECUTIVE_FAILURES = 5
 BACKOFF_BASE_S = 60
@@ -209,11 +210,17 @@ MAX_EVENT_KIND = 64
 MAX_EVENT_DETAIL = 2000
 
 
-def _require_text(value: Any, what: str, max_len: int, *, non_blank: bool) -> str:
-    """The one place that checks 'a string of at most `max_len` chars (optionally non-blank)'."""
+def _require_text(
+    value: Any, what: str, max_len: int, *, non_blank: bool, no_control: bool = False
+) -> str:
+    """The one place that checks 'a string of at most `max_len` chars (optionally non-blank,
+    optionally free of control characters)'. Identifier-like fields (setting keys, event kinds)
+    reject control characters; free text (setting values, event details) may carry them."""
     if not isinstance(value, str) or len(value) > max_len or (non_blank and not value.strip()):
         qualifier = "a non-blank string" if non_blank else "a string"
         raise ValidationError(f"{what} must be {qualifier} up to {max_len} chars")
+    if no_control and has_control_chars(value):
+        raise ValidationError(f"{what} must not contain control characters")
     return value
 
 
@@ -229,7 +236,7 @@ def validate_setting(key: Any, value: Any) -> tuple[str, str]:
 
 
 def validate_setting_key(key: Any) -> str:
-    return _require_text(key, "setting key", MAX_SETTING_KEY, non_blank=True)
+    return _require_text(key, "setting key", MAX_SETTING_KEY, non_blank=True, no_control=True)
 
 
 @dataclass(frozen=True)
@@ -243,7 +250,7 @@ class ControlEvent:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "at", ensure_utc(self.at))
-        _require_text(self.kind, "kind", MAX_EVENT_KIND, non_blank=True)
+        _require_text(self.kind, "kind", MAX_EVENT_KIND, non_blank=True, no_control=True)
         if self.source_id is not None:
             validate_slug(self.source_id)
         _require_text(self.detail, "detail", MAX_EVENT_DETAIL, non_blank=False)

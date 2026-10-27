@@ -26,6 +26,7 @@ from pydantic import ValidationError as _PydanticValidationError
 from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ValidationError
 from social_tracker.shared.ids import validate_slug
+from social_tracker.shared.text import has_control_chars
 
 # Product rules, named so 1d/1e (CLI, docs) and tests reference one source of truth.
 NEWS_RSS_MIN_POLL_S = 120
@@ -98,8 +99,10 @@ def _list_or_tuple(value: Any) -> Any:
     raise ValueError("keywords must be a list")
 
 
-def _has_control_chars(value: str) -> bool:
-    return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
+def _name(value: str) -> str:
+    if has_control_chars(value):
+        raise ValueError("name must not contain control characters")
+    return value
 
 
 def _percent_decode(text: str) -> str:
@@ -137,7 +140,7 @@ def _check_url(value: str, schemes: frozenset[str]) -> str:
         raise ValueError(f"URL is longer than {MAX_URL_LENGTH} characters")
     if not value.strip():
         raise ValueError("URL must not be blank")
-    if any(ch.isspace() for ch in value) or _has_control_chars(value):
+    if any(ch.isspace() for ch in value) or has_control_chars(value):
         raise ValueError("URL must not contain whitespace or control characters")
     scheme, sep, rest = value.partition("://")
     if not sep or scheme.lower() not in schemes:
@@ -175,7 +178,7 @@ def _watch_dir(value: str) -> str:
         raise ValueError(f"path is longer than {MAX_PATH_LENGTH} characters")
     if not value.strip():
         raise ValueError("path must not be blank")
-    if _has_control_chars(value):
+    if has_control_chars(value):
         raise ValueError("path must not contain control characters")
     return value
 
@@ -186,7 +189,9 @@ Slug = Annotated[
     str, StringConstraints(strict=True), AfterValidator(_as_value_error(validate_slug))
 ]
 Name = Annotated[
-    str, StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=100)
+    str,
+    StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=100),
+    AfterValidator(_as_value_error(_name)),
 ]
 Credibility = Annotated[int, Field(strict=True, ge=1, le=5)]
 Timestamp = Annotated[

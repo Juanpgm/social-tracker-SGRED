@@ -92,6 +92,18 @@ class ControlRepositoryContract:
         with pytest.raises(ValidationError):
             repo.get_setting(key)
 
+    @pytest.mark.parametrize(
+        "key",
+        ["\x00", "\x00k", "k\x00", "k\x00k", "k\x1fk", "k\x7fk", "k\x85k", "k\x9fk", "k\tk"],
+    )
+    def test_control_characters_in_a_setting_key_are_rejected(
+        self, repo: ControlRepository, key: str
+    ):
+        with pytest.raises(ValidationError):
+            repo.set_setting(key, "v")
+        with pytest.raises(ValidationError):
+            repo.get_setting(key)
+
     def test_invalid_value_is_rejected_and_keeps_the_old_one(self, repo: ControlRepository):
         repo.set_setting("k_one", "ok")
         with pytest.raises(ValidationError):

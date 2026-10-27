@@ -13,6 +13,7 @@ from social_tracker.control.domain import (
     SETTING_GLOBAL_ANALYSIS_ENABLED,
     ControlEvent,
     validate_setting,
+    validate_setting_key,
 )
 from social_tracker.shared.errors import ValidationError
 
@@ -32,6 +33,35 @@ def test_global_event_has_no_source():
 @pytest.mark.parametrize("kind", ["k", "k" * 64])
 def test_kind_boundaries_accepted(kind: str):
     assert ControlEvent(at=AT, kind=kind).kind == kind
+
+
+CONTROL_KEYS = [
+    "\x00",
+    "\x00k",
+    "k\x00",
+    "k\x00k",
+    "k\x1fk",
+    "k\x7fk",
+    "k\x80k",
+    "k\x85k",
+    "k\x9fk",
+    "k\tk",
+    "k\nk",
+]
+
+
+@pytest.mark.parametrize("kind", CONTROL_KEYS)
+def test_kind_rejects_control_characters_anywhere(kind: str):
+    with pytest.raises(ValidationError, match="kind"):
+        ControlEvent(at=AT, kind=kind)
+
+
+@pytest.mark.parametrize("key", CONTROL_KEYS)
+def test_setting_key_rejects_control_characters_anywhere(key: str):
+    with pytest.raises(ValidationError, match="key"):
+        validate_setting(key, "v")
+    with pytest.raises(ValidationError, match="key"):
+        validate_setting_key(key)
 
 
 @pytest.mark.parametrize("kind", ["", "   ", "k" * 65, None, 5])

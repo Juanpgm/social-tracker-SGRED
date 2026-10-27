@@ -96,6 +96,40 @@ def test_name_rejects_bad_values(name):
         parse_source(payload(name=name))
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "\x00",
+        "\x00a",
+        "a\x00",
+        "a\x00b",
+        "a\x01b",
+        "a\x1fb",
+        "a\x7fb",
+        "a\x80b",
+        "a\x85b",
+        "a\x9fb",
+        "a\tb",
+        "a\nb",
+        "a\rb",
+        "a\x1bb",
+    ],
+)
+def test_name_rejects_control_characters_anywhere_inside(name: str):
+    with pytest.raises(ValidationError, match="name"):
+        parse_source(payload(name=name))
+
+
+@pytest.mark.parametrize("name", ["a b", "a b", "café", "a​b", "\U0001f4f0"])
+def test_name_accepts_non_control_oddities(name: str):
+    assert parse_source(payload(name=name)).name == name
+
+
+def test_name_still_trims_surrounding_tabs_and_newlines():
+    # Whitespace is trimmed before the control-character check; only inner ones are refused.
+    assert parse_source(payload(name="\t a \n")).name == "a"
+
+
 def test_missing_name_is_rejected():
     with pytest.raises(ValidationError, match="name"):
         parse_source(without(payload(), "name"))
