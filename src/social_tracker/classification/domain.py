@@ -11,10 +11,25 @@ the credibility of the source is a prior that moves a confidence, never a label 
 Everything here is deterministic (RC-10): no clock, no randomness, no I/O.
 """
 
+import json
+import math
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
+from social_tracker.classification.similarity import NUM_PERM
+from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ValidationError
+from social_tracker.shared.ids import validate_slug
+from social_tracker.shared.text import has_control_chars, has_unsafe_chars
+
+MAX_RATIONALE_CHARS = 300  # RC-4: a short rationale
+MAX_SIGNALS = 20
+MAX_VERSION_CHARS = 64
+_STATUS_RE = re.compile(r"[a-z_]{1,32}")
+_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
 class Label(StrEnum):
@@ -171,3 +186,175 @@ class ClassifierSettings:
         )
         if not valid:
             raise ValidationError("invalid classifier settings")
+
+
+# ---- stored shapes ----
+
+
+def signals_to_json(signals: tuple[Signal, ...]) -> str:
+    """Signals as compact JSON, sorted by name: the text does not depend on discovery order."""
+    rows = [
+        {"name": s.name, "label": s.label.value, "weight": s.weight}
+        for s in sorted(signals, key=lambda s: s.name)
+    ]
+    return json.dumps(rows, sort_keys=True, separators=(",", ":"))
+
+
+def signals_from_json(text: str) -> tuple[Signal, ...]:
+    """The inverse of `signals_to_json`; anything that does not parse is a `ValidationError`."""
+    try:
+        rows = json.loads(text)
+        if not isinstance(rows, list):
+            raise TypeError
+        return tuple(Signal(r["name"], Label(r["label"]), r["weight"]) for r in rows)
+    except (ValueError, TypeError, KeyError):
+        raise ValidationError("stored signals are invalid") from None
+
+
+def _flag(value: object, what: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValidationError(f"{what} must be a bool")
+    return value
+
+
+def _coerce[E: StrEnum](enum_cls: type[E], value: Any, what: str) -> E:
+    try:
+        return enum_cls(value)
+    except (ValueError, TypeError):
+        raise ValidationError(f"unknown {what}") from None
+
+
+@dataclass(frozen=True)
+class Classification:
+    """The cascade's verdict on one item (RC-4): label, confidence in [0, 1], the stage that
+    decided and a short rationale, plus the evidence and the flags downstream stages need.
+
+    - `topics`/`signals`: what the topic filter and the rules found (never item text).
+    - `low_confidence`: below the alert threshold when classified (RC-11).
+    - `needs_llm` and `priority`: queued for the LLM judgment (RC-7); the hourly cap is applied by
+      the stage that consumes the queue.
+    - `duplicate_of`: a copy, within the window, of an item already classified (its verdict is
+      reused); `recycled_of`: matches content first seen/published longer ago (RC-5). Never both.
+    - `truncated`: the text was cut before analysis. `scope_reason`: why an item is out of scope.
+    - `catalog_status`: outcome of the official catalog cross-check (`unavailable` until it exists).
+    - `source_credibility_used`: the 1..5 prior that adjusted the confidence (RC-8).
+    """
+
+    item_id: str
+    label: Label
+    confidence: float
+    stage: Stage
+    rationale: str
+    classified_at: datetime
+    classifier_version: str
+    signals: tuple[Signal, ...] = ()
+    topics: tuple[Topic, ...] = ()
+    low_confidence: bool = False
+    needs_llm: bool = False
+    duplicate_of: str | None = None
+    recycled_of: str | None = None
+    truncated: bool = False
+    catalog_status: str = "unavailable"
+    priority: float = 0.0
+    scope_reason: OutOfScopeReason | None = None
+    source_credibility_used: int = 3
+
+    def __post_init__(self) -> None:
+        set_ = object.__setattr__
+        validate_slug(self.item_id)
+        set_(self, "label", _coerce(Label, self.label, "label"))
+        set_(self, "stage", _coerce(Stage, self.stage, "stage"))
+        if (
+            isinstance(self.confidence, bool)
+            or not isinstance(self.confidence, int | float)
+            or not math.isfinite(self.confidence)
+            or not 0.0 <= self.confidence <= 1.0
+        ):
+            raise ValidationError("confidence must be a number from 0 to 1")
+        self._check_rationale()
+        set_(self, "classified_at", ensure_utc(self.classified_at))
+        if (
+            not isinstance(self.classifier_version, str)
+            or not 1 <= len(self.classifier_version) <= MAX_VERSION_CHARS
+        ):
+            raise ValidationError("classifier version must be short text")
+        if not isinstance(self.signals, tuple) or len(self.signals) > MAX_SIGNALS:
+            raise ValidationError(f"at most {MAX_SIGNALS} signals are kept")
+        if not all(isinstance(s, Signal) for s in self.signals):
+            raise ValidationError("signals must be Signal objects")
+        set_(self, "topics", tuple(_coerce(Topic, t, "topic") for t in self.topics))
+        for flag in ("low_confidence", "needs_llm", "truncated"):
+            _flag(getattr(self, flag), flag)
+        self._check_references()
+        if not isinstance(self.catalog_status, str) or not _STATUS_RE.fullmatch(
+            self.catalog_status
+        ):
+            raise ValidationError("catalog status must be a lowercase name")
+        if not _is_number(self.priority) or not 0.0 <= self.priority <= 1.0:
+            raise ValidationError("priority must be a number from 0 to 1")
+        if not _whole(self.source_credibility_used, 1, 5):
+            raise ValidationError("credibility must be a whole number from 1 to 5")
+
+    def _check_rationale(self) -> None:
+        text = self.rationale
+        if (
+            not isinstance(text, str)
+            or not 1 <= len(text) <= MAX_RATIONALE_CHARS
+            or has_control_chars(text)
+            or has_unsafe_chars(text)
+        ):
+            raise ValidationError(
+                f"rationale must be 1 to {MAX_RATIONALE_CHARS} printable characters"
+            )
+
+    def _check_references(self) -> None:
+        for other in (self.duplicate_of, self.recycled_of):
+            if other is not None and validate_slug(other) == self.item_id:
+                raise ValidationError("an item cannot refer to itself")
+        if self.duplicate_of is not None and self.recycled_of is not None:
+            raise ValidationError("an item is a duplicate or recycled, not both")
+        if self.needs_llm and self.duplicate_of is not None:
+            raise ValidationError("a duplicate of a classified item is not escalated")
+        if self.scope_reason is not None:
+            object.__setattr__(
+                self, "scope_reason", _coerce(OutOfScopeReason, self.scope_reason, "reason")
+            )
+        if (self.label is Label.OUT_OF_SCOPE) != (self.scope_reason is not None):
+            raise ValidationError("only an out-of-scope item has a scope reason, and it needs one")
+        if self.label is Label.OUT_OF_SCOPE and self.needs_llm:
+            raise ValidationError("an out-of-scope item is never escalated")
+
+
+@dataclass(frozen=True)
+class ItemSignature:
+    """What the near-duplicate check keeps of a classified item: its content hash, the time it
+    counts from (first seen or published, whichever is earlier) and its MinHash signature. No
+    text, so it can outlive the item itself."""
+
+    item_id: str
+    content_hash: str
+    ref_at: datetime
+    minhash: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        validate_slug(self.item_id)
+        if not isinstance(self.content_hash, str) or not _HASH_RE.fullmatch(self.content_hash):
+            raise ValidationError("content hash must be 64 lowercase hex digits")
+        object.__setattr__(self, "ref_at", ensure_utc(self.ref_at))
+        if len(self.minhash) != NUM_PERM or not all(_whole(v, 0, 2**32 - 1) for v in self.minhash):
+            raise ValidationError("a signature is 80 unsigned 32-bit values")
+        object.__setattr__(self, "minhash", tuple(self.minhash))
+
+
+@dataclass(frozen=True)
+class ClassificationStats:
+    """What `classify stats` reports. The pairs are sorted by name."""
+
+    total: int
+    by_label: tuple[tuple[str, int], ...]
+    out_of_scope_by_reason: tuple[tuple[str, int], ...]
+    needs_llm: int
+    low_confidence: int
+    duplicates: int
+    recycled: int
+    truncated: int
