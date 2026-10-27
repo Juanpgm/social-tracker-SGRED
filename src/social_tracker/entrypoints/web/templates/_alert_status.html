@@ -1,0 +1,7 @@
+<div id="alert-status">
+<p>Status: <strong>{{ a.status.value }}</strong>{% if a.status_changed_at %} (since {{ a.status_changed_at.strftime("%Y-%m-%d %H:%M") }} UTC){% endif %}</p>
+{% if a.withdrawn %}<p class="hint">Withdrawn: {{ a.withdrawn_reason }}. It comes back by itself if a verdict qualifies again.</p>{% endif %}
+<div class="actions">
+{% set view = "detail" %}{% include "_alert_buttons.html" %}
+</div>
+</div>

@@ -68,6 +68,21 @@ TAG_SECRETARIAT_ATTRIBUTION = "secretariat_attribution"
 TAG_CATALOG_CONTRADICTION = "catalog_contradiction"
 TAG_OBFUSCATED = "obfuscated_text"
 TAG_PREDICTION = "prediction"
+# Every tag an alert can carry (the topics of the filter and the notable evidence), for screens
+# that offer them as choices.
+KNOWN_TAGS = tuple(
+    sorted(
+        {
+            Topic.EARTHQUAKE.value,
+            Topic.SECRETARIAT.value,
+            Topic.OTHER_DISASTER.value,
+            TAG_SECRETARIAT_ATTRIBUTION,
+            TAG_CATALOG_CONTRADICTION,
+            TAG_OBFUSCATED,
+            TAG_PREDICTION,
+        }
+    )
+)
 
 
 class Severity(StrEnum):

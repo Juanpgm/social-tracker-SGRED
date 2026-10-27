@@ -1,0 +1,1 @@
+<span id="alerts-badge" class="badge"{% if oob is defined and oob %} hx-swap-oob="true"{% endif %}{% if alerts_new %} aria-label="{{ alerts_new }} new alert{{ "" if alerts_new == 1 else "s" }}"{% else %} hidden{% endif %}>{% if alerts_new %}{{ alerts_new }}{% endif %}</span>

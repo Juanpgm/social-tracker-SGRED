@@ -107,11 +107,15 @@ def index(request: Request, notice: str = "") -> HTMLResponse:
     ctx: WebContext = request.app.state.ctx
     with ctx.services() as services:
         overview = services.control.overview()
+        llm = services.escalation.local_status()  # stored figures: the model is never asked here
+        new_alerts = services.alerts.counts().new
     return render(
         request,
         "index.html",
         rows=[row_for(o) for o in overview.sources],
         global_on=overview.global_analysis,
+        llm=llm,
+        alerts_new=new_alerts,
         notice=NOTICES.get(notice),
         source_types=SOURCE_TYPES,
     )

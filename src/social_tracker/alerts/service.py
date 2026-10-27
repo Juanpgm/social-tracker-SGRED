@@ -498,8 +498,12 @@ class AlertService:
         return AlertDetail(alert, members, events, self.removed_sources(ids))
 
     def removed_sources(self, source_ids: Iterable[str]) -> frozenset[str]:
-        """Which of these sources no longer exist (their alerts keep the name they had)."""
-        return frozenset(s for s in set(source_ids) if not self._sources.exists(s))
+        """Which of these sources no longer exist (their alerts keep the name they had). One read
+        of the registry, however many sources are asked about."""
+        wanted = set(source_ids)
+        if not wanted:
+            return frozenset()
+        return frozenset(wanted - {source.id for source in self._sources.list()})
 
     def counts(self) -> AlertCounts:
         return self._alerts.counts()

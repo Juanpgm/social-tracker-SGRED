@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Alerts{% endblock %}
+{% block content %}
+<h1>Alerts</h1>
+<p class="hint">Alerts are stored and shown here, on this machine only. There are no external notifications.</p>
+
+<form method="get" action="/alerts" class="filters" aria-label="Filter alerts">
+<div class="field"><label for="f-severity">Severity</label>
+<select id="f-severity" name="severity"><option value="">Any</option>{% for s in severities %}<option value="{{ s }}"{% if s == f.severity %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-label">Label</label>
+<select id="f-label" name="label"><option value="">Any</option>{% for s in labels %}<option value="{{ s }}"{% if s == f.label %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-status">Status</label>
+<select id="f-status" name="status"><option value="">Any (not withdrawn)</option>{% for s in statuses %}<option value="{{ s }}"{% if s == f.status %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-source">Source id</label>
+<input type="text" id="f-source" name="source" value="{{ f.source }}" list="source-options" maxlength="64" autocomplete="off">
+<datalist id="source-options">{% for source_id in source_ids %}<option value="{{ source_id }}"></option>{% endfor %}</datalist></div>
+<div class="field"><label for="f-tag">Tag</label>
+<select id="f-tag" name="tag"><option value="">Any</option>{% for s in tags %}<option value="{{ s }}"{% if s == f.tag %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-since">From (UTC)</label>
+<input type="date" id="f-since" name="since" value="{{ f.since }}"></div>
+<div class="field"><label for="f-until">To (UTC, inclusive)</label>
+<input type="date" id="f-until" name="until" value="{{ f.until }}"></div>
+<p><button type="submit">Filter</button> <a href="/alerts">Clear the filters</a></p>
+</form>
+
+<section aria-labelledby="alerts-heading">
+<h2 id="alerts-heading">Newest first</h2>
+{% if rows %}
+<p class="hint">{{ total }} alert{{ "" if total == 1 else "s" }}; page {{ page }} of {{ pages }}.</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th scope="col">Severity</th><th scope="col">Label</th><th scope="col">Confidence</th><th scope="col">Status</th><th scope="col">Occurrences</th><th scope="col">Last seen</th><th scope="col">Source</th><th scope="col">Excerpt</th><th scope="col">Actions</th></tr>
+</thead>
+<tbody>
+{% for a in rows %}{% include "_alert_row.html" %}{% endfor %}
+</tbody>
+</table>
+</div>
+{% elif total == 0 and not filtered %}
+<p>No alerts yet. They appear here when a verdict of the classifier reaches the alert threshold.</p>
+{% elif total == 0 %}
+<p>No alerts match these filters. <a href="/alerts">Clear the filters</a></p>
+{% else %}
+<p>No alerts on this page. <a href="{{ first_page_url }}">First page</a></p>
+{% endif %}
+{% if pages > 1 and rows %}
+<nav aria-label="Pages">
+{% if prev_url %}<a href="{{ prev_url }}" rel="prev">Previous</a>{% endif %}
+Page {{ page }} of {{ pages }}
+{% if next_url %}<a href="{{ next_url }}" rel="next">Next</a>{% endif %}
+</nav>
+{% endif %}
+</section>
+{% endblock %}

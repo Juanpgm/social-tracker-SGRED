@@ -1,0 +1,24 @@
+{% set target = "#alert-status" if view == "detail" else "#alert-" ~ a.id %}
+{% if a.status.value == "new" %}
+<form method="post" action="/alerts/{{ a.id }}/seen" hx-post="/alerts/{{ a.id }}/seen" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="view" value="{{ view }}">
+<input type="hidden" name="back" value="{{ back }}">
+<button type="submit" aria-label="Mark the {{ a.label.value }} alert from {{ a.source_name }} as seen">Mark seen</button>
+</form>
+{% endif %}
+{% if a.status.value != "dismissed" %}
+<form method="post" action="/alerts/{{ a.id }}/dismiss" hx-post="/alerts/{{ a.id }}/dismiss" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="view" value="{{ view }}">
+<input type="hidden" name="back" value="{{ back }}">
+<button type="submit" aria-label="Dismiss the {{ a.label.value }} alert from {{ a.source_name }}">Dismiss</button>
+</form>
+{% else %}
+<form method="post" action="/alerts/{{ a.id }}/reopen" hx-post="/alerts/{{ a.id }}/reopen" hx-target="{{ target }}" hx-swap="outerHTML" hx-disabled-elt="find button">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="view" value="{{ view }}">
+<input type="hidden" name="back" value="{{ back }}">
+<button type="submit" aria-label="Reopen the {{ a.label.value }} alert from {{ a.source_name }}">Reopen</button>
+</form>
+{% endif %}

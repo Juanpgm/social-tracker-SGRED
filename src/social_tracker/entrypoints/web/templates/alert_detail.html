@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Alert{% endblock %}
+{% block content %}
+{% set a = alert %}
+<h1>Alert</h1>
+<p><a href="/alerts">Back to the alerts</a></p>
+<p class="hint">This alert is stored and shown here, on this machine only.</p>
+
+<section aria-labelledby="summary-heading">
+<h2 id="summary-heading">{{ a.severity.value }}: {{ a.label.value }}</h2>
+<dl>
+<dt>Severity</dt><dd class="sev sev-{{ a.severity.value }}">{{ a.severity.value }}</dd>
+<dt>Label</dt><dd>{{ a.label.value }}</dd>
+<dt>Confidence</dt><dd>{{ "%.3f"|format(a.confidence) }}</dd>
+<dt>Occurrences</dt><dd>{{ a.occurrences }}</dd>
+<dt>Source</dt><dd>{{ a.source_name }} <span class="id">({{ a.source_id }})</span>{% if a.source_id in removed %} - source removed{% endif %}</dd>
+{% if a.linked_sources|length > 1 %}
+<dt>Linked sources</dt><dd>{% for source_id, name in a.linked_sources %}{{ name }} <span class="id">({{ source_id }})</span>{% if source_id in removed %} - source removed{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</dd>
+{% endif %}
+<dt>First seen</dt><dd>{{ a.first_seen_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</dd>
+<dt>Last seen</dt><dd>{{ a.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</dd>
+<dt>Rationale</dt><dd>{{ a.rationale }}</dd>
+<dt>Tags</dt><dd>{% if a.tags %}{% for tag in a.tags %}<a href="/alerts?tag={{ tag }}">{{ tag }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% else %}none{% endif %}</dd>
+</dl>
+{% if a.withdrawn %}
+<p class="hint">Withdrawn {{ a.withdrawn_at.strftime("%Y-%m-%d %H:%M") }} UTC: {{ a.withdrawn_reason }}.</p>
+{% endif %}
+</section>
+
+<section aria-labelledby="status-heading">
+<h2 id="status-heading">Status</h2>
+{% set view = "detail" %}{% set back = "/alerts/" ~ a.id %}
+{% include "_alert_status.html" %}
+</section>
+
+<section aria-labelledby="evidence-heading">
+<h2 id="evidence-heading">Evidence</h2>
+<dl>
+<dt>Deciding stage</dt><dd>{{ a.evidence.stage }}</dd>
+<dt>Catalog</dt><dd>{{ a.evidence.catalog_status }}</dd>
+<dt>Signals</dt><dd>{% if a.evidence.signals %}{% for name, label, weight in a.evidence.signals %}{{ name }} ({{ "%g"|format(weight) }}){% if not loop.last %}, {% endif %}{% endfor %}{% else %}none{% endif %}</dd>
+<dt>Topics</dt><dd>{{ a.evidence.topics|join(", ") or "none" }}</dd>
+<dt>Classifier</dt><dd>{{ a.evidence.classifier_version }}</dd>
+{% if a.evidence.llm_model %}<dt>Model</dt><dd>{{ a.evidence.llm_model }} (prompt {{ a.evidence.prompt_version }})</dd>{% endif %}
+{% if a.evidence.settle_reason %}<dt>Settled by</dt><dd>{{ a.evidence.settle_reason }}</dd>{% endif %}
+{% if a.evidence.provisional %}<dt>Provisional</dt><dd>yes, the verdict still waits for the language model</dd>{% endif %}
+</dl>
+</section>
+
+<section aria-labelledby="items-heading">
+<h2 id="items-heading">Items behind this alert</h2>
+<p class="hint">Read-only excerpts, kept when the alert was raised. The original text may have been purged since.</p>
+<ul class="items">
+{% for m in members %}
+<li id="item-{{ m.item_id }}">
+<p><strong>{{ m.source_name }}</strong>{% if m.source_id in removed %} (source removed){% endif %} - {{ m.occurred_at.strftime("%Y-%m-%d %H:%M") }} UTC - {{ m.label.value }} {{ "%.2f"|format(m.confidence) }}{% if not m.active %} - no longer qualifies{% endif %}</p>
+<blockquote class="excerpt">{{ m.excerpt or "(no text)" }}</blockquote>
+</li>
+{% endfor %}
+</ul>
+</section>
+
+<section aria-labelledby="trail-heading">
+<h2 id="trail-heading">Trail</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th scope="col">When (UTC)</th><th scope="col">What</th><th scope="col">Who</th><th scope="col">Why</th></tr></thead>
+<tbody>
+{% for e in events %}
+<tr><td>{{ e.at.strftime("%Y-%m-%d %H:%M:%S") }}</td><td>{{ e.kind.value }}{% if e.before or e.after %} ({{ e.before }} to {{ e.after }}){% endif %}</td><td>{{ e.actor }}</td><td>{{ e.reason }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+</section>
+{% endblock %}

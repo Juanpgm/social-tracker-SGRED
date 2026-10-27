@@ -1,0 +1,14 @@
+<tr id="alert-{{ a.id }}">
+<td class="sev sev-{{ a.severity.value }}">{{ a.severity.value }}</td>
+<td>{{ a.label.value }}</td>
+<td>{{ "%.2f"|format(a.confidence) }}</td>
+<td>{{ a.status.value }}{% if a.withdrawn %} (withdrawn){% endif %}</td>
+<td>{{ a.occurrences }}</td>
+<td>{{ a.last_seen_at.strftime("%Y-%m-%d %H:%M") }} UTC</td>
+<td>{{ a.source_name }}{% if a.source_id in removed %} (source removed){% endif %}</td>
+<td class="excerpt">{{ a.excerpt }}</td>
+<td class="actions">
+<a href="/alerts/{{ a.id }}" aria-label="Details of the {{ a.label.value }} alert from {{ a.source_name }}">Details</a>
+{% set view = "list" %}{% include "_alert_buttons.html" %}
+</td>
+</tr>

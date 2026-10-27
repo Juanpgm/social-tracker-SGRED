@@ -229,6 +229,21 @@ class LlmStatus:
 
 
 @dataclass(frozen=True)
+class LocalLlmStatus:
+    """What can be said about the model from this machine's own records, without asking the
+    server or the model anything: the web page shows it. The server's reachability and its
+    installed models are not here; `llm status` asks for them."""
+
+    base_url: str
+    configured: tuple[str, ...]
+    queued: int
+    used_this_hour: int
+    hourly_cap: int
+    counts: EscalationCounts
+    analysis_on: bool
+
+
+@dataclass(frozen=True)
 class PingResult:
     ok: bool
     model: str | None = None
@@ -285,6 +300,21 @@ class EscalationService:
         """The bookkeeping of an item that has no judgment (yet): a failure waiting for its retry,
         a parked or a dropped item."""
         return self._escalations.get_state(item_id)
+
+    def local_status(self) -> LocalLlmStatus:
+        """The queue, the hourly budget, the counts and the settings: stored figures only. Nothing
+        is sent to the model server and nothing is loaded (the web page uses this)."""
+        settings = self._settings
+        counts = self._escalations.counts()
+        return LocalLlmStatus(
+            base_url=settings.endpoint.url,
+            configured=settings.models,
+            queued=counts.queued,
+            used_this_hour=self._escalations.calls_in_hour(hour_start(self._clock.now())),
+            hourly_cap=settings.hourly_cap,
+            counts=counts,
+            analysis_on=self._control.global_analysis_enabled(),
+        )
 
     def status(self) -> LlmStatus:
         """Ask the server who it is and which models it has (two `GET`s, no model is loaded) and

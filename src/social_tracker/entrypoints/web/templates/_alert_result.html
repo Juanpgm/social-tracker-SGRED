@@ -1,0 +1,2 @@
+{% if alert %}{% set a = alert %}{% if view == "detail" %}{% include "_alert_status.html" %}{% else %}{% include "_alert_row.html" %}{% endif %}{% endif %}
+<template><div hx-swap-oob="innerHTML:#live-region"><p class="{{ "error" if failed else "notice" }}">{{ message }}</p></div>{% set oob = true %}{% include "_alert_badge.html" %}</template>

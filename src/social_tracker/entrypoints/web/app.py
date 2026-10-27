@@ -13,7 +13,7 @@ from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
-from social_tracker.entrypoints.web import routes
+from social_tracker.entrypoints.web import alert_routes, routes
 from social_tracker.entrypoints.web.pages import (
     BUSY_TEXT,
     ContainerFactory,
@@ -75,6 +75,7 @@ def create_app(
     )
     app.mount("/static", StaticFiles(packages=[("social_tracker.entrypoints.web", "static")]))
     app.include_router(routes.router)
+    app.include_router(alert_routes.router)
     app.add_exception_handler(DomainError, _domain_error)
     app.add_exception_handler(HTTPException, _http_error)
 

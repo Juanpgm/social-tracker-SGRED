@@ -56,7 +56,7 @@ def render(request: Request, template: str, *, status: int = 200, **context: Any
         return status_fragment(request, text, status=status, refresh=status == 403)
     ctx: WebContext = request.app.state.ctx
     page = ctx.env.get_template(template).render(
-        {"notice": None, "csrf_token": request.state.csrf_token, **context}
+        {"notice": None, "alerts_new": None, "csrf_token": request.state.csrf_token, **context}
     )
     return HTMLResponse(page, status_code=status)
 

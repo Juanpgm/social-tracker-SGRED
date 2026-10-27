@@ -18,6 +18,14 @@
 <p>Stream lag: n/a - no worker running</p>
 </section>
 
+<section aria-labelledby="model-heading">
+<h2 id="model-heading">Language model</h2>
+<p>Configured models: {{ llm.configured|join(", ") }}</p>
+<p>{{ llm.queued }} verdict{{ "" if llm.queued == 1 else "s" }} waiting for the model; judgments started this hour: {{ llm.used_this_hour }} of {{ llm.hourly_cap }}.</p>
+<p>Judged {{ llm.counts.judged }}, invalid answers {{ llm.counts.invalid }}, settled from an original {{ llm.counts.reused }}, parked {{ llm.counts.parked }}, dropped {{ llm.counts.dropped }}.</p>
+<p class="hint">These figures are the stored ones. The model server is not asked from this page: run <code>social-tracker llm status</code> to see whether it answers and which models it has.</p>
+</section>
+
 <section aria-labelledby="sources-heading">
 <h2 id="sources-heading">Registered sources</h2>
 <p><a class="button" href="/sources/new">Add a source</a></p>
