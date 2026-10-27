@@ -173,6 +173,17 @@ BLOCKED = [
     "64:ff9b::a9fe:a9fe",
     "2002:7f00:1::1",
     "2002:a9fe:a9fe::1",
+    # IPv4-compatible (::/96) and IPv4-translated (::ffff:0:0/96) forms: judged by the IPv4 inside
+    "::7f00:1",
+    "::127.0.0.1",
+    "::a00:1",
+    "::a9fe:a9fe",
+    "::2",
+    "::ffff:0:7f00:1",
+    "::ffff:0:a00:1",
+    "::ffff:0:0",
+    "fec0::1",
+    "feff:ffff::1",
 ]
 ALLOWED = [
     "93.184.216.34",
@@ -188,6 +199,9 @@ ALLOWED = [
     "::ffff:8.8.8.8",
     "64:ff9b::808:808",
     "2002:5db8:d822::1",
+    "::808:808",
+    "::ffff:0:808:808",
+    "fe00::1",  # just outside fec0::/10 (and not link-local either)
 ]
 
 

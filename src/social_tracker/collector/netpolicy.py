@@ -4,8 +4,9 @@ Only plain http(s) URLs without credentials are fetched, and a host is contacted
 address it resolves to is a public one: a name that answers with a loopback, private, link-local
 (cloud metadata included), carrier-grade NAT, multicast, reserved or documentation address is
 refused whole, so a mixed answer cannot be used to smuggle one in. IPv6 addresses that wrap an
-IPv4 one (`::ffff:a.b.c.d`, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) are judged by the IPv4 address
-inside. Numeric spellings of an IPv4 address (`2130706433`, `0x7f.1`, `127.1`) are refused as
+IPv4 one (`::ffff:a.b.c.d`, the IPv4-translated `::ffff:0:a.b.c.d`, the deprecated IPv4-compatible
+`::a.b.c.d`, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) are judged by the IPv4 address inside; the
+deprecated site-local range `fec0::/10` is refused. Numeric spellings of an IPv4 address (`2130706433`, `0x7f.1`, `127.1`) are refused as
 URLs rather than interpreted. The operator may allow named private hosts (see the fetcher).
 """
 
@@ -22,6 +23,9 @@ _SCHEMES = {"http": 80, "https": 443}
 _NUMERIC_HOST_RE = re.compile(r"(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*")
 _LABEL_RE = re.compile(r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?")
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
+_IPV4_TRANSLATED = ipaddress.ip_network("::ffff:0:0:0/96")
+_SITE_LOCAL = ipaddress.ip_network("fec0::/10")
 type IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
@@ -108,7 +112,7 @@ def _embedded_ipv4(address: IPAddress) -> ipaddress.IPv4Address | None:
         return None
     if address.ipv4_mapped is not None:
         return address.ipv4_mapped
-    if address in _NAT64:
+    if address in _NAT64 or address in _IPV4_COMPATIBLE or address in _IPV4_TRANSLATED:
         return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
     return address.sixtofour
 
@@ -118,7 +122,7 @@ def is_blocked_address(address: IPAddress) -> bool:
     inner = _embedded_ipv4(address)
     if inner is not None:
         return is_blocked_address(inner)
-    return not address.is_global or address.is_multicast
+    return not address.is_global or address.is_multicast or address in _SITE_LOCAL
 
 
 def usable_addresses(answer: Iterable[str], *, allow_private: bool) -> list[str]:
