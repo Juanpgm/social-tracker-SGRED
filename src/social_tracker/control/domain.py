@@ -4,8 +4,10 @@ Every function takes the current state and an explicit `now`; nothing reads a cl
 mutates its input, so behaviour is fully deterministic (jitter is injected as a parameter).
 """
 
+import json
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -268,6 +270,18 @@ def validate_setting_prefix(prefix: Any) -> str:
     return _require_text(
         prefix, "setting key prefix", MAX_SETTING_KEY, non_blank=False, no_control=True
     )
+
+
+def event_detail_json(detail: Mapping[str, Any]) -> str:
+    """The one way every service renders an event detail: compact, key-sorted JSON.
+
+    Non-ASCII text stays as real characters (`ensure_ascii=False`). Escaping it would multiply its
+    length by 6 (12 for an astral character) and push a legal 500-character reason past the
+    2000-character event column. The text cannot hurt the store: lone surrogates and other hidden
+    characters never get this far, because `validate_actor`/`validate_reason`, names and the
+    `ControlEvent` itself refuse them.
+    """
+    return json.dumps(detail, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 @dataclass(frozen=True)

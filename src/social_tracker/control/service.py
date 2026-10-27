@@ -37,7 +37,6 @@ Per-source analysis flags are settings named by `source_analysis_key(source_id)`
 no environment override: the settings store is the single source of truth.
 """
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -54,6 +53,7 @@ from social_tracker.control.domain import (
     analysis_effective,
     apply_event,
     apply_global,
+    event_detail_json,
     format_confidence,
     parse_confidence,
     source_analysis_key,
@@ -173,7 +173,7 @@ class ControlService:
             "to": after,
             **extra,
         }
-        text = json.dumps(detail, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        text = event_detail_json(detail)
         self._control.append_control_event(ControlEvent(at, kind, source_id, text))
 
     def _known_source(self, source_id: Any) -> str:

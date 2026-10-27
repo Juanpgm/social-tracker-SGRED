@@ -24,7 +24,6 @@ interrupted by this service, and the detail of the `source_deleted` event record
 had.
 """
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +35,7 @@ from social_tracker.control.domain import (
     Event,
     SourceState,
     apply_event,
+    event_detail_json,
     source_analysis_key,
     validate_actor,
     validate_reason,
@@ -150,7 +150,7 @@ class SourceRegistry:
         who: Mapping[str, str],
         detail: Mapping[str, Any],
     ) -> None:
-        text = json.dumps({**detail, **who}, sort_keys=True, separators=(",", ":"))
+        text = event_detail_json({**detail, **who})
         self._control.append_control_event(ControlEvent(at, kind, source_id, text))
 
     def _sync_state(self, source: Source, now: datetime) -> dict[str, str]:

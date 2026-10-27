@@ -1145,6 +1145,24 @@ class RegistryContract:
             detail = json.loads(event.detail)
             assert (detail["actor"], detail["reason"]) == (who["actor"], who["reason"])
 
+    @pytest.mark.parametrize("char", ["é", "日", "😀"], ids=["latin", "cjk", "astral"])
+    @pytest.mark.parametrize("operation", ["add", "edit", "enable", "disable", "delete", "import"])
+    def test_the_longest_non_ascii_actor_and_reason_fit_in_the_event_of_every_write(
+        self, env: Env, operation: str, char: str
+    ):
+        # JSON escaping (a backslash-u escape, or two for an astral character) would make these
+        # 6 to 12 times longer than the 2000-character event column allows; the detail keeps text.
+        who = {"actor": char * MAX_ACTOR, "reason": char * MAX_REASON}
+        call = self.writes(env, who)[operation]
+        seen = len(env.control.list_control_events())
+        call()
+        written = env.control.list_control_events()[seen:]
+        assert written
+        for event in written:
+            detail = json.loads(event.detail)
+            assert (detail["actor"], detail["reason"]) == (who["actor"], who["reason"])
+            assert char in event.detail  # stored as the character, not as an escape
+
     def test_unicode_actor_and_reason_are_stored_verbatim(self, env: Env):
         env.registry.add(data(), actor="José ✓", reason="rápido 日本")
         detail = json.loads(env.control.list_control_events()[-1].detail)
