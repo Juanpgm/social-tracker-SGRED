@@ -501,11 +501,13 @@ def test_loaded_sources_are_order_preserving_file_order():
 
 # ---- properties -----------------------------------------------------------------------
 
+# Categories the domain refuses in names and keywords: controls, surrogates, format, separators.
+HIDDEN_CATEGORIES = ("Cc", "Cs", "Cf", "Zl", "Zp")
 _names = st.text(
-    alphabet=st.characters(blacklist_categories=("Cc", "Cs")), min_size=1, max_size=100
+    alphabet=st.characters(blacklist_categories=HIDDEN_CATEGORIES), min_size=1, max_size=100
 ).filter(lambda t: t.strip() != "")
 _keywords = st.lists(
-    st.text(alphabet=st.characters(blacklist_categories=("Cc", "Cs")), min_size=1, max_size=40)
+    st.text(alphabet=st.characters(blacklist_categories=HIDDEN_CATEGORIES), min_size=1, max_size=40)
     .map(str.strip)
     .filter(bool),
     max_size=8,

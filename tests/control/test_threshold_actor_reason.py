@@ -221,3 +221,34 @@ def test_the_stored_threshold_text_limit_is_inclusive():
 
 def test_the_documented_limits_are_pinned():
     assert (MAX_ACTOR, MAX_REASON) == (100, 500)
+
+
+# ---- hidden characters ----------------------------------------------------------------
+
+HIDDEN = ["\ud800x", "x\udfff", "​", "a​b", "‮", "a‮b", " ", "a b"]
+HIDDEN_BLANK = ["​", "​ ​", "﻿", " ‍ "]
+
+
+@pytest.mark.parametrize(("check", "field", "limit"), FIELDS)
+@pytest.mark.parametrize("value", [*HIDDEN, *HIDDEN_BLANK], ids=ascii)
+def test_surrogates_format_characters_and_separators_are_rejected(check, field, limit, value):
+    with pytest.raises(ValidationError) as caught:
+        check(value)
+    assert caught.value.fields == (field,)
+
+
+@pytest.mark.parametrize(("check", "field", "limit"), FIELDS)
+@pytest.mark.parametrize(
+    "value",
+    ["café", "Mañana ¿sí? Él ñandú", "listo \U0001f600", "日本語のメモ", "é̂"],
+    ids=ascii,
+)
+def test_combining_marks_accents_and_emoji_remain_allowed(check, field, limit, value):
+    assert check(value) == value
+
+
+@pytest.mark.parametrize(("check", "field", "limit"), FIELDS)
+def test_the_hidden_character_error_never_echoes_the_value(check, field, limit):
+    with pytest.raises(ValidationError) as caught:
+        check(CANARY + "‮")
+    assert CANARY not in caught.value.message

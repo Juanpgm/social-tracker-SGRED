@@ -125,7 +125,7 @@ def test_name_rejects_control_characters_anywhere_inside(name: str):
         parse_source(payload(name=name))
 
 
-@pytest.mark.parametrize("name", ["a b", "a b", "café", "a​b", "\U0001f4f0"])
+@pytest.mark.parametrize("name", ["a b", "a b", "café", "\U0001f4f0"])
 def test_name_accepts_non_control_oddities(name: str):
     assert parse_source(payload(name=name)).name == name
 
@@ -469,3 +469,35 @@ def test_dump_and_json_round_trip_preserve_equality(type_: str):
     source = parse_source(payload(type_))
     assert parse_source(source.model_dump()) == source
     assert parse_source(source.model_dump(mode="json")) == source
+
+
+HIDDEN_TEXT = ["\ud800x", "x\udfff", "a\u200bb", "\u202e", "a\u2028b", "a\u2029b", "a\ufeffb"]
+
+
+@pytest.mark.parametrize("value", HIDDEN_TEXT, ids=ascii)
+def test_name_rejects_surrogates_format_characters_and_separators(value: str):
+    with pytest.raises(ValidationError) as caught:
+        parse_source(payload(name=value))
+    assert caught.value.fields == ("name",)
+
+
+def test_a_name_made_only_of_format_characters_is_blank_and_rejected():
+    with pytest.raises(ValidationError, match="name"):
+        parse_source(payload(name="\u200b\u200b"))
+
+
+@pytest.mark.parametrize("name", ["Diario El País", "cafe\u0301", "Mañana \U0001f600"], ids=ascii)
+def test_name_keeps_accents_combining_marks_and_emoji(name: str):
+    assert parse_source(payload(name=name)).name == name
+
+
+@pytest.mark.parametrize("value", HIDDEN_TEXT, ids=ascii)
+def test_keywords_reject_surrogates_format_characters_and_separators(value: str):
+    with pytest.raises(ValidationError) as caught:
+        parse_source(payload("news_rss", keywords=["fine", value]))
+    assert caught.value.fields == ("keywords",)
+
+
+def test_keywords_keep_accents_combining_marks_and_emoji():
+    words = ["incendio", "niño", "cafe\u0301", "\U0001f525"]
+    assert parse_source(payload("news_rss", keywords=words)).keywords == tuple(words)

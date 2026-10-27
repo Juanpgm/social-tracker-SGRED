@@ -311,6 +311,12 @@ class ControlServiceContract:
             ("reason", "x" * (MAX_REASON + 1)),
             ("reason", "bell\x07"),
             ("reason", "tab\there"),
+            ("actor", "\ud800x"),  # a lone surrogate would crash a UTF-8 store
+            ("actor", "​"),
+            ("actor", "a‮b"),
+            ("reason", " "),
+            ("reason", "ok "),
+            ("reason", "\udfff"),
         ],
     )
     def test_actor_and_reason_are_validated_for_every_kind_of_action(

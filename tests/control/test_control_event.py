@@ -163,3 +163,30 @@ def test_blank_event_kind_and_detail_rules_differ():
     assert ControlEvent(at=AT, kind="paused", detail="   ").detail == "   "
     with pytest.raises(ValidationError, match="kind"):
         ControlEvent(at=AT, kind="   ")
+
+
+# ---- hidden characters ----------------------------------------------------------------
+
+HIDDEN = ["\ud800x", "x\udfff", "a​b", "‮", "a b", "a b", "a﻿b"]
+
+
+@pytest.mark.parametrize("value", HIDDEN, ids=ascii)
+def test_event_kind_and_detail_reject_surrogates_and_format_characters(value: str):
+    with pytest.raises(ValidationError, match="kind"):
+        ControlEvent(at=AT, kind=value)
+    with pytest.raises(ValidationError, match="detail"):
+        ControlEvent(at=AT, kind="paused", detail=value)
+
+
+@pytest.mark.parametrize("value", HIDDEN, ids=ascii)
+def test_setting_keys_and_values_reject_surrogates_and_format_characters(value: str):
+    with pytest.raises(ValidationError, match="key"):
+        validate_setting_key(value)
+    with pytest.raises(ValidationError, match="value"):
+        validate_setting("note", value)
+
+
+def test_accents_combining_marks_and_emoji_remain_allowed_in_events_and_settings():
+    text = "Mañana café \U0001f600"
+    assert ControlEvent(at=AT, kind="paused", detail=text).detail == text
+    assert validate_setting("note", text) == ("note", text)

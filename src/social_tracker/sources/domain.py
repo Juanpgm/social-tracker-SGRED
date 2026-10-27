@@ -26,7 +26,7 @@ from pydantic import ValidationError as _PydanticValidationError
 from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import ValidationError
 from social_tracker.shared.ids import validate_slug
-from social_tracker.shared.text import has_control_chars
+from social_tracker.shared.text import has_control_chars, has_unsafe_chars, is_blank_text
 
 # Product rules, named so 1d/1e (CLI, docs) and tests reference one source of truth.
 NEWS_RSS_MIN_POLL_S = 120
@@ -119,8 +119,18 @@ def _list_or_tuple(value: Any) -> Any:
 
 
 def _name(value: str) -> str:
+    if is_blank_text(value):
+        raise ValueError("name must not be blank")
     if has_control_chars(value):
         raise ValueError("name must not contain control characters")
+    if has_unsafe_chars(value):
+        raise ValueError("name must not contain hidden characters")
+    return value
+
+
+def _keyword(value: str) -> str:
+    if has_unsafe_chars(value):
+        raise ValueError("keyword must not contain hidden characters")
     return value
 
 
@@ -225,6 +235,7 @@ Keyword = Annotated[
     StringConstraints(
         strict=True, strip_whitespace=True, min_length=1, max_length=KEYWORD_MAX_LENGTH
     ),
+    AfterValidator(_keyword),
 ]
 InstagramHandle = Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9._]{1,30}$")]
 Language = Annotated[

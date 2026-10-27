@@ -15,7 +15,7 @@ from typing import Any
 from social_tracker.shared.clock import ensure_utc
 from social_tracker.shared.errors import InvalidTransition, ValidationError
 from social_tracker.shared.ids import validate_slug
-from social_tracker.shared.text import has_control_chars
+from social_tracker.shared.text import has_control_chars, has_unsafe_chars, is_blank_text
 
 MAX_CONSECUTIVE_FAILURES = 5
 BACKOFF_BASE_S = 60
@@ -224,12 +224,16 @@ def _require_text(
 ) -> str:
     """The one place that checks 'a string of at most `max_len` chars (optionally non-blank,
     optionally free of control characters)'. Identifier-like fields (setting keys, event kinds)
-    reject control characters; free text (setting values, event details) may carry them."""
-    if not isinstance(value, str) or len(value) > max_len or (non_blank and not value.strip()):
+    reject control characters; free text (setting values, event details) may carry them. Lone
+    surrogates, format characters and line/paragraph separators are always refused: they are
+    invisible or not encodable, and "non-blank" is judged after format characters are removed."""
+    if not isinstance(value, str) or len(value) > max_len or (non_blank and is_blank_text(value)):
         qualifier = "a non-blank string" if non_blank else "a string"
         raise ValidationError(f"{what} must be {qualifier} up to {max_len} chars")
     if no_control and has_control_chars(value):
         raise ValidationError(f"{what} must not contain control characters")
+    if has_unsafe_chars(value):
+        raise ValidationError(f"{what} must not contain hidden characters")
     return value
 
 
@@ -314,13 +318,14 @@ def parse_confidence(text: Any) -> float:
 def _free_text(value: Any, field: str, max_len: int) -> str:
     if (
         not isinstance(value, str)
-        or not value.strip()
+        or is_blank_text(value)
         or len(value) > max_len
         or has_control_chars(value)
+        or has_unsafe_chars(value)
     ):
         raise ValidationError(
             f"{field} must be non-blank text of at most {max_len} characters without "
-            "control characters",
+            "control or hidden characters",
             (field,),
         )
     return value
