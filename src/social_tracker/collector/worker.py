@@ -14,7 +14,11 @@ What it does, in order:
   global analysis is on, every due source is collected, one at a time and in id order
   (concurrency 1), through `CollectorService.collect_once`. A source that fails, or a storage
   error, costs that source or that pass and nothing more.
-- AFTER THE COLLECTION, if a classify hook was given (the composition root passes
+- AFTER THE COLLECTION, if a catalog hook was given (the composition root passes the refresher
+  of the USGS and EMSC catalogs), the catalogs that are due are refreshed, so the cascade
+  below reads a fresh cache. It follows the global analysis switch like the sources: nothing
+  is fetched while it is off. A failure there costs that step and nothing more.
+- AFTER THAT, if a classify hook was given (the composition root passes
   `ClassifierService.classify_pending`), the cascade runs over the pending items of the eligible
   sources: the CPU stages only, in batches. A failure there costs that step and nothing more.
 - STOP (`request_stop`, wired to SIGINT/SIGTERM by the entrypoint): no new collection starts; the
@@ -54,6 +58,7 @@ class PassSummary:
     results: tuple[CollectResult, ...]
     errors: int = 0
     classification: object | None = None
+    catalog: object | None = None
 
 
 def _positive(value: float) -> bool:
@@ -73,6 +78,7 @@ class Worker:
         purge: Callable[[], object] | None = None,
         purge_every_s: float = DEFAULT_PURGE_EVERY_S,
         classify: Callable[[], object] | None = None,
+        catalog: Callable[[], object] | None = None,
     ) -> None:
         if not _positive(tick_s) or not _positive(purge_every_s):
             raise ValueError("tick_s and purge_every_s must be positive, finite numbers")
@@ -85,6 +91,7 @@ class Worker:
         self._purge = purge
         self._purge_every_s = purge_every_s
         self._classify = classify
+        self._catalog = catalog
         self._next_purge: float | None = None
 
     @property
@@ -144,13 +151,27 @@ class Worker:
                 errors += 1
             else:
                 results.append(result)
+        refreshed = self._refresh_catalog()
         classification, failed = self._classify_pending()
         return PassSummary(
             global_off=False,
             results=tuple(results),
             errors=errors + failed,
             classification=classification,
+            catalog=refreshed,
         )
+
+    def _refresh_catalog(self) -> object | None:
+        """Refresh the official catalogs that are due (each knows its own interval and backoff).
+        Only reached while global analysis is on, like the sources. The refresher records its own
+        failures and does not raise; whatever else goes wrong costs this step only."""
+        if self._catalog is None or self._stop.is_set():
+            return None
+        try:
+            return self._catalog()
+        except Exception as exc:  # noqa: BLE001 - the cross-check must never stop collection
+            _LOG.error("unexpected error refreshing the catalogs: %s", type(exc).__name__)
+            return None
 
     def _classify_pending(self) -> tuple[object | None, int]:
         """Run the cascade over what was collected (CPU only). Skipped once a stop is requested.

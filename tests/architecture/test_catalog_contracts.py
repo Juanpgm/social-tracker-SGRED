@@ -65,7 +65,9 @@ def test_the_catalog_may_use_the_fetcher_port_json_and_the_classification_core(
 def test_the_wiring_may_build_the_catalog_with_the_adapters(repo_root: Path, tmp_path: Path):
     files = {
         "catalog/service.py": "S = 1\n",
-        "bootstrap.py": "from fixpkg.catalog import service\nfrom fixpkg.persistence import thing\n",
+        "bootstrap.py": (
+            "from fixpkg.catalog import service\nfrom fixpkg.persistence import thing\n"
+        ),
     }
     result = lint(repo_root, tmp_path, files)
     assert result.returncode == 0, result.stdout + result.stderr

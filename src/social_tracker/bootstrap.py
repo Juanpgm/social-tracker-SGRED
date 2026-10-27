@@ -35,6 +35,15 @@ Environment:
   blank value means the default.
 - `SOCIAL_TRACKER_ALLOWED_PORTS`: comma-separated destination ports the collector may contact
   (feeds and every redirect hop). Default `80,443,8080,8443`; a value replaces the list.
+- Official-catalog cross-check (USGS and EMSC only): `SOCIAL_TRACKER_CATALOG_CENTER`
+  (`lat,lon`, default `3.4516,-76.5320`, Cali), `SOCIAL_TRACKER_CATALOG_RADIUS_KM` (default
+  300), `SOCIAL_TRACKER_CATALOG_MIN_MAGNITUDE` (regional floor, default 2.5),
+  `SOCIAL_TRACKER_CATALOG_GLOBAL_MIN_MAGNITUDE` (floor of the felt-elsewhere window, default
+  5.5), `SOCIAL_TRACKER_CATALOG_INTERVAL_S` (worker refresh interval, 60..86400, default 600)
+  and `SOCIAL_TRACKER_CATALOG_MAX_AGE_S` (a cache whose last good refresh is older is stale
+  and the check says `unavailable`; from the interval up, default 7200). A blank value means
+  the default. The catalog fetcher is separate from the feed fetcher: only
+  `earthquake.usgs.gov` and `www.seismicportal.eu`, https on port 443, no private hosts.
 
 `build_container` is for the CLI and the web UI and never creates a network client. `build_worker`
 adds the collector and the HTTP fetcher (the application's only outbound path) for
@@ -51,6 +60,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from social_tracker.catalog.domain import CATALOG_HOSTS, CatalogSettings
+from social_tracker.catalog.service import CachedCatalogCheck, CatalogCache, CatalogRefresher
 from social_tracker.classification.domain import ClassifierSettings
 from social_tracker.classification.service import ClassifierService, TopicConfigService
 from social_tracker.classification.yaml_io import default_topic_config
@@ -62,6 +73,7 @@ from social_tracker.collector.worker import DEFAULT_TICK_S, Worker
 from social_tracker.control.service import ControlService
 from social_tracker.items.domain import DEFAULT_RETENTION_DAYS, validate_retention_days
 from social_tracker.items.service import ItemService
+from social_tracker.persistence.catalog_repo import SqliteCatalogRepository
 from social_tracker.persistence.classification_repo import (
     SqliteClassificationRepository,
     SqliteSignatureRepository,
@@ -89,6 +101,15 @@ CLASSIFICATION_RETENTION_DAYS_ENV = "SOCIAL_TRACKER_CLASSIFICATION_RETENTION_DAY
 MAX_ITEMS_PER_SOURCE_ENV = "SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE"
 MAX_BYTES_PER_SOURCE_ENV = "SOCIAL_TRACKER_MAX_BYTES_PER_SOURCE"
 MAX_BYTES_PER_FETCH_ENV = "SOCIAL_TRACKER_MAX_BYTES_PER_FETCH"
+CATALOG_CENTER_ENV = "SOCIAL_TRACKER_CATALOG_CENTER"
+CATALOG_RADIUS_ENV = "SOCIAL_TRACKER_CATALOG_RADIUS_KM"
+CATALOG_MIN_MAGNITUDE_ENV = "SOCIAL_TRACKER_CATALOG_MIN_MAGNITUDE"
+CATALOG_GLOBAL_MIN_MAGNITUDE_ENV = "SOCIAL_TRACKER_CATALOG_GLOBAL_MIN_MAGNITUDE"
+CATALOG_INTERVAL_ENV = "SOCIAL_TRACKER_CATALOG_INTERVAL_S"
+CATALOG_MAX_AGE_ENV = "SOCIAL_TRACKER_CATALOG_MAX_AGE_S"
+CATALOG_FETCH_LIMITS = FetchLimits(
+    timeout_s=10.0, deadline_s=20.0, max_bytes=4 * 1024 * 1024, max_redirects=2
+)
 DEFAULT_DB_PATH = "data/social_tracker.db"
 MAX_BUSY_TIMEOUT_MS = 600_000
 _DIGITS = re.compile(r"[0-9]{1,7}")
@@ -98,6 +119,8 @@ _PORT_DIGITS = re.compile(r"[0-9]{1,5}")
 _LIMIT_DIGITS = re.compile(r"[0-9]{1,15}")
 _DAY_DIGITS = re.compile(r"[0-9]{1,4}")
 _THRESHOLD = re.compile(r"[01](?:\.[0-9]{1,4})?")
+_DECIMAL = re.compile(r"-?[0-9]{1,5}(?:\.[0-9]{1,6})?")
+_SECONDS = re.compile(r"[0-9]{1,9}")
 _BACKOFF_JITTER_FRACTION = 0.1
 CLAIM_MARGIN_S = 60.0  # what a claim may outlast the fetch deadline (parse and store) unchallenged
 
@@ -110,6 +133,7 @@ class Container:
     classifier: ClassifierService
     topics: TopicConfigService
     classifier_settings: ClassifierSettings
+    catalog: CatalogCache
     _db: Database
 
     @property
@@ -148,6 +172,23 @@ class WorkerContainer:
         self.container.close()
         if self.lock is not None:
             self.lock.release()
+
+
+@dataclass(frozen=True)
+class CatalogContainer:
+    """Everything `social-tracker catalog refresh` needs: the services plus the refresher and
+    the catalog fetcher. No worker lock: the refresher's own claim keeps two refreshes apart."""
+
+    container: Container
+    refresher: CatalogRefresher
+    fetcher: Fetcher
+
+    @property
+    def control(self) -> ControlService:
+        return self.container.control
+
+    def close(self) -> None:
+        self.container.close()
 
 
 def resolve_db_path(raw: str) -> Path:
@@ -266,6 +307,66 @@ def _whole_setting(env: Mapping[str, str], name: str, default: int, high: int, w
     return int(text)
 
 
+def _decimal_setting(
+    env: Mapping[str, str], name: str, default: float, low: float, high: float, *, open_low: bool
+) -> float:
+    text = env.get(name, "").strip()
+    if not text:
+        return default
+    if not _DECIMAL.fullmatch(text):
+        raise ValidationError(f"{name} must be a plain decimal number")
+    value = float(text)
+    if value > high or value < low or (open_low and value == low):
+        bound = "above" if open_low else "from"
+        raise ValidationError(f"{name} must be a number {bound} {low:g} up to {high:g}")
+    return value
+
+
+def _seconds_setting(env: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:
+    text = env.get(name, "").strip()
+    if not text:
+        return default
+    if not _SECONDS.fullmatch(text) or not low <= int(text) <= high:
+        raise ValidationError(f"{name} must be a whole number of seconds ({low}..{high})")
+    return int(text)
+
+
+def parse_catalog_settings(env: Mapping[str, str]) -> CatalogSettings:
+    """The official-catalog settings from the environment (blank or absent: the defaults)."""
+    defaults = CatalogSettings()
+    latitude, longitude = defaults.center_latitude, defaults.center_longitude
+    center = env.get(CATALOG_CENTER_ENV, "").strip()
+    if center:
+        parts = [part.strip() for part in center.split(",")]
+        if len(parts) != 2 or not all(_DECIMAL.fullmatch(part) for part in parts):  # noqa: PLR2004
+            raise ValidationError(f"{CATALOG_CENTER_ENV} must be 'latitude,longitude' in degrees")
+        latitude, longitude = float(parts[0]), float(parts[1])
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:  # noqa: PLR2004
+            raise ValidationError(f"{CATALOG_CENTER_ENV} is outside the valid coordinates")
+    interval = _seconds_setting(env, CATALOG_INTERVAL_ENV, defaults.interval_s, 60, 86_400)
+    max_age = _seconds_setting(env, CATALOG_MAX_AGE_ENV, defaults.max_age_s, interval, 7 * 86_400)
+    return CatalogSettings(
+        center_latitude=latitude,
+        center_longitude=longitude,
+        radius_km=_decimal_setting(
+            env, CATALOG_RADIUS_ENV, defaults.radius_km, 0, 20_000, open_low=True
+        ),
+        min_magnitude=_decimal_setting(
+            env, CATALOG_MIN_MAGNITUDE_ENV, defaults.min_magnitude, -2, 10, open_low=False
+        ),
+        global_min_magnitude=_decimal_setting(
+            env,
+            CATALOG_GLOBAL_MIN_MAGNITUDE_ENV,
+            defaults.global_min_magnitude,
+            -2,
+            10,
+            open_low=False,
+        ),
+        interval_s=interval,
+        max_age_s=max_age,
+    )
+
+
 def _random_jitter(base_s: float) -> float:
     return random.uniform(0.0, _BACKOFF_JITTER_FRACTION * base_s)
 
@@ -279,11 +380,14 @@ class _Wiring:
     uow: SqliteUnitOfWork
     clock: SystemClock
     container: Container
+    catalog_repo: SqliteCatalogRepository
+    catalog_settings: CatalogSettings
 
 
 def _open(env: Mapping[str, str]) -> _Wiring:
     retention_days = parse_retention_days(env.get(RETENTION_DAYS_ENV, ""))
     classifier_settings = parse_classifier_settings(env)
+    catalog_settings = parse_catalog_settings(env)
     path = resolve_db_path(env.get(DB_PATH_ENV, ""))
     raw_timeout = env.get(BUSY_TIMEOUT_ENV, "").strip()
     timeout = _busy_timeout_ms(raw_timeout) if raw_timeout else DEFAULT_BUSY_TIMEOUT_MS
@@ -298,6 +402,8 @@ def _open(env: Mapping[str, str]) -> _Wiring:
     topics = TopicConfigService(
         SqliteTopicConfigRepository(db), control, uow, clock, default_topic_config()
     )
+    catalog_repo = SqliteCatalogRepository(db)
+    catalog_cache = CatalogCache(catalog_repo, clock, catalog_settings)
     classifier = ClassifierService(
         items,
         sources,
@@ -307,6 +413,7 @@ def _open(env: Mapping[str, str]) -> _Wiring:
         topics,
         uow,
         clock,
+        catalog=CachedCatalogCheck(catalog_repo, clock, catalog_settings),
         settings=classifier_settings,
     )
     container = Container(
@@ -316,21 +423,28 @@ def _open(env: Mapping[str, str]) -> _Wiring:
         classifier,
         topics,
         classifier_settings,
+        catalog_cache,
         db,
     )
-    return _Wiring(db, sources, control, items, uow, clock, container)
+    return _Wiring(
+        db, sources, control, items, uow, clock, container, catalog_repo, catalog_settings
+    )
 
 
 def _purge_everything(container: Container) -> Callable[[], object]:
     """The worker's hourly housekeeping: the raw items past their retention, then the verdicts
     (and error counters) of items that no longer exist and are older than their own retention.
-    The second step runs even when the first fails, and a failure of either is raised after."""
+    Then the cached catalog events past theirs. Each step runs even when an earlier one
+    fails, and a failure is raised after."""
 
     def purge() -> object:
         try:
             return container.items.purge_expired()
         finally:
-            container.classifier.prune_history()
+            try:
+                container.classifier.prune_history()
+            finally:
+                container.catalog.purge_expired()
 
     return purge
 
@@ -338,6 +452,43 @@ def _purge_everything(container: Container) -> Callable[[], object]:
 def build_container(environ: Mapping[str, str] | None = None) -> Container:
     """Open the database (running pending migrations) and wire the services around it."""
     return _open(os.environ if environ is None else environ).container
+
+
+def _catalog_fetcher(clock: SystemClock) -> HttpFetcher:
+    """The fetcher of the catalogs: its own, confined to the two catalog hosts over https on
+    port 443, with no private-host allowance and small limits."""
+    return HttpFetcher(
+        clock,
+        limits=CATALOG_FETCH_LIMITS,
+        allowed_hosts=CATALOG_HOSTS,
+        https_only=True,
+        allowed_ports=frozenset({443}),
+    )
+
+
+def _refresher(wiring: _Wiring, fetcher: Fetcher) -> CatalogRefresher:
+    return CatalogRefresher(
+        fetcher,
+        wiring.catalog_repo,
+        wiring.uow,
+        wiring.clock,
+        wiring.catalog_settings,
+        jitter=_random_jitter,
+    )
+
+
+def build_catalog(
+    environ: Mapping[str, str] | None = None, *, fetcher: Fetcher | None = None
+) -> CatalogContainer:
+    """Wire the catalog refresher for `catalog refresh`. `fetcher` replaces the catalog fetcher
+    (tests, tooling)."""
+    wiring = _open(os.environ if environ is None else environ)
+    try:
+        chosen = fetcher or _catalog_fetcher(wiring.clock)
+        return CatalogContainer(wiring.container, _refresher(wiring, chosen), chosen)
+    except BaseException:
+        wiring.db.close()
+        raise
 
 
 def build_worker(
@@ -348,7 +499,8 @@ def build_worker(
     sleeper: Callable[[float], object] | None = None,
     tick_s: float = DEFAULT_TICK_S,
 ) -> WorkerContainer:
-    """Wire the collector and its worker. `fetcher` replaces the HTTP client (tests, tooling)."""
+    """Wire the collector and its worker. `fetcher` replaces the HTTP client (tests, tooling);
+    a replaced fetcher also leaves the catalogs unfetched, so no test or tool reaches them."""
     env = os.environ if environ is None else environ
     private_hosts = parse_private_hosts(env.get(ALLOW_PRIVATE_HOSTS_ENV, ""))
     allowed_ports = parse_allowed_ports(env.get(ALLOWED_PORTS_ENV, ""))
@@ -384,6 +536,9 @@ def build_worker(
             tick_s=tick_s,
             purge=_purge_everything(container),
             classify=container.classifier.classify_pending,
+            catalog=_refresher(wiring, _catalog_fetcher(wiring.clock)).refresh
+            if fetcher is None
+            else None,
         )
     except BaseException:
         wiring.db.close()
