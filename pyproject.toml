@@ -24,6 +24,7 @@ dev = [
     "ruff",
     "import-linter",
     "playwright>=1.64.1",
+    "pytest-timeout>=2.4.0",
 ]
 
 [build-system]
@@ -37,6 +38,9 @@ packages = ["src/social_tracker"]
 testpaths = ["tests"]
 # Real-browser checks (Playwright + Chromium) are opt-in: `uv run pytest -m browser`.
 addopts = "-ra -m 'not browser'"
+# No test may hang the run: a test still going after this many seconds fails with a stack dump
+# (on Windows the only method is "thread", which ends the whole run after printing the stacks).
+timeout = 120
 markers = ["browser: drives the web UI in a real Chromium (opt in with -m browser)"]
 
 [tool.ruff]
