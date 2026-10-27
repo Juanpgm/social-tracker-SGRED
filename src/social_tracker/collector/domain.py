@@ -36,6 +36,7 @@ class FetchErrorKind(StrEnum):
     TIMEOUT = "timeout"
     TOO_MANY_REDIRECTS = "too_many_redirects"
     INSECURE_REDIRECT = "insecure_redirect"
+    HOST_NOT_ALLOWED = "host_not_allowed"
     TOO_LARGE = "too_large"
     DECODE = "decode"
     PROTOCOL = "protocol"
@@ -50,6 +51,7 @@ _MESSAGES = {
     FetchErrorKind.TIMEOUT: "timeout",
     FetchErrorKind.TOO_MANY_REDIRECTS: "too many redirects",
     FetchErrorKind.INSECURE_REDIRECT: "redirect to plain http refused",
+    FetchErrorKind.HOST_NOT_ALLOWED: "host not allowed",
     FetchErrorKind.TOO_LARGE: "response too large",
     FetchErrorKind.DECODE: "undecodable response",
     FetchErrorKind.PROTOCOL: "protocol error",

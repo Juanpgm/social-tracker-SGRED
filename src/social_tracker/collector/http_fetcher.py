@@ -10,6 +10,9 @@ What it guarantees, per request:
   The connection then goes to the validated IP address, with the original name in the `Host`
   header and as the TLS server name, so the name is never resolved a second time and a changing
   DNS answer (rebinding) cannot lead the request elsewhere.
+- Optionally (`allowed_hosts`, `https_only`) only named hosts over `https` are contacted, the
+  first hop and every redirect hop alike; off by default. The catalog refresher uses it so that
+  a redirect can never lead it off the two catalog hosts.
 - Only the ports in `allowed_ports` (default 80, 443, 8080, 8443) are contacted, redirects
   included; a feed has no business on a database or mail port.
 - Redirects are followed by hand, at most `max_redirects`, and each hop is validated and pinned
@@ -239,6 +242,8 @@ class HttpFetcher:
         private_hosts: Iterable[str] = (),
         monotonic: Callable[[], float] = time.monotonic,
         allowed_ports: Iterable[int] | None = DEFAULT_ALLOWED_PORTS,
+        allowed_hosts: Iterable[str] | None = None,
+        https_only: bool = False,
     ) -> None:
         self._clock = clock
         self._limits = limits or FetchLimits()
@@ -247,6 +252,10 @@ class HttpFetcher:
         self._private_hosts = frozenset(host.strip().lower() for host in private_hosts)
         self._monotonic = monotonic
         self._allowed_ports = None if allowed_ports is None else frozenset(allowed_ports)
+        self._allowed_hosts = (
+            None if allowed_hosts is None else frozenset(h.strip().lower() for h in allowed_hosts)
+        )
+        self._https_only = https_only
         self._ssl_context = (
             httpx2.create_ssl_context(trust_env=False) if transport is None else None
         )
@@ -265,6 +274,7 @@ class HttpFetcher:
             for _ in range(self._limits.max_redirects + 1):
                 self._check_deadline(started)
                 target = parse_fetch_url(url)
+                self._check_destination(target, first=origin is None)
                 self._check_port(target)
                 if origin is None:
                     origin = target
@@ -288,6 +298,14 @@ class HttpFetcher:
             return self._transport
         assert self._ssl_context is not None
         return _DeadlineTransport(self._ssl_context, lambda: self._remaining(started))
+
+    def _check_destination(self, target: FetchTarget, *, first: bool) -> None:
+        """The host allowlist and the https-only rule, before anything is resolved or sent."""
+        if self._allowed_hosts is not None and target.host not in self._allowed_hosts:
+            raise FetchError(FetchErrorKind.HOST_NOT_ALLOWED)
+        if self._https_only and target.scheme != "https":
+            kind = FetchErrorKind.BAD_URL if first else FetchErrorKind.INSECURE_REDIRECT
+            raise FetchError(kind)
 
     def _check_port(self, target: FetchTarget) -> None:
         if self._allowed_ports is not None and target.port not in self._allowed_ports:
