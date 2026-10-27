@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+import typer
 
 from social_tracker.bootstrap import Container
 from social_tracker.control.service import ControlService
@@ -132,6 +133,20 @@ def test_a_usage_mistake_is_still_exit_2_not_70(cli: Cli):
     assert cli("sources", "enable", "src_zzz").exit_code == 2  # missing --reason
     assert cli("no-such-command").exit_code == 2
     assert cli("sources", "add").exit_code == 2
+
+
+def test_a_usage_error_raised_inside_a_command_is_not_reported_as_a_bug(
+    cli: Cli, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(cli_module, "build_container", explode(typer.BadParameter("bad value")))
+    result = cli("status")
+    assert result.exit_code == 2
+    assert "unexpected failure" not in result.stderr
+
+
+def test_an_explicit_exit_inside_a_command_is_kept(cli: Cli, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(cli_module, "build_container", explode(typer.Exit(3)))
+    assert cli("status").exit_code == 3
 
 
 def test_an_interrupt_is_not_reported_as_a_bug(cli: Cli, monkeypatch: pytest.MonkeyPatch):

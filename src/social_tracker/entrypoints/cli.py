@@ -27,7 +27,6 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Annotated
 
-import click
 import typer
 
 from social_tracker.bootstrap import build_container
@@ -120,7 +119,7 @@ def _guard() -> Iterator[None]:
     failure (a bug) into a one-line report, the frames without values, and exit code 70."""
     try:
         yield
-    except (typer.Exit, typer.Abort, click.ClickException):
+    except (typer.Exit, typer.Abort, typer.TyperException):
         raise  # click's own control flow: a usage error, --help, an interrupted prompt
     except DomainError as exc:
         typer.echo(f"error: {exc.message}", err=True)

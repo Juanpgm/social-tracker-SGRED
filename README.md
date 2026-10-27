@@ -25,11 +25,23 @@ Configuration comes from the process environment (no file is read). All variable
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `SOCIAL_TRACKER_DB_PATH` | SQLite database file. Missing parent directories are created. | `data/social_tracker.db` (relative to the working directory) |
+| `SOCIAL_TRACKER_DB_PATH` | SQLite database file. A leading `~` is expanded and missing parent directories are created. | `data/social_tracker.db` (relative to the working directory) |
 | `SOCIAL_TRACKER_ACTOR` | Who the audit log attributes your changes to. `--actor` overrides it. | `cli:<OS user name>` |
 | `SOCIAL_TRACKER_BUSY_TIMEOUT_MS` | How long a write waits for another process using the database (1..600000). | `5000` |
 
 A blank value counts as unset. The `data/` directory is git-ignored.
+
+**The default database depends on the working directory.** `data/social_tracker.db` is resolved
+against the directory you run the command from, so the same command run from another directory
+opens (and creates) another, empty database. The path is made absolute once, when the command
+starts, and `status` prints it on its first line (`database: ...`); check it when the data you
+expect is missing, or set `SOCIAL_TRACKER_DB_PATH` to an absolute path for anything that matters.
+
+**Permissions.** A database directory the program creates gets mode `0700` and a database file it
+creates gets mode `0600` (the `-wal` and `-shm` files next to it inherit that), and an export file
+is written `0600`, because the data is an audit trail and a list of what you monitor. An existing
+directory or file keeps whatever mode you gave it. Windows has no such modes: there a new file
+inherits the permissions of its directory, so keep the database in a directory only you can read.
 
 Sources never contain credentials. A source that needs one names it through `secret_ref`, shaped
 `<scheme>:<name>` with the scheme `env` (an environment variable), `keyring` (an OS keyring
@@ -63,7 +75,7 @@ source is enabled, and the source's own analysis switch is on. `status` counts t
 | `sources enable ID` / `sources disable ID` | Turn collection eligibility on or off. |
 | `sources delete ID` | Remove a source and its runtime state. Audit events are kept. |
 | `sources import FILE [--dry-run]` | Load sources from YAML, all or nothing. |
-| `sources export [-o FILE] [--force]` | Write every source as YAML to stdout or a file. |
+| `sources export [-o, --output FILE] [--force]` | Write every source as YAML to stdout or a file. |
 | `analysis on` / `analysis off` `[--source ID]` | Switch analysis for the system or for one source. |
 | `status` | Switches, alert threshold, source counts, collection states. |
 
@@ -72,9 +84,18 @@ source is enabled, and the source's own analysis switch is on. `status` counts t
 (`sources edit ID --set 'name="2024"'`). `--set field=null` clears an optional field. `sources add`
 takes `id`, `type` and `name` through their own arguments and options, not through `--set`.
 
-Results go to stdout. A refused operation prints one `error: ...` line on stderr and exits with
-status 1; a usage mistake (missing option, unknown command) exits with status 2. Error messages
-never repeat values you typed, so a secret pasted into the wrong place is not echoed back.
+Results go to stdout. The exit status says what happened:
+
+| Status | Meaning |
+| --- | --- |
+| `0` | Success. |
+| `1` | The operation was refused (invalid input, conflict, unknown source, storage failure...): one `error: ...` line on stderr, nothing on stdout. |
+| `2` | Usage mistake (missing option, unknown command). |
+| `70` | Unexpected failure, i.e. a bug: `error: unexpected failure (<ExceptionType>); this is a bug` and the frames where it happened on stderr, never the exception message or any variable. Please report it. |
+
+Error messages never repeat the values, keys, reasons or actors you typed, so a secret pasted into
+the wrong place is not echoed back. Paths are the exception: `status` and `sources export -o`
+print the path they use, with control and hidden characters escaped.
 
 ## Source file format
 
@@ -134,6 +155,12 @@ accepted) and at most 1,000,000 bytes; larger files are refused before they are 
 Round-trip: `sources export -o backup.yaml` followed by `sources import backup.yaml` reports every
 source as unchanged. `export` refuses to overwrite an existing file unless you pass `--force`.
 
+`export -o` writes a temporary file next to the target, flushes it to disk and only then puts it in
+place, so a full disk or a crash never leaves a half-written or empty export, and with `--force` the
+old file stays intact until the new one is complete. It never writes through a symbolic link or
+over anything that is not a regular file, and the result is readable by you only (`0600`). `import`
+likewise only reads regular files (not a pipe, a device or a directory).
+
 ## How to load sources
 
 Each recipe below works either as one `sources add` command or as an entry in an import file.
@@ -184,7 +211,9 @@ no event. Events are append-only and survive the deletion of the source they des
 
 Several CLI processes may share one database file: writers are serialised, and a writer that
 waits longer than the busy timeout fails with `error: database error: SQLITE_BUSY` and exit status
-1. Retry the command or raise `SOCIAL_TRACKER_BUSY_TIMEOUT_MS`.
+1. Retry the command or raise `SOCIAL_TRACKER_BUSY_TIMEOUT_MS`. Readers (`sources list`, `status`,
+`sources export`) never wait for a writer: each reads one consistent snapshot of the database, so
+a listing is never a mix of before and after another process's change.
 
 ## Development
 
