@@ -62,7 +62,6 @@ _IMMUTABLE_FIELDS = ("id", "type", "enabled", "created_at", "updated_at")
 _VIA_IMPORT = {"via": "import"}
 _ID_CONFLICT = "a source with this id already exists"
 _NAME_CONFLICT = "a source with this name already exists"
-_UNKNOWN_FIELD = "unknown field (not part of this source type)"
 
 
 @dataclass(frozen=True)
@@ -228,8 +227,8 @@ class SourceRegistry:
         with self._uow.transaction():
             now = self._clock.now()
             current = self._require(source_id)
-            if any(key not in type(current).model_fields for key in changes):
-                raise ValidationError(_UNKNOWN_FIELD)  # never echo a user-supplied key
+            # Unknown keys (`self`, another type's field...) are rejected by the model itself
+            # (extra="forbid") with a fixed message that never echoes the key.
             candidate = current.with_changes(changes)
             if candidate == current:
                 return SourceChange(current, changed=False)
