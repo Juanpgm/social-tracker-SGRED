@@ -31,7 +31,8 @@ from typing import Annotated
 
 import typer
 
-from social_tracker.bootstrap import build_container, build_worker
+from social_tracker.bootstrap import build_catalog, build_container, build_worker
+from social_tracker.catalog.service import CatalogStatus, Outcome, RefreshReport
 from social_tracker.classification.domain import Classification, ClassificationStats
 from social_tracker.classification.service import DEFAULT_BATCH, RECLASSIFIABLE, ClassifyReport
 from social_tracker.classification.yaml_io import MAX_CONFIG_BYTES
@@ -53,13 +54,15 @@ from social_tracker.sources.service import ImportConflictError, ImportReport
 from social_tracker.sources.yaml_io import MAX_FILE_BYTES
 
 EXIT_REFUSED = 1
-EXIT_NOTHING_ELIGIBLE = 3  # `classify run` with no source it may classify
+EXIT_NOTHING_ELIGIBLE = 3  # `classify run` with no source it may classify; `catalog refresh`
+# while global analysis is off
 EXIT_UNEXPECTED = 70  # sysexits.h EX_SOFTWARE: an internal error, i.e. a bug
 
 app = typer.Typer(
     help="Manage the sources of the social risk monitor and the analysis switches.\n\n"
     "Exit status: 0 success, 1 refused (invalid input, conflict, storage failure...), "
-    "2 usage error, 3 `classify run` found no eligible source, 70 unexpected failure (a bug).",
+    "2 usage error, 3 `classify run` found no eligible source or `catalog refresh` ran with "
+    "analysis off, 70 unexpected failure (a bug).",
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_show_locals=False,  # a traceback must never print local secrets
@@ -82,6 +85,11 @@ topics_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(topics_app, name="topics")
+catalog_app = typer.Typer(
+    help="Refresh and inspect the cache of official earthquake catalogs (USGS and EMSC).",
+    no_args_is_help=True,
+)
+app.add_typer(catalog_app, name="catalog")
 
 SourceId = Annotated[
     str,
@@ -752,6 +760,95 @@ def topics_reset(reason: Reason, actor: Actor = None) -> None:
         typer.echo(f"topics reset to the defaults: version {change.version}")
     else:
         typer.echo("topics already use the defaults")
+
+
+# ---- catalog ----
+
+_ANALYSIS_OFF = (
+    "global analysis is off: no catalog was fetched. Turn it on with `social-tracker analysis on`."
+)
+
+
+def _render_refresh(report: RefreshReport) -> str:
+    lines = []
+    for r in report.results:
+        name = r.source.value
+        if r.outcome is Outcome.REFRESHED:
+            lines.append(
+                f"{name}: refreshed ({r.new} new, {r.updated} updated, {r.unchanged} unchanged, "
+                f"{r.discarded} discarded)"
+            )
+        elif r.outcome is Outcome.DRY_RUN:
+            lines.append(
+                f"{name}: dry run ({r.new} new, {r.unchanged} unchanged, {r.discarded} discarded)"
+            )
+        elif r.outcome is Outcome.FAILED:
+            lines.append(f"{name}: failed ({escape_unprintable(r.error or 'unknown')})")
+        elif r.outcome is Outcome.SKIPPED_BUSY:
+            lines.append(f"{name}: skipped, another refresh is running")
+        else:
+            lines.append(f"{name}: {r.outcome.value}")
+    return "\n".join(lines)
+
+
+@catalog_app.command("refresh")
+def catalog_refresh(
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Fetch and parse the catalogs and report; store nothing."),
+    ] = False,
+) -> None:
+    """Fetch the USGS and EMSC catalogs now and store their events (one-shot).
+
+    Like the sources, the catalogs are fetched only while global analysis is on; with it off
+    nothing is fetched (not even with --dry-run). A manual refresh ignores the refresh
+    interval and any backoff, but not a refresh already running. Only earthquake.usgs.gov and
+    www.seismicportal.eu are contacted, over https.
+
+    Exit status: 0 when every catalog was refreshed (or is being refreshed elsewhere), 1 when
+    a catalog failed (the others are still stored), 3 when global analysis is off."""
+    with _guard(), closing(build_catalog()) as built:
+        if not built.control.global_analysis_enabled():
+            typer.echo(_ANALYSIS_OFF, err=True)
+            raise typer.Exit(EXIT_NOTHING_ELIGIBLE)
+        report = built.refresher.refresh(force=True, dry_run=dry_run)
+    typer.echo(_render_refresh(report))
+    if report.failed:
+        raise typer.Exit(EXIT_REFUSED)
+
+
+def _render_catalog_status(status: CatalogStatus) -> str:
+    newest = status.newest_event_at.isoformat() if status.newest_event_at else "none"
+    lines = [
+        f"available: {'yes' if status.available else 'no'}",
+        f"complete: {'yes' if status.complete else 'no'} (every catalog refreshed recently)",
+        f"newest event: {newest}",
+    ]
+    for s in status.sources:
+        last = s.last_success_at.isoformat() if s.last_success_at else "never"
+        line = (
+            f"{s.source.value}: {s.events} event(s); last good refresh {last}; "
+            f"failures {s.consecutive_failures}"
+        )
+        if s.next_attempt_at is not None:
+            line += f"; next attempt {s.next_attempt_at.isoformat()}"
+        if s.last_error:
+            line += f"; last error: {escape_unprintable(s.last_error)}"
+        if s.stale:
+            line += " [STALE]"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@catalog_app.command("status")
+def catalog_status() -> None:
+    """Show the catalog cache: events per catalog, the last good refresh, failures, staleness.
+
+    A catalog is STALE when its last good refresh is older than the maximum age (the
+    classification then records `catalog: unavailable`). Reads the local cache only."""
+    with _guard(), closing(build_container()) as services:
+        status = services.catalog.status()
+    typer.echo(_render_catalog_status(status))
 
 
 # ---- worker ----

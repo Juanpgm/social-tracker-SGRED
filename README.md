@@ -10,10 +10,10 @@ reads the RSS and Atom feeds you register and stores their entries as **items**.
 Only news RSS and Atom sources are collected so far: Instagram, live stream and recorded audio
 sources can be registered, but nothing collects them yet. The collected items go through a
 CPU-only **classification cascade** (topic filter, heuristic rules, recycled and near-duplicate
-check; see [Classifying content](#classifying-content)); the language-model judgment, the
-official-catalog cross-check, alerts and the GPU workers are later slices. Nothing ever publishes or sends
-data outside the system: the only outbound traffic is a read-only `GET` to the feeds you
-registered. The system starts **paused**, every source starts **disabled** and every analysis
+check, and a cross-check against the USGS and EMSC catalogs; see
+[Classifying content](#classifying-content)); the language-model judgment, alerts and the GPU
+workers are later slices. Nothing ever publishes or sends data outside the system: the only
+outbound traffic is a read-only `GET` to the feeds you registered and to the two catalogs. The system starts **paused**, every source starts **disabled** and every analysis
 flag starts **off**.
 
 ## Install
@@ -41,6 +41,12 @@ Configuration comes from the process environment (no file is read). All variable
 | `SOCIAL_TRACKER_CLASSIFICATION_RETENTION_DAYS` | How long the verdict of an item that no longer exists is kept (1..3650); the hourly retention purge forgets the older ones. | `180` |
 | `SOCIAL_TRACKER_ALLOW_PRIVATE_HOSTS` | Comma-separated host names (or IP addresses) the collector may contact although they resolve to a private address. See [Collecting content](#collecting-content). | empty (all private addresses are blocked) |
 | `SOCIAL_TRACKER_ALLOWED_PORTS` | Comma-separated destination ports the collector may contact, for feeds and every redirect hop. A value replaces the default list. | `80,443,8080,8443` |
+| `SOCIAL_TRACKER_CATALOG_CENTER` | `latitude,longitude` of the region the official-catalog cross-check cares about. | `3.4516,-76.5320` (Cali) |
+| `SOCIAL_TRACKER_CATALOG_RADIUS_KM` | Radius of that region in km (above 0, up to 20000). | `300` |
+| `SOCIAL_TRACKER_CATALOG_MIN_MAGNITUDE` | Smallest event kept inside the region (-2..10). | `2.5` |
+| `SOCIAL_TRACKER_CATALOG_GLOBAL_MIN_MAGNITUDE` | Smallest event kept anywhere in the world, for earthquakes felt elsewhere (-2..10). | `5.5` |
+| `SOCIAL_TRACKER_CATALOG_INTERVAL_S` | How often the worker refreshes the catalogs, in seconds (60..86400). | `600` |
+| `SOCIAL_TRACKER_CATALOG_MAX_AGE_S` | A cache whose last good refresh is older than this is stale and the check says `unavailable` (from the interval up to 604800). | `7200` |
 | `SOCIAL_TRACKER_MAX_ITEMS_PER_SOURCE` | Most items one source may hold at a time. Over it, new entries are dropped and counted as `source_quota`. | `100000` |
 | `SOCIAL_TRACKER_MAX_BYTES_PER_SOURCE` | Most bytes (title, text and raw entry) one source may hold. Over it, new entries are dropped and counted as `source_quota`. | `536870912` (512 MiB) |
 | `SOCIAL_TRACKER_MAX_BYTES_PER_FETCH` | Most bytes of items one fetch may add. Over it, the rest of the feed is dropped and counted as `fetch_quota`. | `16777216` (16 MiB) |
@@ -114,6 +120,8 @@ resets analysis and then makes its one pass.
 | `run [--once [--no-reset-analysis]] [--interval-tick SECONDS]` | Run the collection worker (see [Collecting content](#collecting-content)). |
 | `items list [--source ID] [--limit N] [--ids]` | The collected items, newest first (`--ids` shows each id, which `classify show` takes). |
 | `items search QUERY [--limit N] [--ids]` | Search titles and texts by words. |
+| `catalog refresh [--dry-run]` | Fetch the USGS and EMSC catalogs now and store their events (one-shot; `--dry-run` fetches and reports, stores nothing). Only while global analysis is on: exit status `3` otherwise. |
+| `catalog status` | The catalog cache: events per catalog, last good refresh, failures, `[STALE]` marks. |
 | `classify run [--limit N]` | Classify the pending items of the eligible sources (CPU only). The worker does it after every collection pass. Exit status `3` when no source is eligible. |
 | `classify reclassify --status S [--limit N]` | Send the items at status `out_of_scope` (after a vocabulary change) or `classification_failed` back to the queue; the next run classifies them again. |
 | `classify show ITEM_ID` | The verdict of one item: label, confidence, deciding stage, rationale, flags. |
@@ -134,7 +142,7 @@ Results go to stdout. The exit status says what happened:
 | `0` | Success. |
 | `1` | The operation was refused (invalid input, conflict, unknown source, storage failure...): one `error: ...` line on stderr, nothing on stdout. |
 | `2` | Usage mistake (missing option, unknown command). |
-| `3` | `classify run` found no eligible source (global analysis off, or no enabled source with its own switch on), so it had nothing to do. It is not a failure: a run with eligible sources and nothing pending exits `0`. |
+| `3` | `classify run` found no eligible source (global analysis off, or no enabled source with its own switch on), so it had nothing to do; or `catalog refresh` ran while global analysis is off. It is not a failure: a run with eligible sources and nothing pending exits `0`. |
 | `70` | Unexpected failure, i.e. a bug: `error: unexpected failure (<ExceptionType>); this is a bug` and the frames where it happened on stderr, never the exception message or any variable. Please report it. |
 
 Error messages never repeat the values, keys, reasons or actors you typed, so a secret pasted into
@@ -308,7 +316,8 @@ Pages work without JavaScript; with it, the row buttons update in place.
 
 This is an internal observation system: it only READS the feeds you register. Nothing is ever
 published, posted or sent, and the only outbound traffic is a `GET` to the URL of an enabled
-source. It runs on the CPU only.
+source and to the two official earthquake catalogs (see [Classifying
+content](#classifying-content)). It runs on the CPU only.
 
 ```bash
 uv run social-tracker run --once --no-reset-analysis
@@ -458,10 +467,10 @@ the one seen first first; `classify run` does the same on demand):
 2. **Rules.** Weighted heuristic signals (table below) become a preliminary label and a
    confidence.
 3. **Recycled and near-duplicate check.** See below.
-4. The official-catalog cross-check and the language-model judgment are later units. The verdict
-   already records `catalog: unavailable` for earthquake items (the check runs before the item's
-   write transaction opens, so a slow catalog never holds the database), and marks what the LLM
-   will have to settle (`needs_llm`, with a `priority`).
+4. **Official-catalog cross-check** (earthquake items only), described below. It reads a local
+   cache and runs before the item's write transaction opens, so a slow catalog never holds the
+   database. The language-model judgment is a later unit: the verdict marks what the LLM will
+   have to settle (`needs_llm`, with a `priority`).
 
 **Labels:** `unintentional_rumor`, `deliberate_disinformation`, `recycled_content`, `no_risk`,
 `unclassified`, `out_of_scope`. A verdict has a label, a confidence from 0 to 1, the stage that
@@ -506,6 +515,47 @@ second opinion for that.
 | `obfuscated_text` | unclassified | 0.30 | mixed scripts in one word, invisible filler characters, a word spelled letter by letter or a digit inside a word: suspicion only, no label |
 | `catalog_mismatch` | unintentional_rumor | 0.30 | the official-catalog cross-check contradicts the claimed magnitude (difference of 1.0 or more against the event nearest in time) or finds no event in the time window; set by the check, not read from the text. Too weak to decide a label alone: it adds to other rumor evidence and sends a clean-looking report to review |
 
+**The official-catalog cross-check** (stage 4). For an in-scope earthquake item the cascade
+compares what the text claims with what two official catalogs recorded: the USGS and the EMSC
+FDSN event services (`earthquake.usgs.gov`, `www.seismicportal.eu`), and no other host. The
+Servicio Geológico Colombiano is excluded: it is never fetched and has no configuration. The
+cascade itself never touches the network: the worker refreshes a local cache of events (every
+10 minutes by default, `catalog refresh` does it on demand) and the check reads only that cache,
+before the item's write transaction opens.
+
+- **What is read from the text:** a magnitude (`magnitud 7.5`, `M6.2`, `temblor de 5,8`,
+  `6.1 grados Richter`, ranges, several magnitudes; a number above 10 or with a unit after it is
+  not a magnitude), a time (`hace un momento`, `hace 5 minutos`, `a las 3:15 pm`, read as
+  Colombia time unless it says UTC; a date other than the publication day, `ayer` or `hace
+  años` is not checked) and a place. Only numbers, an instant and a plain lowercase place name
+  are kept; nothing of the text is interpreted.
+- **What is compared:** the event nearest in time to the claimed instant, within 6 hours, either
+  within 300 km of Cali (centre and radius are configurable) or of magnitude 5.5 or more anywhere
+  (an earthquake felt elsewhere). The same earthquake in both catalogs counts once, and the claim
+  is compared with the closest of its magnitudes.
+- **The outcome**, recorded as `catalog:` in the verdict: `consistent` (the difference is under
+  1.0), `mismatch` (1.0 or more, or no event in the window while both catalogs are fresh),
+  `unavailable` (no catalog refreshed successfully within the maximum age, or the cache is
+  empty, or the event is absent while a catalog is stale), `no_claim` (no magnitude, or a time the
+  cache cannot answer) and `not_checked` (out of scope). `unavailable` never blocks a
+  classification and never raises risk by itself.
+- **What it changes:** a `mismatch` adds the `catalog_mismatch` signal (unintentional_rumor,
+  0.30): it adds to the other rumor evidence and sends a clean-looking report to review, and it
+  cannot decide a label alone. A `consistent` claim lowers an `official_attribution_unlinked`
+  signal to half its weight; it never creates a label or a signal by itself.
+- **The cache:** `catalog status` shows events per catalog, the last good refresh, failures and
+  staleness. A failed catalog (timeout, DNS, 4xx/5xx, `Retry-After`, an answer that is not what
+  was asked for, a redirect off the two hosts) is never an error of the run: it is retried with
+  exponential backoff (60 s doubling, at most an hour) and the other catalog is still stored.
+  Events older than 14 days are purged by the hourly housekeeping. Like the sources, the catalogs
+  are fetched only while global analysis is on: `analysis off` stops the refresh, and `catalog
+  refresh` refuses to run (exit status `3`). The cache keeps the origin time, position, magnitude
+  and place of each event; the place is catalog text, stored as data and escaped where shown.
+
+```bash
+uv run social-tracker catalog status
+```
+
 A link counts only if it is a real one: it must start with `http://`, `https://` or `www.` and its
 host (up to the first `/`, `?`, `#` or `:`) must be the configured domain or a subdomain of it, on a
 label boundary. A login in the address (`https://official-domain.example@evil.example/`), the
@@ -531,7 +581,7 @@ benign evidence, `no_risk` cannot win however strong that evidence is: "temblor:
 edificios colapsaron, evacuen se registro un sismo de magnitud 5" stays a suspected rumor, is marked
 conflicting and goes to the LLM with a raised priority. The price is that a real report that cites
 an official body WITHOUT a link (`official_attribution_unlinked` fires) is queued too, until the
-catalog cross-check of a later unit can confirm it.
+catalog cross-check can confirm it (a `consistent` claim halves that signal).
 
 **Credibility is a prior, never a label.** The source's credibility (1 to 5, 3 by default) moves
 the confidence of a label the evidence already chose by 0.03 per step away from 3: a more credible
@@ -704,7 +754,8 @@ The architecture is hexagonal. Domain modules are pure, services depend on ports
 `social_tracker.bootstrap` is the composition root that wires the SQLite adapters into the
 services. Entrypoints such as the CLI never import persistence; `lint-imports` enforces it.
 The collector follows the same rules, and its fetcher adapter (`collector/http_fetcher.py`) is the
-only module allowed to import an HTTP client or sockets: the web UI has no outbound path at all
+only module allowed to import an HTTP client or sockets (the catalog refresher reuses it, with a
+host allowlist, and has no I/O of its own): the web UI has no outbound path at all
 and reaches the worker side only through the composition root. The classification core
 (every module of `classification/` except `service`, `ports` and `yaml_io`, whichever is added
 later) is pure and deterministic: an import contract forbids it storage, file, logging, thread and

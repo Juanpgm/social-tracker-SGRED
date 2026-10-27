@@ -44,7 +44,8 @@ README = Path(__file__).resolve().parent.parent / "README.md"
 FENCE = re.compile(r"```(\w+)\n(.*?)```", re.DOTALL)
 FLAG = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
 SUBCOMMAND = re.compile(
-    r"(?<![\w-])(?:(sources|analysis|items|classify|topics) ([a-z][a-z-]*)|(status|serve|run))\b"
+    r"(?<![\w-])(?:(sources|analysis|items|classify|topics|catalog) ([a-z][a-z-]*)"
+    r"|(status|serve|run))\b"
 )
 FILE_SUFFIXES = {"-wal", "-shm"}  # SQLite sidecar files, written like flags in the prose
 CONTINUATION = "\\\n"

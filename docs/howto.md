@@ -61,3 +61,14 @@ holds audio files. Give one of them, not both.
 
 **Limits.** A feed is checked at most every 1 second (default 1800). Files are processed in batches, not in real time. Common audio formats such as MP3, M4A,
 WAV, OGG and FLAC are expected; a file that cannot be decoded is skipped.
+
+## Official earthquake catalogs
+
+Not a source: the classifier also checks the magnitude and time an earthquake item claims against
+the USGS and EMSC catalogs, and nothing else is fetched for it. The worker refreshes a local cache
+of their events while global analysis is on (`social-tracker analysis on`); `social-tracker catalog
+refresh` does it once on demand and `social-tracker catalog status` shows the cache and whether it
+is stale. A `mismatch` adds evidence of risk and a `consistent` claim lowers an unlinked
+attribution; when the catalogs cannot be reached the verdict says `catalog: unavailable` and
+nothing else changes. The region (default Cali, 300 km) and the refresh interval are set with the
+`SOCIAL_TRACKER_CATALOG_*` variables listed in the README.
