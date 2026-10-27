@@ -96,6 +96,10 @@ class SqliteControlRepository:
                 ),
             )
 
+    def delete_source_state(self, source_id: str) -> None:
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM source_state WHERE source_id = ?", (source_id,))
+
     def append_control_event(self, event: ControlEvent) -> None:
         if not isinstance(event, ControlEvent):
             raise ValidationError("event must be a ControlEvent")

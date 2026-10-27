@@ -37,6 +37,10 @@ class InMemoryControlRepository:
         with self._lock:
             self._states[state.source_id] = state
 
+    def delete_source_state(self, source_id: str) -> None:
+        with self._lock:
+            self._states.pop(source_id, None)
+
     def append_control_event(self, event: ControlEvent) -> None:
         if not isinstance(event, ControlEvent):
             raise ValidationError("event must be a ControlEvent")

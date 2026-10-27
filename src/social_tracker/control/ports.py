@@ -35,6 +35,16 @@ class ControlRepository(Protocol):
         """Insert or replace the state of `state.source_id`."""
         ...
 
+    def delete_source_state(self, source_id: str) -> None:
+        """Forget the runtime state of `source_id`; a no-op if there is none (idempotent).
+
+        Called when a source is deleted. Repositories stay independent (no cross-repository
+        foreign key), so the application service removes the state in the same joined
+        `Database.transaction()` as the source. Control events are NOT touched: they are the
+        audit trail and outlive the source (SR-9).
+        """
+        ...
+
     def append_control_event(self, event: ControlEvent) -> None: ...
 
     def list_control_events(self, source_id: str | None = None) -> list[ControlEvent]:

@@ -69,6 +69,9 @@ CONTROL_MUST_BE_CAUGHT_BY = {
         "test_non_string_key_is_rejected",
     ],
     "state_insert_only": ["test_save_is_an_upsert"],
+    "delete_state_not_idempotent": ["test_delete_source_state_is_idempotent"],
+    "delete_state_wipes_every_state": ["test_delete_source_state_removes_only_that_state"],
+    "delete_state_does_nothing": ["test_delete_source_state_removes_only_that_state"],
     "upsert_skips_state": ["test_save_is_an_upsert"],
     "upsert_skips_failures": ["test_save_is_an_upsert"],
     "upsert_skips_next_run_at": ["test_save_is_an_upsert"],
@@ -143,6 +146,10 @@ EXPECTED_FAILURE: dict[tuple[str, str], tuple[type[BaseException], str]] = {
     ("settings_without_validation", "test_non_string_key_is_rejected"): (
         DID_NOT_RAISE,
         "DID NOT RAISE.*ValidationError",
+    ),
+    ("delete_state_not_idempotent", "test_delete_source_state_is_idempotent"): (
+        NotFoundError,
+        "source not found",
     ),
     ("state_insert_only", "test_save_is_an_upsert"): (ConflictError, "unique constraint violated"),
     ("upsert_skips_next_run_at", "test_save_is_an_upsert"): (

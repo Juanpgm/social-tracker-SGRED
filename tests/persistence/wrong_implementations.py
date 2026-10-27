@@ -178,6 +178,25 @@ class UpsertSkipsNextRunAt(SqliteControlRepository):
     save_source_state = _upsert_state_without("next_run_at")
 
 
+class DeleteStateNotIdempotent(SqliteControlRepository):
+    def delete_source_state(self, source_id: str) -> None:
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM source_state WHERE source_id = ?", (source_id,))
+            if cursor.rowcount == 0:
+                raise NotFoundError("source not found")
+
+
+class DeleteStateWipesEveryState(SqliteControlRepository):
+    def delete_source_state(self, source_id: str) -> None:
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM source_state")
+
+
+class DeleteStateDoesNothing(SqliteControlRepository):
+    def delete_source_state(self, source_id: str) -> None:
+        return None
+
+
 class StateRequiresRegisteredSource(SqliteControlRepository):
     def save_source_state(self, state) -> None:
         if not self._db.query("SELECT 1 FROM sources WHERE id = ?", (state.source_id,)):
@@ -263,6 +282,9 @@ CONTROL_WRONG: dict[str, Callable[[Path], object]] = {
     "upsert_skips_state": lambda p: _plain(p, UpsertSkipsState),
     "upsert_skips_failures": lambda p: _plain(p, UpsertSkipsFailures),
     "upsert_skips_next_run_at": lambda p: _plain(p, UpsertSkipsNextRunAt),
+    "delete_state_not_idempotent": lambda p: _plain(p, DeleteStateNotIdempotent),
+    "delete_state_wipes_every_state": lambda p: _plain(p, DeleteStateWipesEveryState),
+    "delete_state_does_nothing": lambda p: _plain(p, DeleteStateDoesNothing),
     "state_requires_registered_source": lambda p: _plain(p, StateRequiresRegisteredSource),
     "analysis_defaults_to_true": lambda p: _plain(p, DefaultsToTrue),
     "exposes_purge": lambda p: _plain(p, ExposesPurge),

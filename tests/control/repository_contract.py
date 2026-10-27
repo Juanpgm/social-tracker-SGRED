@@ -200,6 +200,41 @@ class ControlRepositoryContract:
         repo.save_source_state(ghost)
         assert repo.get_source_state("src_ghost") == ghost
 
+    # ---- delete_source_state (SR-9 cleanup, called by the service when a source is deleted) ----
+
+    def test_delete_source_state_removes_only_that_state(self, repo: ControlRepository):
+        keep = SourceState("src_two", CollectionState.FAILED, 5)
+        repo.save_source_state(SourceState("src_one", CollectionState.IDLE))
+        repo.save_source_state(keep)
+        assert repo.delete_source_state("src_one") is None
+        assert repo.get_source_state("src_one") is None
+        assert repo.get_source_state("src_two") == keep
+
+    def test_delete_source_state_is_idempotent(self, repo: ControlRepository):
+        repo.delete_source_state("src_never_saved")  # absent: a no-op, not an error
+        repo.save_source_state(SourceState("src_one", CollectionState.IDLE))
+        repo.delete_source_state("src_one")
+        repo.delete_source_state("src_one")
+        repo.delete_source_state("")
+        assert repo.get_source_state("src_one") is None
+
+    def test_delete_source_state_keeps_the_audit_trail_and_settings(self, repo: ControlRepository):
+        repo.set_setting("note", "kept")
+        repo.append_control_event(event("source_deleted", "src_one"))
+        repo.append_control_event(event("paused"))
+        repo.save_source_state(SourceState("src_one", CollectionState.IDLE))
+        repo.delete_source_state("src_one")
+        assert [e.kind for e in repo.list_control_events("src_one")] == ["source_deleted"]
+        assert len(repo.list_control_events()) == 2
+        assert repo.get_setting("note") == "kept"
+
+    def test_a_state_can_be_saved_again_after_it_was_deleted(self, repo: ControlRepository):
+        repo.save_source_state(SourceState("src_one", CollectionState.FAILED, 5))
+        repo.delete_source_state("src_one")
+        fresh = SourceState("src_one", CollectionState.IDLE)
+        repo.save_source_state(fresh)
+        assert repo.get_source_state("src_one") == fresh
+
     def test_saving_state_does_not_touch_settings_or_events(self, repo: ControlRepository):
         repo.append_control_event(event("a_kind"))
         repo.save_source_state(SourceState("src_one", CollectionState.IDLE))
@@ -296,6 +331,7 @@ class ControlRepositoryContract:
             "set_setting",
             "get_source_state",
             "save_source_state",
+            "delete_source_state",
             "append_control_event",
             "list_control_events",
         } == PORT_SURFACE
