@@ -275,3 +275,15 @@ def test_ordinary_sentences_come_out_as_they_went_in_unless_a_secret_word_has_a_
     )
     if not risky:
         assert make_excerpt("", text) == text
+
+
+def test_a_long_run_of_one_letter_with_a_capital_and_a_digit_is_not_random():
+    text = "a" * 24 + "B1"  # three classes and 26 characters, but no entropy
+    assert make_excerpt("", text) == text
+
+
+@pytest.mark.parametrize("text", ["k8x2vqp9mn4tr7za1bc3de5f", "K8X2VQP9MN4TR7ZA1BC3DE5F"])
+def test_two_classes_are_not_enough_to_call_a_run_a_key(text):
+    """Lowercase and digits (or capitals and digits) only: ids, hashes and slugs look like this."""
+    assert len(text) == 24
+    assert make_excerpt("", text) == text
