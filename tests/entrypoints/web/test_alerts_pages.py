@@ -78,7 +78,8 @@ def test_the_list_is_newest_first_one_row_per_alert(filled: Web):
     page = filled.client.get("/alerts").text
     ids = rows_of(page)
     assert len(ids) == 4
-    order = [a for a in re.findall(r"<td[^>]*>(\d\d\d\d-\d\d-\d\d \d\d:\d\d) UTC</td>", page)]
+    order = re.findall(r'class="fetched">Fetched (\d\d\d\d-\d\d-\d\d \d\d:\d\d) UTC<', page)
+    assert len(order) == 4
     assert order == sorted(order, reverse=True)
 
 
@@ -390,10 +391,10 @@ def test_the_panel_never_calls_the_model(web: Web):
     assert calls == []
 
 
-def test_the_front_page_keeps_the_worker_placeholders(web: Web):
+def test_the_front_page_has_no_placeholder_for_the_worker_any_more(web: Web):
     text = visible_text(web.client.get("/").text)
-    assert "GPU and model: n/a - no worker running" in text
-    assert "Stream lag: n/a - no worker running" in text
+    assert "n/a - no worker running" not in text
+    assert "Last worker pass:" in text
 
 
 def test_the_query_of_a_link_is_encoded_not_spliced(many: Web):
@@ -440,7 +441,7 @@ def test_the_list_has_a_language_landmarks_a_status_region_and_labelled_controls
 
 def test_the_table_has_column_headers_and_every_button_names_its_alert(filled: Web):
     page = filled.client.get("/alerts").text
-    assert page.count('<th scope="col">') == 9
+    assert page.count('<th scope="col">') == 10  # the tags got a column of their own
     for label in re.findall(r'<button[^>]*aria-label="([^"]+)"', page):
         assert "alert" in label
     assert 'role="button"' not in page

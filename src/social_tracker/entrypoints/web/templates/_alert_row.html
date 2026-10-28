@@ -1,11 +1,12 @@
 <tr id="alert-{{ a.id }}">
 <td class="sev sev-{{ a.severity.value }}">{{ a.severity.value }}</td>
-<td>{{ a.label.value }}</td>
+<td>{{ a.label.value }}{% if a.evidence.provisional %} <span class="flag">pending model</span>{% endif %}{% if a.downgraded_by_model %} <span class="flag flag-warn">downgraded by the model</span>{% endif %}</td>
 <td>{{ "%.2f"|format(a.confidence) }}</td>
 <td>{{ a.status.value }}{% if a.withdrawn %} (withdrawn){% endif %}</td>
-<td>{{ a.occurrences }}</td>
-<td>{{ a.last_seen_at.strftime("%Y-%m-%d %H:%M") }} UTC</td>
+<td>{{ a.occurrences }}<br><span class="hint">{{ a.linked_sources|length }} source{{ "" if a.linked_sources|length == 1 else "s" }}</span></td>
+<td class="when"><span class="fetched">Fetched {{ a.last_seen_at|local(tz) }}</span><br><span class="published">Published {{ a.published_at|local(tz) }}</span></td>
 <td>{{ a.source_name }}{% if a.source_id in removed %} (source removed){% endif %}</td>
+<td class="tags">{% for tag in a.tags %}<a href="/alerts?tag={{ tag }}">{{ tag }}</a>{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</td>
 <td class="excerpt">{{ a.excerpt }}</td>
 <td class="actions">
 <a href="/alerts/{{ a.id }}" aria-label="Details of the {{ a.label.value }} alert from {{ a.source_name }}">Details</a>

@@ -29,15 +29,32 @@ from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import typer
 
-from social_tracker.alerts.domain import Alert, AlertFilter, AlertPage, SyncReport, parse_moment
+from social_tracker.alerts.domain import (
+    FIRST_SEEN,
+    LAST_SEEN,
+    WITHDRAWN,
+    Alert,
+    AlertFilter,
+    AlertPage,
+    AlertStatus,
+    Severity,
+    SyncReport,
+    parse_moment,
+)
 from social_tracker.alerts.service import AlertDetail
 from social_tracker.bootstrap import build_catalog, build_container, build_llm, build_worker
 from social_tracker.catalog.service import CatalogStatus, Outcome, RefreshReport
 from social_tracker.classification.calibration import LABEL_ORDER
-from social_tracker.classification.domain import Classification, ClassificationStats, Label
+from social_tracker.classification.domain import (
+    RISK_LABELS,
+    Classification,
+    ClassificationStats,
+    Label,
+)
 from social_tracker.classification.service import DEFAULT_BATCH, RECLASSIFIABLE, ClassifyReport
 from social_tracker.classification.yaml_io import MAX_CONFIG_BYTES
 from social_tracker.collector.service import CollectOutcome
@@ -60,6 +77,7 @@ from social_tracker.llm.domain import EscalationCounts, EscalationState, Judgmen
 from social_tracker.llm.service import EscalationReport, LlmStatus, PingResult
 from social_tracker.shared.errors import DomainError, ValidationError
 from social_tracker.shared.text import escape_unprintable
+from social_tracker.shared.timezone import format_compact, format_iso
 from social_tracker.sources.service import ImportConflictError, ImportReport
 from social_tracker.sources.yaml_io import MAX_FILE_BYTES
 
@@ -900,7 +918,19 @@ def _alert_line_source(alert: Alert, removed: frozenset[str]) -> str:
     return f"{escape_unprintable(alert.source_name)}{gone}"
 
 
-def _render_alerts(page: AlertPage, removed: frozenset[str]) -> str:
+def _alert_notes(alert: Alert) -> str:
+    """What a person should notice before reading the row, as bracketed words at its end."""
+    notes = []
+    if alert.evidence.provisional:
+        notes.append("[pending model]")
+    if alert.downgraded_by_model:
+        notes.append("[downgraded by model]")
+    if alert.withdrawn:
+        notes.append("[withdrawn]")
+    return ("  " + " ".join(notes)) if notes else ""
+
+
+def _render_alerts(page: AlertPage, removed: frozenset[str], zone: ZoneInfo) -> str:
     alerts = page.alerts
     id_width = max([len("ID"), *(len(a.id) for a in alerts)])
     sev_width = max([len("SEVERITY"), *(len(a.severity.value) for a in alerts)])
@@ -917,8 +947,8 @@ def _render_alerts(page: AlertPage, removed: frozenset[str]) -> str:
         lines.append(
             f"{a.id:<{id_width}}  {a.severity.value:<{sev_width}}  {a.label.value:<{label_width}}  "
             f"{a.status.value:<{status_width}}  {a.confidence:.2f}  {a.occurrences:>3}  "
-            f"{a.last_seen_at:%Y-%m-%dT%H:%M}  {_alert_line_source(a, removed)}  "
-            f"{escape_unprintable(flat)}"
+            f"{format_compact(a.last_seen_at, zone)}  {_alert_line_source(a, removed)}  "
+            f"{escape_unprintable(flat)}{_alert_notes(a)}"
         )
     shown_to = page.offset + len(alerts)
     if page.has_next:
@@ -927,6 +957,13 @@ def _render_alerts(page: AlertPage, removed: frozenset[str]) -> str:
             f"--offset {shown_to} for the next page"
         )
     return "\n".join(lines)
+
+
+def _choice(what: str, value: str | None, valid: list[str]) -> str | None:
+    """A value among `valid`, or a refusal that lists them (and does not echo the input)."""
+    if value is not None and value not in valid:
+        raise ValidationError(f"unknown {what}; use one of: {', '.join(valid)}")
+    return value
 
 
 @alerts_app.command("list")
@@ -956,34 +993,58 @@ def alerts_list(
     ] = None,
     since: Annotated[
         str | None,
-        typer.Option("--since", help="Latest occurrence from this day (2026-03-01) or moment."),
+        typer.Option("--since", help="From this day (2026-03-01) or moment, in your time zone."),
     ] = None,
     until: Annotated[
         str | None,
-        typer.Option("--until", help="Latest occurrence up to this day (inclusive) or moment."),
+        typer.Option("--until", help="Up to this day (inclusive) or moment, in your time zone."),
     ] = None,
+    when: Annotated[
+        str,
+        typer.Option(
+            "--when", help="The timestamp --since and --until apply to: first_seen or last_seen."
+        ),
+    ] = LAST_SEEN,
+    hide_provisional: Annotated[
+        bool,
+        typer.Option(
+            "--hide-provisional",
+            help="Leave out the alerts whose verdict still waits for the model.",
+        ),
+    ] = False,
+    include_withdrawn: Annotated[
+        bool,
+        typer.Option("--include-withdrawn", help="Show the withdrawn alerts next to the others."),
+    ] = False,
     limit: Annotated[int, typer.Option("--limit", min=1, max=200, help=_PAGE_HELP)] = 25,
     offset: Annotated[int, typer.Option("--offset", min=0, help="Skip this many alerts.")] = 0,
 ) -> None:
-    """List alerts, newest first (withdrawn ones only with --status withdrawn).
+    """List alerts, newest first (withdrawn ones only with --status withdrawn or
+    --include-withdrawn).
 
-    Times are UTC. An alert whose source was deleted keeps its name and is marked."""
+    Times are in your time zone (SOCIAL_TRACKER_TIMEZONE, default America/Bogota); a date or
+    moment without an offset is read in it, one with an offset (2026-03-01T10:00:00-05:00) keeps
+    it. An alert whose source was deleted keeps its name and is marked."""
     with _guard(), closing(build_container()) as services:
+        zone = services.timezone
         flt = AlertFilter(
-            severity=severity,
-            label=label,
+            severity=_choice("severity", severity, [s.value for s in Severity]),  # type: ignore[arg-type]
+            label=_choice("label", label, [x.value for x in LABEL_ORDER if x in RISK_LABELS]),  # type: ignore[arg-type]
             source_id=source,
-            status=status,
+            status=_choice("status", status, [*(s.value for s in AlertStatus), WITHDRAWN]),
             tag=tag,
-            since=parse_moment(since, end=False) if since is not None else None,
-            until=parse_moment(until, end=True) if until is not None else None,
+            since=parse_moment(since, end=False, zone=zone) if since is not None else None,
+            until=parse_moment(until, end=True, zone=zone) if until is not None else None,
+            when=_choice("timestamp", when, [FIRST_SEEN, LAST_SEEN]) or LAST_SEEN,
+            hide_provisional=hide_provisional,
+            include_withdrawn=include_withdrawn,
         )
         page = services.alerts.list(flt, limit=limit, offset=offset)
         removed = services.alerts.removed_sources({a.source_id for a in page.alerts})
-    typer.echo(_render_alerts(page, removed) if page.alerts else _NO_ALERTS)
+    typer.echo(_render_alerts(page, removed, zone) if page.alerts else _NO_ALERTS)
 
 
-def _render_alert(detail: AlertDetail) -> str:
+def _render_alert(detail: AlertDetail, zone: ZoneInfo) -> str:
     a, evidence = detail.alert, detail.alert.evidence
     removed = _SOURCE_REMOVED if a.source_id in detail.removed_sources else ""
     signals = ", ".join(f"{name} ({weight:g})" for name, _, weight in evidence.signals)
@@ -996,12 +1057,13 @@ def _render_alert(detail: AlertDetail) -> str:
     ]
     if a.withdrawn and a.withdrawn_at is not None:
         reason = escape_unprintable(a.withdrawn_reason or "")
-        lines.append(f"withdrawn: {a.withdrawn_at.isoformat()} ({reason})")
+        lines.append(f"withdrawn: {format_iso(a.withdrawn_at, zone)} ({reason})")
     lines += [
         f"occurrences: {a.occurrences}",
         f"source: {escape_unprintable(a.source_name)} ({a.source_id}){removed}",
-        f"first seen: {a.first_seen_at.isoformat()}",
-        f"last seen: {a.last_seen_at.isoformat()}",
+        f"published: {format_iso(a.published_at, zone) if a.published_at else 'unknown'}",
+        f"first seen: {format_iso(a.first_seen_at, zone)}",
+        f"last seen: {format_iso(a.last_seen_at, zone)}",
         f"rationale: {escape_unprintable(a.rationale)}",
         f"deciding stage: {evidence.stage}",
         f"catalog: {evidence.catalog_status}",
@@ -1013,6 +1075,10 @@ def _render_alert(detail: AlertDetail) -> str:
         lines.append(f"model: {model} (prompt {version})")
     if evidence.provisional:
         lines.append("provisional: yes, the verdict still waits for the language model")
+    if a.downgraded_by_model:
+        lines.append("downgraded by the model: yes, it settled a lower verdict; still open")
+    if a.overflow:
+        lines.append(f"counted without keeping the item: {a.overflow}")
     lines += [
         f"tags: {', '.join(a.tags) or 'none'}",
         f"excerpt: {escape_unprintable(a.excerpt)}",
@@ -1023,13 +1089,16 @@ def _render_alert(detail: AlertDetail) -> str:
         state = "active" if m.active else f"no longer qualifies ({m.label.value})"
         lines.append(
             f"  {m.item_id}  {escape_unprintable(m.source_name)}{gone}  "
-            f"{m.occurred_at:%Y-%m-%dT%H:%M}  {m.confidence:.2f}  {state}"
+            f"{format_compact(m.occurred_at, zone)}  {m.confidence:.2f}  {state}"
         )
     lines.append("trail:")
+    if detail.events_hidden:
+        lines.append(f"  ... {detail.events_hidden} more entries not shown")
     for e in detail.events:
         change = f" ({e.before} -> {e.after})" if e.before or e.after else ""
+        absorbed = " [from an absorbed alert]" if e.from_absorbed else ""
         lines.append(
-            f"  {e.at.isoformat()}  {e.kind.value}{change}  "
+            f"  {format_iso(e.at, zone)}  {e.kind.value}{change}{absorbed}  "
             f"{escape_unprintable(e.actor)}: {escape_unprintable(e.reason)}"
         )
     return "\n".join(lines)
@@ -1040,7 +1109,8 @@ def alerts_show(alert_id: AlertId) -> None:
     """Show an alert: what it says, the evidence behind it, the items and its audit trail."""
     with _guard(), closing(build_container()) as services:
         detail = services.alerts.detail(alert_id)
-    typer.echo(_render_alert(detail))
+        zone = services.timezone
+    typer.echo(_render_alert(detail, zone))
 
 
 def _mark(alert_id: str, verb: str, reason: str, actor: str | None) -> None:
@@ -1115,9 +1185,11 @@ def alerts_rebuild() -> None:
 
 @alerts_app.command("stats")
 def alerts_stats() -> None:
-    """Count the alerts: by status and by severity."""
+    """Count the alerts (by status and by severity) and say how current they are."""
     with _guard(), closing(build_container()) as services:
         counts = services.alerts.counts()
+        live = services.control.liveness()
+        zone = services.timezone
     lines = [f"alerts: {counts.active} ({counts.new} new, {counts.withdrawn} withdrawn)"]
     for title, pairs in (
         ("by status", counts.by_status),
@@ -1127,6 +1199,24 @@ def alerts_stats() -> None:
         if pairs:
             lines.append(f"{title}:")
             lines += [f"  {name} {count}" for name, count in pairs]
+    threshold = format_confidence(live.alert_min_confidence)
+    if live.synced_threshold is None:
+        applied = "no pass has applied it yet"
+    elif live.synced_threshold == live.alert_min_confidence:
+        applied = "applied"
+    else:
+        applied = "not applied yet"
+    refreshed = (
+        format_iso(live.last_alert_refresh_at, zone) if live.last_alert_refresh_at else "never"
+    )
+    lines += [
+        f"threshold: {threshold} ({applied})",
+        f"last refresh: {refreshed}",
+        f"downgraded by the model: {counts.downgraded}",
+        "evaluation failures:",
+        f"  retrying: {counts.retrying}",
+        f"  parked: {counts.parked}",
+    ]
     typer.echo("\n".join(lines))
 
 

@@ -12,7 +12,13 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from social_tracker.bootstrap import BUSY_TIMEOUT_ENV, DB_PATH_ENV, Container, build_container
+from social_tracker.bootstrap import (
+    BUSY_TIMEOUT_ENV,
+    DB_PATH_ENV,
+    TIMEZONE_ENV,
+    Container,
+    build_container,
+)
 from social_tracker.control.domain import ControlEvent
 from social_tracker.entrypoints.web.app import create_app
 from social_tracker.persistence.control_repo import SqliteControlRepository
@@ -88,7 +94,7 @@ class Web:
 
 @pytest.fixture
 def web(tmp_path: Path) -> Web:
-    env = {DB_PATH_ENV: str(tmp_path / "web.db"), BUSY_TIMEOUT_ENV: "2000"}
+    env = {DB_PATH_ENV: str(tmp_path / "web.db"), BUSY_TIMEOUT_ENV: "2000", TIMEZONE_ENV: "UTC"}
 
     def services() -> Container:
         return build_container(env)

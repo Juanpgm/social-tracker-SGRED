@@ -109,12 +109,14 @@ def index(request: Request, notice: str = "") -> HTMLResponse:
         overview = services.control.overview()
         llm = services.escalation.local_status()  # stored figures: the model is never asked here
         new_alerts = services.alerts.counts().new
+        live = services.control.liveness()
     return render(
         request,
         "index.html",
         rows=[row_for(o) for o in overview.sources],
         global_on=overview.global_analysis,
         llm=llm,
+        live=live,
         alerts_new=new_alerts,
         notice=NOTICES.get(notice),
         source_types=SOURCE_TYPES,

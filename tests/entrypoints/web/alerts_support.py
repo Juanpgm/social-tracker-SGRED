@@ -33,6 +33,8 @@ def plant(
     topics: tuple[Topic, ...] = (Topic.EARTHQUAKE,),
     catalog: str = "unavailable",
     rationale: str = "prediction_claim",
+    needs_llm: bool = False,
+    signals: tuple[Signal, ...] | None = None,
     **item: Any,
 ) -> str:
     """An item and its verdict, straight into the database; returns the item id."""
@@ -42,7 +44,7 @@ def plant(
         source_name=source_name,
         title=title,
         text=text or f"Texto {name}: manana habra un temblor fuerte en Cali",
-        published_at=NOW + timedelta(hours=hours),
+        published_at=item.pop("published_at", NOW + timedelta(hours=hours)),
         **item,
     )
     verdict = Classification(
@@ -53,9 +55,11 @@ def plant(
         rationale=rationale,
         classified_at=NOW,
         classifier_version="cascade-2/topics-0",
-        signals=(Signal("prediction_claim", RUMOR, 0.45),),
+        signals=(Signal("prediction_claim", RUMOR, 0.45),) if signals is None else signals,
         topics=topics,
         catalog_status=catalog,
+        needs_llm=needs_llm,
+        priority=0.5 if needs_llm else 0.0,
     )
     with Database(Path(web.env[DB_PATH_ENV])) as db:
         SqliteItemRepository(db).add_new([made])

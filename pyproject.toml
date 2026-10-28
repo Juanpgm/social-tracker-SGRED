@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2",
     "PyYAML",
     "typer",
+    "tzdata>=2026.5",
     "uvicorn>=0.54.0",
 ]
 

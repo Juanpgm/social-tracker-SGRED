@@ -101,6 +101,10 @@ class AlertRepository(Protocol):
         """Remove an alert with its members and trail; False if there is none."""
         ...
 
+    def linked_sources(self) -> list[tuple[str, str]]:
+        """Every source some alert is linked to, with the name its latest snapshot has."""
+        ...
+
     def count(self, flt: AlertFilter) -> int: ...
 
     def counts(self) -> AlertCounts:

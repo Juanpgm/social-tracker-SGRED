@@ -210,7 +210,7 @@ def test_the_rationale_of_a_model_is_redacted_on_the_alert_and_the_member(w):
         confidence=0.7,
         text="rumor sobre sismo s",
         rationale=(
-            "see https://" + "user:pw@evil.example/x?token=abcdef123456 and password=hunter2hunter2"
+            "see https://user" + ":pw@evil.example/x?token=abcdef123456 and password=hunter2hunter2"
         ),
     )
     w.refresh()

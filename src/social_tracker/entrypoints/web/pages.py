@@ -3,7 +3,9 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager, closing
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse
@@ -11,6 +13,8 @@ from jinja2 import Environment, PackageLoader, StrictUndefined
 
 from social_tracker.bootstrap import Container
 from social_tracker.entrypoints.web.security import CsrfTokens
+from social_tracker.entrypoints.web.timefmt import ago
+from social_tracker.shared.timezone import format_local
 
 ContainerFactory = Callable[[], Container]
 BUSY_TEXT = "The database is busy or unavailable. Wait a moment and try again."
@@ -27,12 +31,24 @@ class WebContext:
         return closing(self.container_factory())
 
 
+def _local(moment: datetime | None, zone: ZoneInfo, *, seconds: bool = False) -> str:
+    """A stored time drawn in the operator's zone with its offset; None reads as "unknown"."""
+    return "unknown" if moment is None else format_local(moment, zone, seconds=seconds)
+
+
+def _ago(moment: datetime | None) -> str:
+    return ago(moment, datetime.now(UTC))
+
+
 def build_environment() -> Environment:
-    return Environment(
+    env = Environment(
         loader=PackageLoader("social_tracker.entrypoints.web", "templates"),
         autoescape=True,
         undefined=StrictUndefined,
     )
+    env.filters["local"] = _local
+    env.filters["ago"] = _ago
+    return env
 
 
 def is_htmx(request: Request) -> bool:
@@ -55,10 +71,27 @@ def render(request: Request, template: str, *, status: int = 200, **context: Any
         text = context.get("message") or _FALLBACK_TEXT.get(status, _FALLBACK_DEFAULT)
         return status_fragment(request, text, status=status, refresh=status == 403)
     ctx: WebContext = request.app.state.ctx
+    if not template.startswith("_") and context.get("alerts_new") is None:
+        # a page that did not read the alerts (the how-to, a form, an error) still shows the badge
+        context["alerts_new"], zone = _ambient(ctx)
+        context.setdefault("tz", zone)
     page = ctx.env.get_template(template).render(
         {"notice": None, "alerts_new": None, "csrf_token": request.state.csrf_token, **context}
     )
     return HTMLResponse(page, status_code=status)
+
+
+_UTC = ZoneInfo("UTC")
+
+
+def _ambient(ctx: WebContext) -> tuple[int | None, ZoneInfo]:
+    """The number of new alerts and the time zone for a page that has no container open. A store
+    that cannot be read, or opened at all, costs the badge, never the page."""
+    try:
+        with ctx.services() as services:
+            return services.alerts.counts().new, services.timezone
+    except Exception:  # noqa: BLE001 - an error page must render even when nothing else works
+        return None, _UTC
 
 
 def error_page(request: Request, status: int, message: str) -> HTMLResponse:

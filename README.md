@@ -1075,7 +1075,7 @@ uvx pip-audit -r requirements-audit.txt --no-deps --disable-pip
 versions, `No known vulnerabilities found`; the lock file it audited:
 
 ```text
-uv.lock sha256 96c8234a77c9da7b4771ad43d2e414edd861e37e205103d71b8955fed3d5c059
+uv.lock sha256 5569fb3cbe316e1d0b62c016faf3e66ad42fbab7c46348d9e65c29596adef06f
 ```
 
 The line is informational: it says which dependency set the result belongs to. After any change

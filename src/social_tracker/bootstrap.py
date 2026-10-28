@@ -71,6 +71,9 @@ Environment:
   call: 60 doubling up to 3600) and `SOCIAL_TRACKER_LLM_PROMPT_CHARS` (item text longer than this
   is read at both ends, 100..100000, default 6000). A blank value means the default.
 
+- `SOCIAL_TRACKER_TIMEZONE`: the operator's IANA time zone (default `America/Bogota`). Dates
+  typed into filters are read in it and times are drawn in it; storage stays in UTC.
+
 - Alerts (stored and shown on this machine only, never sent anywhere):
   `SOCIAL_TRACKER_ALERT_RETENTION_DAYS` (an alert is kept this long after its latest occurrence,
   0..3650, default 180; 0 keeps an alert only until it has been seen or dismissed),
@@ -100,7 +103,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+from social_tracker.alerts.domain import MAX_EVENTS_LIMIT as ALERT_MAX_EVENTS_LIMIT
+from social_tracker.alerts.domain import MAX_MEMBERS_LIMIT as ALERT_MAX_MEMBERS_LIMIT
 from social_tracker.alerts.domain import MAX_RETENTION_DAYS as ALERT_MAX_RETENTION_DAYS
 from social_tracker.alerts.domain import AlertSettings
 from social_tracker.alerts.service import AlertService
@@ -145,6 +151,7 @@ from social_tracker.persistence.unit_of_work import SqliteUnitOfWork
 from social_tracker.persistence.worker_lock import WorkerLock
 from social_tracker.shared.clock import SystemClock
 from social_tracker.shared.errors import ValidationError
+from social_tracker.shared.timezone import parse_timezone
 from social_tracker.sources.service import SourceRegistry
 
 DB_PATH_ENV = "SOCIAL_TRACKER_DB_PATH"
@@ -184,6 +191,9 @@ LLM_PASS_BUDGET_ENV = "SOCIAL_TRACKER_LLM_PASS_BUDGET_S"
 LLM_PARKED_TTL_ENV = "SOCIAL_TRACKER_LLM_PARKED_TTL_S"
 LLM_SOURCE_SHARE_ENV = "SOCIAL_TRACKER_LLM_SOURCE_SHARE"
 ALERT_RETENTION_DAYS_ENV = "SOCIAL_TRACKER_ALERT_RETENTION_DAYS"
+ALERT_MAX_MEMBERS_ENV = "SOCIAL_TRACKER_ALERT_MAX_MEMBERS"
+ALERT_MAX_EVENTS_ENV = "SOCIAL_TRACKER_ALERT_MAX_EVENTS"
+TIMEZONE_ENV = "SOCIAL_TRACKER_TIMEZONE"
 ALERT_DEDUP_WINDOW_ENV = "SOCIAL_TRACKER_ALERT_DEDUP_HOURS"
 ALERT_CRITICAL_WINDOW_ENV = "SOCIAL_TRACKER_ALERT_CRITICAL_WINDOW_HOURS"
 ALERT_CRITICAL_DELIBERATE_ENV = "SOCIAL_TRACKER_ALERT_CRITICAL_DELIBERATE"
@@ -222,6 +232,7 @@ class Container:
     alerts: AlertService
     alert_settings: AlertSettings
     gold: GoldService
+    timezone: ZoneInfo
     _db: Database
 
     @property
@@ -498,6 +509,14 @@ def _unit_setting(env: Mapping[str, str], name: str, default: float) -> float:
     return float(text)
 
 
+def _timezone(env: Mapping[str, str]) -> ZoneInfo:
+    """The operator's time zone (`SOCIAL_TRACKER_TIMEZONE`, default America/Bogota)."""
+    try:
+        return parse_timezone(env.get(TIMEZONE_ENV, ""))
+    except ValidationError as exc:
+        raise ValidationError(f"{TIMEZONE_ENV}: {exc.message}") from None
+
+
 def parse_alert_settings(env: Mapping[str, str]) -> AlertSettings:
     """The alert policy's numbers from the environment (blank or absent: the defaults)."""
     defaults = AlertSettings()
@@ -524,6 +543,12 @@ def parse_alert_settings(env: Mapping[str, str]) -> AlertSettings:
             critical_window=timedelta(hours=_bounded(env, ALERT_CRITICAL_WINDOW_ENV, 24, 1, 720)),
             dedup_window=timedelta(hours=_bounded(env, ALERT_DEDUP_WINDOW_ENV, 24, 1, 720)),
             retention_days=retention,
+            max_members=_bounded(
+                env, ALERT_MAX_MEMBERS_ENV, defaults.max_members, 1, ALERT_MAX_MEMBERS_LIMIT
+            ),
+            max_events=_bounded(
+                env, ALERT_MAX_EVENTS_ENV, defaults.max_events, 10, ALERT_MAX_EVENTS_LIMIT
+            ),
         )
     except ValidationError as exc:
         raise ValidationError(f"alert settings: {exc.message}") from None
@@ -668,6 +693,7 @@ def _open(env: Mapping[str, str]) -> _Wiring:
     catalog_settings = parse_catalog_settings(env)
     llm_settings = parse_llm_settings(env)
     alert_settings = parse_alert_settings(env)
+    timezone = _timezone(env)
     path = resolve_db_path(env.get(DB_PATH_ENV, ""))
     raw_timeout = env.get(BUSY_TIMEOUT_ENV, "").strip()
     timeout = _busy_timeout_ms(raw_timeout) if raw_timeout else DEFAULT_BUSY_TIMEOUT_MS
@@ -726,6 +752,7 @@ def _open(env: Mapping[str, str]) -> _Wiring:
         alerts,
         alert_settings,
         GoldService(SqliteGoldRepository(db), topics, uow, clock, settings=classifier_settings),
+        timezone,
         db,
     )
     return _Wiring(

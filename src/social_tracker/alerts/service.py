@@ -111,6 +111,16 @@ class StatusResult:
 
 
 @dataclass(frozen=True)
+class SourceChoice:
+    """A source an alert list can be narrowed to: its id (what the filter takes), its name (what a
+    person recognises) and whether it no longer exists (its alerts keep the name they had)."""
+
+    id: str
+    name: str
+    removed: bool
+
+
+@dataclass(frozen=True)
 class AlertDetail:
     """An alert with the items behind it, its trail (the latest `max_events` entries), how many
     entries are not in it, and the sources that no longer exist."""
@@ -784,6 +794,20 @@ class AlertService:
         if not wanted:
             return frozenset()
         return frozenset(wanted - {source.id for source in self._sources.list()})
+
+    def source_choices(self) -> tuple[SourceChoice, ...]:
+        """Every source to filter by, by name: the registered ones (with today's name) and those
+        that were removed but still have alerts (with the name the alerts kept)."""
+        with self._uow.snapshot():
+            registered = {source.id: source.name for source in self._sources.list()}
+            linked = self._alerts.linked_sources()
+        choices = {
+            sid: SourceChoice(sid, clean_name(name, sid), False) for sid, name in registered.items()
+        }
+        for sid, name in linked:
+            if sid not in choices:
+                choices[sid] = SourceChoice(sid, clean_name(name, sid), True)
+        return tuple(sorted(choices.values(), key=lambda c: (c.name.casefold(), c.id)))
 
     def counts(self) -> AlertCounts:
         with self._uow.snapshot():

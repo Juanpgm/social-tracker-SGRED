@@ -51,7 +51,9 @@ def test_a_database_at_the_previous_version_keeps_everything_when_migrated(tmp_p
 def test_the_new_columns_exist_with_safe_defaults(tmp_path: Path):
     db = Database(tmp_path / "cols.db")
     try:
-        assert {"downgraded_by_model", "overflow", "events_dropped"} <= columns(db, "alerts")
+        assert {"downgraded_by_model", "overflow", "events_dropped", "published_at"} <= columns(
+            db, "alerts"
+        )
         assert "from_absorbed" in columns(db, "alert_events")
         assert {"label", "confidence", "settled_at"} <= columns(db, "alert_forgotten")
     finally:

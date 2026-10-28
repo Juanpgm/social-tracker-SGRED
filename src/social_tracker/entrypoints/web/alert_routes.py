@@ -12,13 +12,17 @@ import re
 from math import ceil
 from typing import Annotated
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from starlette.exceptions import HTTPException
 
 from social_tracker.alerts.domain import (
+    FIRST_SEEN,
     KNOWN_TAGS,
+    LAST_SEEN,
+    MAX_OFFSET,
     WITHDRAWN,
     AlertFilter,
     AlertStatus,
@@ -50,7 +54,19 @@ router = APIRouter(dependencies=[Depends(read_form)])
 Form = Annotated[dict[str, str], Depends(read_form)]
 
 PAGE_SIZE = 25
-FILTER_FIELDS = ("severity", "label", "status", "source", "tag", "since", "until")
+FILTER_FIELDS = (
+    "severity",
+    "label",
+    "status",
+    "source",
+    "tag",
+    "since",
+    "until",
+    "when",
+    "hide_provisional",
+    "withdrawn",
+)
+WHENS = ((LAST_SEEN, "Last seen"), (FIRST_SEEN, "First seen"))
 MAX_PARAM_CHARS = 100
 VIEWS = ("list", "detail")
 GONE_TEXT = "That alert no longer exists. The list below is up to date."
@@ -82,7 +98,15 @@ def _param(request: Request, name: str) -> str:
     return value.strip()
 
 
-def _filter(request: Request) -> tuple[AlertFilter, dict[str, str]]:
+def _flag(text: str) -> bool:
+    """A checkbox of the filter form: "1" is on, empty is off, anything else is refused."""
+    if text not in ("", "1"):
+        raise ValidationError("a switch of the filter is 1 or empty")
+    return text == "1"
+
+
+def _filter(request: Request, zone: ZoneInfo) -> tuple[AlertFilter, dict[str, str]]:
+    """The filter of the query; a date is read in the operator's zone unless it has an offset."""
     values = {name: _param(request, name) for name in FILTER_FIELDS}
     chosen = AlertFilter(
         severity=values["severity"] or None,  # type: ignore[arg-type]
@@ -90,8 +114,11 @@ def _filter(request: Request) -> tuple[AlertFilter, dict[str, str]]:
         source_id=values["source"] or None,
         status=values["status"] or None,
         tag=values["tag"] or None,
-        since=parse_moment(values["since"], end=False) if values["since"] else None,
-        until=parse_moment(values["until"], end=True) if values["until"] else None,
+        since=parse_moment(values["since"], end=False, zone=zone) if values["since"] else None,
+        until=parse_moment(values["until"], end=True, zone=zone) if values["until"] else None,
+        when=values["when"] or LAST_SEEN,
+        hide_provisional=_flag(values["hide_provisional"]),
+        include_withdrawn=_flag(values["withdrawn"]),
     )
     return chosen, values
 
@@ -131,35 +158,50 @@ def _with_notice(path: str, code: str) -> str:
 @router.get("/alerts", response_class=HTMLResponse)
 def alerts_page(request: Request, notice: str = "") -> HTMLResponse:
     ctx: WebContext = request.app.state.ctx
-    chosen, values = _filter(request)
     page = _page(request)
     with ctx.services() as services:
-        listing = services.alerts.list(chosen, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
-        removed = services.alerts.removed_sources({a.source_id for a in listing.alerts})
-        new = services.alerts.counts().new
-        source_ids = [o.source.id for o in services.control.overview().sources]
+        zone = services.timezone
+        chosen, values = _filter(request, zone)
+        offset = (page - 1) * PAGE_SIZE
+        if offset > MAX_OFFSET:
+            # far past the last page: the friendly empty page, not a refusal
+            listing = services.alerts.list(chosen, limit=1, offset=0)
+            shown: tuple = ()
+        else:
+            listing = services.alerts.list(chosen, limit=PAGE_SIZE, offset=offset)
+            shown = listing.alerts
+        removed = services.alerts.removed_sources({a.source_id for a in shown})
+        counts = services.alerts.counts()
+        live = services.control.liveness()
+        choices = services.alerts.source_choices()
     pages = max(1, ceil(listing.total / PAGE_SIZE))
     return render(
         request,
         "alerts.html",
         notice=NOTICES.get(notice),
-        alerts_new=new,
-        rows=listing.alerts,
+        alerts_new=counts.new,
+        counts=counts,
+        live=live,
+        tz=zone,
+        rows=shown,
         removed=removed,
         total=listing.total,
         page=page,
         pages=pages,
-        f=values,
-        filtered=any(values.values()),
+        f={**values, "when": values["when"] or LAST_SEEN},
+        filtered=any(value for name, value in values.items() if name != "when")
+        or values["when"] not in ("", LAST_SEEN),
         back=_url(values, page),
         prev_url=_url(values, page - 1) if listing.has_previous and page > 1 else "",
-        next_url=_url(values, page + 1) if listing.has_next else "",
+        next_url=_url(values, page + 1) if listing.has_next and shown else "",
         first_page_url=_url(values, 1),
         severities=[s.value for s in Severity],
         labels=[label.value for label in RISK_LABELS],
         statuses=[*(s.value for s in AlertStatus), WITHDRAWN],
         tags=KNOWN_TAGS,
-        source_ids=source_ids,
+        whens=WHENS,
+        source_choices=choices,
+        source_ids=[c.id for c in choices],
     )
 
 
@@ -170,6 +212,7 @@ def alert_page(request: Request, alert_id: str, notice: str = "") -> HTMLRespons
         with ctx.services() as services:
             found = services.alerts.detail(alert_id)
             new = services.alerts.counts().new
+            zone = services.timezone
     except NotFoundError:
         return error_page(request, 404, "That alert does not exist.")
     return render(
@@ -180,7 +223,9 @@ def alert_page(request: Request, alert_id: str, notice: str = "") -> HTMLRespons
         alert=found.alert,
         members=found.members,
         events=found.events,
+        events_hidden=found.events_hidden,
         removed=found.removed_sources,
+        tz=zone,
     )
 
 
@@ -211,6 +256,7 @@ def _answer(
         message=message,
         failed=status >= 400,
         alerts_new=services.alerts.counts().new,
+        tz=services.timezone,
     )
 
 

@@ -14,7 +14,7 @@ from click.testing import Result
 from typer.testing import CliRunner
 
 from social_tracker import bootstrap
-from social_tracker.bootstrap import BUSY_TIMEOUT_ENV, DB_PATH_ENV
+from social_tracker.bootstrap import BUSY_TIMEOUT_ENV, DB_PATH_ENV, TIMEZONE_ENV
 from social_tracker.control.domain import ControlEvent
 from social_tracker.entrypoints import cli as cli_module
 from social_tracker.entrypoints.cli import app
@@ -47,6 +47,7 @@ class Cli:
             DB_PATH_ENV: str(self.db_path),
             ACTOR_ENV: "tester",
             BUSY_TIMEOUT_ENV: "2000",
+            TIMEZONE_ENV: "UTC",
         }
         environ.update(env or {})
         result = self.runner.invoke(app, list(args), env=environ)

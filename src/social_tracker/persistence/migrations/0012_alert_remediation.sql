@@ -12,6 +12,8 @@
 --   at its member cap (a flood of near copies must not grow an alert without bound).
 -- alerts.events_dropped: routine trail entries (merged, updated) not stored because the alert is
 --   at its trail cap; the detail page says how many.
+-- alerts.published_at: the publication time of the item that leads the alert, when the feed's
+--   date can be believed (NULL when it is unknown, and for the alerts from before this column).
 -- alert_events.from_absorbed: the entry was copied from an alert that was absorbed into this one,
 --   with its original time, so merging never erases an audit trail.
 --
@@ -36,6 +38,8 @@ ALTER TABLE alerts ADD COLUMN downgraded_by_model INTEGER NOT NULL DEFAULT 0
 ALTER TABLE alerts ADD COLUMN overflow INTEGER NOT NULL DEFAULT 0 CHECK (overflow >= 0);
 ALTER TABLE alerts ADD COLUMN events_dropped INTEGER NOT NULL DEFAULT 0
     CHECK (events_dropped >= 0);
+ALTER TABLE alerts ADD COLUMN published_at TEXT
+    CHECK (published_at IS NULL OR published_at GLOB '????-??-??T??:??:??*+00:00');
 ALTER TABLE alert_events ADD COLUMN from_absorbed INTEGER NOT NULL DEFAULT 0
     CHECK (from_absorbed IN (0, 1));
 

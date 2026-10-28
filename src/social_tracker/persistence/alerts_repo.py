@@ -37,10 +37,10 @@ _ALERT_COLUMNS = (
     "id, label, severity, confidence, rationale, source_id, source_name, item_id, excerpt, tags, "
     "evidence, linked_sources, status, occurrences, first_seen_at, last_seen_at, created_at, "
     "updated_at, status_changed_at, withdrawn_at, withdrawn_reason, downgraded_by_model, overflow, "
-    "events_dropped"
+    "events_dropped, published_at"
 )
 _UPSERT_ALERT = (
-    f"INSERT INTO alerts ({_ALERT_COLUMNS}) VALUES ({', '.join('?' * 24)}) "
+    f"INSERT INTO alerts ({_ALERT_COLUMNS}) VALUES ({', '.join('?' * 25)}) "
     "ON CONFLICT (id) DO UPDATE SET "
     + ", ".join(
         f"{name} = excluded.{name}"
@@ -141,6 +141,7 @@ def _alert_from_row(row: sqlite3.Row) -> Alert:
             downgraded_by_model=bool(row["downgraded_by_model"]),
             overflow=row["overflow"],
             events_dropped=row["events_dropped"],
+            published_at=_optional_time(row["published_at"]),
         )
     except (DomainError, ValueError, TypeError):
         raise StorageError("stored alert is invalid") from None
@@ -202,6 +203,7 @@ def _alert_params(a: Alert) -> tuple[Any, ...]:
         int(a.downgraded_by_model),
         a.overflow,
         a.events_dropped,
+        _text_or_none(a.published_at),
     )
 
 
@@ -232,6 +234,9 @@ def _text_or_none(value: datetime | None) -> str | None:
     return format_utc(value) if value is not None else None
 
 
+_WHEN_COLUMN = {"first_seen": "a.first_seen_at", "last_seen": "a.last_seen_at"}
+
+
 def _where(flt: AlertFilter) -> tuple[str, list[Any]]:
     """The WHERE clause of a filter and its parameters (fixed clauses, bound values)."""
     clauses: list[str] = []
@@ -239,7 +244,8 @@ def _where(flt: AlertFilter) -> tuple[str, list[Any]]:
     if flt.status == WITHDRAWN:
         clauses.append("a.withdrawn_at IS NOT NULL")
     else:
-        clauses.append("a.withdrawn_at IS NULL")
+        if not flt.include_withdrawn:
+            clauses.append("a.withdrawn_at IS NULL")
         if flt.status is not None:
             clauses.append("a.status = ?")
             params.append(flt.status.value)  # type: ignore[union-attr]
@@ -258,13 +264,16 @@ def _where(flt: AlertFilter) -> tuple[str, list[Any]]:
     if flt.tag is not None:
         clauses.append("EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)")
         params.append(flt.tag)
+    column = _WHEN_COLUMN[flt.when]  # a fixed name chosen by this module, never the user's text
     if flt.since is not None:
-        clauses.append("a.last_seen_at >= ?")
+        clauses.append(f"{column} >= ?")
         params.append(format_utc(flt.since))
     if flt.until is not None:
-        clauses.append("a.last_seen_at <= ?")
+        clauses.append(f"{column} <= ?")
         params.append(format_utc(flt.until))
-    return " AND ".join(clauses), params
+    if flt.hide_provisional:
+        clauses.append("COALESCE(json_extract(a.evidence, '$.provisional'), 0) = 0")
+    return " AND ".join(clauses) or "1", params
 
 
 class SqliteAlertRepository:
@@ -454,6 +463,14 @@ class SqliteAlertRepository:
             new_by_severity=tuple((str(k), int(n)) for k, n in new_by_severity),
             downgraded=int(downgraded[0]),
         )
+
+    def linked_sources(self) -> list[tuple[str, str]]:
+        """Every source an alert is linked to, with the latest name an alert snapshot of it."""
+        rows = self._db.query(
+            "SELECT source_id, source_name FROM alert_items GROUP BY source_id "
+            "HAVING linked_at = MAX(linked_at) ORDER BY source_id"
+        )
+        return [(str(r[0]), str(r[1])) for r in rows]
 
     # ---- the sync ----
 

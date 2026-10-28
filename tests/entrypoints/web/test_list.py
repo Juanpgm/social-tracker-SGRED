@@ -65,10 +65,14 @@ def test_the_global_switch_reflects_the_stored_state(web: Web):
     assert "Analysis is on" in visible_text(web.client.get("/").text)
 
 
-def test_worker_status_is_a_read_only_placeholder(web: Web):
-    text = visible_text(web.client.get("/").text)
-    assert "GPU and model: n/a - no worker running" in text
-    assert "Stream lag: n/a - no worker running" in text
+def test_worker_status_is_read_only_and_shows_the_stored_times(web: Web):
+    page = web.client.get("/").text
+    text = visible_text(page)
+    assert "Last worker pass: never" in text
+    assert "Last alert refresh: never" in text
+    section = page.split('aria-labelledby="worker-heading"')[1].split("</section>")[0]
+    assert "<form" not in section
+    assert "<button" not in section
 
 
 def test_names_are_escaped_so_markup_in_them_is_inert(web: Web):

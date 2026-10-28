@@ -4,6 +4,22 @@
 <h1>Alerts</h1>
 <p class="hint">Alerts are stored and shown here, on this machine only. There are no external notifications.</p>
 
+<section aria-labelledby="monitor-heading" class="monitor">
+<h2 id="monitor-heading">State of the monitor</h2>
+<p>Analysis: <strong>{{ "on" if live.global_analysis else "off" }}</strong> &middot; last worker pass: {{ live.last_pass_at|ago }} &middot; last alert refresh: {{ live.last_alert_refresh_at|ago }}</p>
+{% if not live.global_analysis %}
+<p class="notice">Analysis is off: nothing is being analysed, so no new alerts will appear. Turn it on from the <a href="/">Sources</a> page.</p>
+{% endif %}
+<p>Current alert threshold: {{ "%.2f"|format(live.alert_min_confidence) }} <span class="hint">(read-only here: change it with <code>social-tracker alerts threshold set</code>)</span></p>
+{% if live.synced_threshold is not none and live.synced_threshold != live.alert_min_confidence %}
+<p class="notice">The alerts were last evaluated with a threshold of {{ "%.2f"|format(live.synced_threshold) }}: the new one is not applied yet. The next worker pass or <code>social-tracker alerts refresh</code> applies it.</p>
+{% endif %}
+<p>Withdrawn: {{ counts.withdrawn }} <a href="/alerts?status=withdrawn">Show withdrawn</a>{% if counts.downgraded %} &middot; downgraded by the model and still open: {{ counts.downgraded }}{% endif %}</p>
+{% if counts.retrying or counts.parked %}
+<p class="hint">Verdicts the alert step could not evaluate: {{ counts.retrying }} retrying, {{ counts.parked }} parked (<code>social-tracker alerts rebuild</code> tries them again).</p>
+{% endif %}
+</section>
+
 <form method="get" action="/alerts" class="filters" aria-label="Filter alerts">
 <div class="field"><label for="f-severity">Severity</label>
 <select id="f-severity" name="severity"><option value="">Any</option>{% for s in severities %}<option value="{{ s }}"{% if s == f.severity %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
@@ -11,15 +27,20 @@
 <select id="f-label" name="label"><option value="">Any</option>{% for s in labels %}<option value="{{ s }}"{% if s == f.label %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
 <div class="field"><label for="f-status">Status</label>
 <select id="f-status" name="status"><option value="">Any (not withdrawn)</option>{% for s in statuses %}<option value="{{ s }}"{% if s == f.status %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
-<div class="field"><label for="f-source">Source id</label>
-<input type="text" id="f-source" name="source" value="{{ f.source }}" list="source-options" maxlength="64" autocomplete="off">
-<datalist id="source-options">{% for source_id in source_ids %}<option value="{{ source_id }}"></option>{% endfor %}</datalist></div>
+<div class="field"><label for="f-source">Source</label>
+<select id="f-source" name="source"><option value="">Any</option>{% for c in source_choices %}<option value="{{ c.id }}"{% if c.id == f.source %} selected{% endif %}>{{ c.name }}{% if c.removed %} (removed){% endif %}</option>{% endfor %}{% if f.source and f.source not in source_ids %}<option value="{{ f.source }}" selected>{{ f.source }}</option>{% endif %}</select></div>
 <div class="field"><label for="f-tag">Tag</label>
 <select id="f-tag" name="tag"><option value="">Any</option>{% for s in tags %}<option value="{{ s }}"{% if s == f.tag %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
-<div class="field"><label for="f-since">From (UTC)</label>
+<div class="field"><label for="f-when">Dates apply to</label>
+<select id="f-when" name="when">{% for value, label in whens %}<option value="{{ value }}"{% if value == f.when %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+<div class="field"><label for="f-since">From (local time, {{ tz.key }})</label>
 <input type="date" id="f-since" name="since" value="{{ f.since }}"></div>
-<div class="field"><label for="f-until">To (UTC, inclusive)</label>
+<div class="field"><label for="f-until">To (local time, {{ tz.key }}, inclusive)</label>
 <input type="date" id="f-until" name="until" value="{{ f.until }}"></div>
+<div class="field"><input type="checkbox" id="f-hide" name="hide_provisional" value="1"{% if f.hide_provisional %} checked{% endif %}>
+<label for="f-hide">Hide verdicts still waiting for the model</label></div>
+<div class="field"><input type="checkbox" id="f-withdrawn" name="withdrawn" value="1"{% if f.withdrawn %} checked{% endif %}>
+<label for="f-withdrawn">Show withdrawn alerts too</label></div>
 <p><button type="submit">Filter</button> <a href="/alerts">Clear the filters</a></p>
 </form>
 
@@ -30,7 +51,7 @@
 <div class="table-wrap">
 <table>
 <thead>
-<tr><th scope="col">Severity</th><th scope="col">Label</th><th scope="col">Confidence</th><th scope="col">Status</th><th scope="col">Occurrences</th><th scope="col">Last seen</th><th scope="col">Source</th><th scope="col">Excerpt</th><th scope="col">Actions</th></tr>
+<tr><th scope="col">Severity</th><th scope="col">Label</th><th scope="col">Confidence</th><th scope="col">Status</th><th scope="col">Occurrences</th><th scope="col">When</th><th scope="col">Source</th><th scope="col">Tags</th><th scope="col">Excerpt</th><th scope="col">Actions</th></tr>
 </thead>
 <tbody>
 {% for a in rows %}{% include "_alert_row.html" %}{% endfor %}
@@ -38,7 +59,11 @@
 </table>
 </div>
 {% elif total == 0 and not filtered %}
+{% if live.global_analysis %}
 <p>No alerts yet. They appear here when a verdict of the classifier reaches the alert threshold.</p>
+{% else %}
+<p>No alerts yet, and analysis is off: nothing is being analysed.</p>
+{% endif %}
 {% elif total == 0 %}
 <p>No alerts match these filters. <a href="/alerts">Clear the filters</a></p>
 {% else %}

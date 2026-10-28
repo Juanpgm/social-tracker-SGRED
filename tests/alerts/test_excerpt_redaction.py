@@ -24,9 +24,13 @@ KEYS = {
     "slack_s": "xox" + "s-123456789012-abcdefghijklmnop",
     "google": "AIz" + "aSyA1234567890abcdefghijklmnopqrstu",
     "google_oauth": "ya2" + "9.a0AfH6SMBx1234567890abcdefghijklmnop",
-    "jwt": "eyJ"
-    + "hbGciOiJIUzI1NiJ9.eyJ"
-    + "zdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1g",
+    "jwt": ".".join(
+        [
+            "eyJ" + "hbGciOiJIUzI1NiJ9",
+            "eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0",
+            "dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1g",
+        ]
+    ),
     "stripe_live": "sk_" + "live_4eC39HqLyjWDarjtT1zdp7dc",
     "stripe_test": "rk_" + "test_4eC39HqLyjWDarjtT1zdp7dc",
     "sendgrid": "SG." + "abcdefghijklmnop1234.abcdefghijklmnopqrstuvwxyz",
@@ -58,12 +62,12 @@ def test_a_vendor_key_is_redacted_wherever_it_is(name):
             + "XXXXXXXXXXXXXXXXXXXXXX",
             "T00000000",
         ),
-        ("https://" + "user:pw@host.example/p", "user:pw"),
-        ("ftp://" + "user:pass@host/x", "user:pass"),
-        ("postgres://" + "u:p@h/db", "u:p@"),
-        ("mysql://" + "root:toor@db:3306/x", "root:toor"),
-        ("redis://:secretpass@cache:6379", "secretpass"),
-        ("amqp://" + "guest:guest@broker.example/", "guest:guest"),
+        ("https://user" + ":pw@host.example/p", "user:pw"),
+        ("ftp://user" + ":pass@host/x", "user:pass"),
+        ("postgres://u" + ":p@h/db", "u:p@"),
+        ("mysql://root" + ":toor@db:3306/x", "root:toor"),
+        ("redis://" + ":secretpass@cache:6379", "secretpass"),
+        ("amqp://guest" + ":guest@broker.example/", "guest:guest"),
         ("ssh://deploy@host.example/repo", "deploy@"),
     ],
 )
@@ -159,8 +163,8 @@ def test_a_link_loses_its_query_and_fragment_but_keeps_a_normal_path():
 def test_redact_is_idempotent():
     text = (
         "pwd=abcdef1 AKI"
-        + "AIOSFODNN7EXAMPLE https://"
-        + "u:p@h.example/x/9f8a7b6c5d4e3f2a1b0c?q=1"
+        + "AIOSFODNN7EXAMPLE https://u"
+        + ":p@h.example/x/9f8a7b6c5d4e3f2a1b0c?q=1"
     )
     once = redact(text)
     assert redact(once) == once

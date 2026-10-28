@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 import uvicorn
 
-from social_tracker.bootstrap import BUSY_TIMEOUT_ENV, DB_PATH_ENV, build_container
+from social_tracker.bootstrap import BUSY_TIMEOUT_ENV, DB_PATH_ENV, TIMEZONE_ENV, build_container
 from social_tracker.control.domain import ControlEvent
 from social_tracker.entrypoints.web.app import create_app
 from social_tracker.persistence.control_repo import SqliteControlRepository
@@ -103,7 +103,11 @@ class Live:
 
 @pytest.fixture
 def live(tmp_path: Path) -> Iterator[Live]:
-    env = {DB_PATH_ENV: str(tmp_path / "browser.db"), BUSY_TIMEOUT_ENV: "150"}
+    env = {
+        DB_PATH_ENV: str(tmp_path / "browser.db"),
+        BUSY_TIMEOUT_ENV: "150",
+        TIMEZONE_ENV: "UTC",
+    }
     server = Live(env, free_port())
     server.start()
     try:

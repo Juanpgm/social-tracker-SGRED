@@ -38,7 +38,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from enum import StrEnum
 from typing import Any, NamedTuple
 
@@ -515,6 +515,13 @@ class AlertMember:
         if self.settled_at is not None:
             set_(self, "settled_at", _aware(self.settled_at, "settlement time"))
 
+    @property
+    def published_at(self) -> datetime | None:
+        """When the item was published, if the feed's date could be believed (else None)."""
+        if self.event_age_s >= UNKNOWN_AGE.total_seconds():
+            return None
+        return self.occurred_at - timedelta(seconds=self.event_age_s)
+
 
 @dataclass(frozen=True)
 class Alert:
@@ -547,6 +554,7 @@ class Alert:
     downgraded_by_model: bool = False
     overflow: int = 0
     events_dropped: int = 0
+    published_at: datetime | None = None
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -571,7 +579,7 @@ class Alert:
             raise ValidationError("occurrences must be a whole number")
         for name in ("first_seen_at", "last_seen_at", "created_at", "updated_at"):
             set_(self, name, _aware(getattr(self, name), name))
-        for name in ("status_changed_at", "withdrawn_at"):
+        for name in ("status_changed_at", "withdrawn_at", "published_at"):
             if getattr(self, name) is not None:
                 set_(self, name, _aware(getattr(self, name), name))
         if (self.withdrawn_at is None) != (self.withdrawn_reason is None):
@@ -627,6 +635,7 @@ def _shown(lead: AlertMember) -> dict[str, Any]:
         "item_id": lead.item_id,
         "excerpt": lead.excerpt,
         "evidence": lead.evidence,
+        "published_at": lead.published_at,
     }
 
 
@@ -698,10 +707,18 @@ def merge_member(
 # ---- filters (AL-4) ----
 
 
+FIRST_SEEN, LAST_SEEN = "first_seen", "last_seen"
+
+
 @dataclass(frozen=True)
 class AlertFilter:
     """What the list shows. Every field is optional; `status` may also be `withdrawn`. The
-    list is always newest first. `until < since` is refused."""
+    list is always newest first. `until < since` is refused.
+
+    - `when`: the timestamp `since` and `until` apply to, the first or the last sighting.
+    - `hide_provisional`: leave out the alerts whose verdict still waits for the language model.
+    - `include_withdrawn`: show withdrawn alerts next to the live ones (`status="withdrawn"`
+      shows only those)."""
 
     severity: Severity | None = None
     label: Label | None = None
@@ -710,9 +727,17 @@ class AlertFilter:
     tag: str | None = None
     since: datetime | None = None
     until: datetime | None = None
+    when: str = LAST_SEEN
+    hide_provisional: bool = False
+    include_withdrawn: bool = False
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
+        if self.when not in (FIRST_SEEN, LAST_SEEN):
+            raise ValidationError("a date range applies to first_seen or last_seen")
+        for name in ("hide_provisional", "include_withdrawn"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValidationError(f"{name} is a flag")
         if self.severity is not None:
             set_(self, "severity", _coerce(Severity, self.severity, "severity"))
         if self.label is not None:
@@ -739,23 +764,27 @@ _DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 _MAX_MOMENT_CHARS = 40
 
 
-def parse_moment(text: Any, *, end: bool) -> datetime:
+def parse_moment(text: Any, *, end: bool, zone: tzinfo = UTC) -> datetime:
     """A bound of a date range as a person types it, in UTC: a day (`2026-03-01`: from its first
-    instant, or with `end` through its last one) or a moment in ISO 8601 (`2026-03-01T10:30:00`,
-    with or without an offset; with none it is UTC). Anything else is a `ValidationError`."""
+    instant, or with `end` through its last one, in the person's `zone`) or a moment in ISO 8601
+    (`2026-03-01T10:30:00`, read in `zone` unless it carries its own offset or `Z`). The zone
+    defaults to UTC. Anything else is a `ValidationError`."""
     if not isinstance(text, str) or not text.strip() or len(text.strip()) > _MAX_MOMENT_CHARS:
         raise ValidationError("a date must be a day (2026-03-01) or a moment in ISO 8601")
     chosen = text.strip()
     try:
         if _DAY_RE.fullmatch(chosen):
-            day = datetime.fromisoformat(chosen).replace(tzinfo=UTC)
-            return day.replace(hour=23, minute=59, second=59, microsecond=999999) if end else day
+            day = datetime.fromisoformat(chosen).replace(tzinfo=zone)
+            if end:
+                day = day.replace(hour=23, minute=59, second=59, microsecond=999999)
+            return ensure_utc(day)
         moment = datetime.fromisoformat(chosen)
-    except ValueError:
+    except (ValueError, OverflowError):
         raise ValidationError("a date must be a day (2026-03-01) or a moment in ISO 8601") from None
-    if moment.tzinfo is None:
-        return moment.replace(tzinfo=UTC)
-    return ensure_utc(moment)
+    try:
+        return ensure_utc(moment.replace(tzinfo=zone) if moment.tzinfo is None else moment)
+    except OverflowError:
+        raise ValidationError("a date must be a day (2026-03-01) or a moment in ISO 8601") from None
 
 
 def validate_page(limit: Any, offset: Any) -> tuple[int, int]:

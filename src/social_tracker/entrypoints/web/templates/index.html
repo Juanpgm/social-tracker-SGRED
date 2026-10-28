@@ -13,9 +13,10 @@
 </section>
 
 <section aria-labelledby="worker-heading">
-<h2 id="worker-heading">Workers</h2>
-<p>GPU and model: n/a - no worker running</p>
-<p>Stream lag: n/a - no worker running</p>
+<h2 id="worker-heading">Worker</h2>
+<p>Last worker pass: {{ live.last_pass_at|ago }}</p>
+<p>Last alert refresh: {{ live.last_alert_refresh_at|ago }}</p>
+<p class="hint">A worker that is running leaves its time here at the end of every pass, with analysis on or off; <code>social-tracker run</code> starts it. These are the stored times: this page does not ask the worker anything.</p>
 </section>
 
 <section aria-labelledby="model-heading">
