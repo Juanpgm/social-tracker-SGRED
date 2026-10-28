@@ -32,6 +32,7 @@ TESTS = [
     "tests/entrypoints/test_cli_alerts.py",
     "tests/entrypoints/test_cli_alerts_remediation.py",
     "tests/entrypoints/test_cli_gold_export_path.py",
+    "tests/entrypoints/test_cli_calibrate_caveat.py",
     "tests/entrypoints/web/test_alerts_operator.py",
 ]
 
@@ -44,8 +45,11 @@ TIMEZONE = "shared/timezone.py"
 WORKER = "collector/worker.py"
 
 # Known equivalent mutants, left out on purpose (no input can tell them apart): the largest sizes
-# (`MAX_FORGOTTEN`, the bounds of the settings that only a hostile environment reaches) and the
-# order of the clauses of a WHERE.
+# (`MAX_FORGOTTEN`, the bounds of the settings that only a hostile environment reaches), the order
+# of the clauses of a WHERE, the cleaning of `settle_reason` in the evidence (the classification
+# only accepts a value of its own vocabulary, so a hostile one never gets there) and the protection
+# of the leading member from eviction (the lead is the most severe or the earliest member, which
+# the eviction order already keeps: it is defence in depth).
 MUTANTS = [
     # ---- A1: a rise puts a handled alert back to new ----
     m(
@@ -147,12 +151,6 @@ MUTANTS = [
         "            stage=verdict.stage.value,\n            rationale=verdict.rationale,\n            severity=severity if severity is not None else old.severity,",
     ),
     m(
-        "evidence strings",
-        SERVICE,
-        "            settle_reason=_tidy(verdict.settle_reason),",
-        "            settle_reason=verdict.settle_reason,",
-    ),
-    m(
         "model name",
         SERVICE,
         "            llm_model=_tidy(judgment.llm_model) if judged and judgment else None,",
@@ -165,12 +163,6 @@ MUTANTS = [
         SERVICE,
         "if self._alerts.count_members(previous.id) >= self._settings.max_members:",
         "if self._alerts.count_members(previous.id) > self._settings.max_members:",
-    ),
-    m(
-        "the lead is kept",
-        SERVICE,
-        "victim = self._alerts.weakest_member(previous.id, protect=previous.item_id)",
-        "victim = self._alerts.weakest_member(previous.id, protect=None)",
     ),
     m(
         "a full alert counts what it gave up",
