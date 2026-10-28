@@ -7,15 +7,25 @@ The step (`refresh`, and `rebuild` for everything) is a pure policy applied to w
   times) and, when the model judged it, the judgment (model and prompt version).
 - AL-6: an item whose content (or whose original, for a near copy) is already behind an alert seen
   within `dedup_window` joins that alert; one that bridges several makes them one (the oldest
-  stays). The alert is a projection of its members, so its severity is the highest of the active
-  ones: merging can raise it and never lowers it.
+  stays, with the trail of the absorbed ones). The alert is a projection of its members, so its
+  severity is the highest of the active ones: it never lowers on a merge and follows the model's
+  final verdict. A copy brings the projection up to date incrementally and an alert stores at most
+  `max_members` items (the rest are only counted), so a flood costs the same per copy.
+- A1: a person's decision never hides a worse alert. When the severity rises above the one a
+  `seen`/`dismissed` alert was handled at (a stronger copy, a model upgrade, a reactivation, a
+  bridge) it goes back to `new` with an audit entry by the system.
+- A11: what the language model says never hides an alert. A verdict it settles lower than the
+  provisional one, or that stops qualifying, flags the alert `downgraded_by_model` and keeps it
+  in the default list; only the cascade or the threshold withdraws.
 - AL-10: an item is one member whatever happens to it. A verdict that changes (the model settled
   it, a reclassification, a copy that took its original's verdict) updates the alert it is in;
   one that stops qualifying withdraws the alert when no other member holds it up, with a reason;
   one that qualifies again brings it back. Nothing is ever deleted by the step.
 - Every item is one short transaction that re-reads what it needs, so two workers (or a rebuild
   next to the worker) cannot give an item two alerts; a failure belongs to the item, a storage
-  failure ends the run and the next one resumes.
+  failure ends the run and the next one resumes. A pass reads the verdicts written since it last
+  looked (dirty marks) and, when the threshold changed, every member; an item that fails backs off
+  and is parked after a few failures.
 
 What the operator does goes through `set_status` (AL-5): the allowed moves, an audit entry with
 actor and reason, nothing on a redundant request. Nothing here ever sends anything outside this
