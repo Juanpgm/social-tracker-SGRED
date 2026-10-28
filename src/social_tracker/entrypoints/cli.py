@@ -62,6 +62,7 @@ from social_tracker.collector.worker import DEFAULT_TICK_S, PassSummary
 from social_tracker.control.domain import CollectionState, format_confidence, parse_confidence
 from social_tracker.control.service import SourceOverview, SystemOverview
 from social_tracker.entrypoints.inputs import (
+    find_work_tree,
     parse_fields,
     read_import_text,
     resolve_actor,
@@ -1474,21 +1475,42 @@ def gold_export(
     force: Annotated[
         bool, typer.Option("--force", help="Overwrite the file if it exists.")
     ] = False,
+    allow_repo_path: Annotated[
+        bool,
+        typer.Option(
+            "--allow-repo-path",
+            help="Write inside a git work tree anyway (by default it is refused: the file can "
+            "hold real text, and a work tree is where `git add .` would commit it).",
+        ),
+    ] = False,
     label: GoldLabelOption = None,
 ) -> None:
     """Export the labeled texts as YAML, the shape `classify calibrate --file` reads.
 
-    The file can hold real text from real sources: keep it out of version control."""
+    The file can hold real text from real sources: it is not written inside a git work tree
+    unless --allow-repo-path says so, and then it must be kept out of version control."""
     with _guard(), closing(build_container()) as services:
         chosen = Label(label) if label is not None else None
         text = services.gold.export_text(label=chosen)
+        in_tree = False
         if output is not None:
+            in_tree = find_work_tree(output) is not None
+            if in_tree and not allow_repo_path:
+                raise ValidationError(
+                    "the output would be inside a git work tree, where it could be committed; "
+                    "write it elsewhere or pass --allow-repo-path"
+                )
             write_export(output, text, force=force)
             count = text.count("\n- id: ") + text.startswith("- id: ")
     if output is None:
         typer.echo(text, nl=False)
-    else:
-        typer.echo(f"exported {count} example(s) to {escape_unprintable(str(output))}")
+        return
+    typer.echo(f"exported {count} example(s) to {escape_unprintable(str(output))}")
+    if in_tree:
+        typer.echo(
+            "warning: the file is inside a git work tree: keep it out of version control",
+            err=True,
+        )
 
 
 def _threshold_text(value: float) -> str:

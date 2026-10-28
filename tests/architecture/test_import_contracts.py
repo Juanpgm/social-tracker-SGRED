@@ -280,6 +280,15 @@ NETWORK_CLIENTS = [
     "import socket",
     "import smtplib",
     "import ftplib",
+    "import email",
+    "import urllib3",
+    "import webbrowser",
+    "import xmlrpc",
+    "import imaplib",
+    "import poplib",
+    "import telnetlib",
+    "import socketserver",
+    "import selectors",
 ]
 WEB_OUTBOUND_CONTRACT = "The web UI must not make outbound network calls"
 

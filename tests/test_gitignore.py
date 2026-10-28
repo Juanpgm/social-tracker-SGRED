@@ -47,6 +47,11 @@ IGNORED = [
     "clip.opus",
     "clip.ogg",
     "clip.flac",
+    "gold_export.yaml",  # a gold export can hold real text from real sources
+    "gold_export_2026-03-01.yaml",
+    "gold_export.yml",
+    "exports/gold.yaml",
+    "tmp/exports/anything.txt",
 ]
 
 NOT_IGNORED = [
@@ -57,6 +62,8 @@ NOT_IGNORED = [
     "src/social_tracker/domain/keys.py",
     "tests/test_smoke.py",
     "tests/data/gold_examples.yaml",  # synthetic test data is source, unlike runtime data/
+    "docs/exports.md",
+    "src/social_tracker/gold/yaml_io.py",
     "docs/cookies_policy.md",
     "docs/db-wal.md",
     "notes/db-journal.txt",

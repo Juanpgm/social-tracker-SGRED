@@ -94,6 +94,15 @@ forbidden_modules =
     websockets
     smtplib
     ftplib
+    email
+    urllib3
+    webbrowser
+    xmlrpc
+    imaplib
+    poplib
+    telnetlib
+    socketserver
+    selectors
     social_tracker.collector
     social_tracker.llm.ollama
 allow_indirect_imports = True
@@ -332,7 +341,9 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 # The alerts (AL-7, G-1): they are stored and shown on this machine and nothing else. The module
-# (policy, excerpt, ports and the service) opens no connection, file, process or mail client, and
+# (policy, excerpt, ports and the service) opens no connection, file, process or mail client (no
+# smtplib, imaplib, poplib, email, telnetlib, ftplib, xmlrpc, urllib3, webbrowser, socketserver or
+# selectors either), and
 # knows neither the storage adapter nor the entrypoints nor the model server. The pure part, the
 # vocabulary and the excerpt, is also deterministic: no clock, randomness, threads or logging (the
 # service holds the clock and logs by injection and by name). The service reaches the classifier,
@@ -354,6 +365,15 @@ forbidden_modules =
     subprocess
     smtplib
     ftplib
+    email
+    urllib3
+    webbrowser
+    xmlrpc
+    imaplib
+    poplib
+    telnetlib
+    socketserver
+    selectors
     httpx
     httpx2
     httpcore2
@@ -417,6 +437,15 @@ forbidden_modules =
     subprocess
     smtplib
     ftplib
+    email
+    urllib3
+    webbrowser
+    xmlrpc
+    imaplib
+    poplib
+    telnetlib
+    socketserver
+    selectors
     httpx
     httpx2
     httpcore2

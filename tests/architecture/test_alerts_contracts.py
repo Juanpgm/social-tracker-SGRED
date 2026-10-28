@@ -42,6 +42,15 @@ FORBIDDEN_EVERYWHERE = {
     "import pathlib": "pathlib",
     "import asyncio": "asyncio",
     "import yaml": "yaml",
+    "import email": "email",
+    "import urllib3": "urllib3",
+    "import webbrowser": "webbrowser",
+    "import xmlrpc": "xmlrpc",
+    "import imaplib": "imaplib",
+    "import poplib": "poplib",
+    "import telnetlib": "telnetlib",
+    "import socketserver": "socketserver",
+    "import selectors": "selectors",
     "from fixpkg.persistence import thing": "fixpkg.persistence.thing",
     "from fixpkg.entrypoints import thing": "fixpkg.entrypoints.thing",
     "from fixpkg.collector import thing": "fixpkg.collector.thing",
@@ -202,3 +211,111 @@ def test_the_alerts_package_has_no_clock_of_its_own():
         source = path.read_text(encoding="utf-8")
         for call in ("datetime.now(", "utcnow(", "time.time(", "time.monotonic(", "date.today("):
             assert call not in source, f"{path.name}: {call}"
+
+
+# ---- G-1 beyond the alerts package: the gold set, the alert pages and the alert/gold commands ----
+
+SRC = Path(__file__).parents[2] / "src" / "social_tracker"
+GOLD = SRC / "gold"
+WEB = SRC / "entrypoints" / "web"
+CLI = SRC / "entrypoints" / "cli.py"
+ALERT_TEMPLATES = sorted(WEB.glob("templates/*alert*.html"))
+_JINJA = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}", re.DOTALL)
+_ATTRIBUTE = re.compile(r'(?<=[\s<])([a-z][a-z0-9-]*)="([^"]*)"')
+_PROSE_ATTRIBUTES = frozenset({"aria-label", "title", "alt", "placeholder", "content"})
+
+
+def template_names(source: str) -> list[str]:
+    """Every name a template spells that is not prose: the identifiers inside its `{{ }}` and
+    `{% %}` blocks and the values of its attributes (ids, names, links, targets, classes...)."""
+    found: list[str] = []
+    for block in _JINJA.findall(source):
+        found += [
+            w for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", block) if words(w) & NOTIFY_WORDS
+        ]
+    markup = _JINJA.sub(" ", source)
+    for attribute, value in _ATTRIBUTE.findall(markup):
+        if attribute in _PROSE_ATTRIBUTES:
+            continue
+        found += [w for w in re.split(r"[^A-Za-z0-9_]+", value) if w and words(w) & NOTIFY_WORDS]
+    return found
+
+
+def command_names(source: str) -> list[str]:
+    """The notifying names inside the alert and gold commands of the CLI (and their helpers)."""
+    tree = ast.parse(source)
+    found: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        decorated = any(
+            "alerts_app" in ast.unparse(d)
+            or "gold_app" in ast.unparse(d)
+            or "threshold_app" in ast.unparse(d)
+            for d in node.decorator_list
+        )
+        if decorated or re.search(r"alert|gold", node.name):
+            found += notifying_names(ast.unparse(node))
+    return found
+
+
+def test_the_template_scanner_reads_names_not_prose():
+    page = (
+        '<form action="/alerts/{{ a.id }}/share" hx-post="/alerts/x/seen" class="push">'
+        '<input name="notify_me"><button aria-label="Send an email">Notifications are off'
+        "</button></form>{% set webhook = 1 %}{{ publish(a) }}"
+    )
+    assert template_names(page) == ["webhook", "publish", "share", "push", "notify_me"]
+    assert template_names('<p class="hint">There are no external notifications.</p>') == []
+    assert template_names('<a href="/alerts?tag=earthquake">earthquake</a>') == []
+
+
+def test_the_command_scanner_finds_a_command_that_would_notify():
+    source = "\n".join(
+        [
+            "@alerts_app.command('x')",
+            "def alerts_x():",
+            "    send_email(1)",
+            "def unrelated():",
+            "    send_email(2)",
+            "def _gold_text():",
+            "    webhook = 1",
+        ]
+    )
+    assert command_names(source) == ["send_email", "webhook"]
+
+
+def test_the_gold_package_spells_no_way_to_notify_anybody():
+    offenders = []
+    for path in GOLD.glob("*.py"):
+        offenders += [
+            f"{path.name}: {n}" for n in notifying_names(path.read_text(encoding="utf-8"))
+        ]
+    assert offenders == []
+
+
+def test_the_alert_pages_route_spells_no_way_to_notify_anybody():
+    source = (WEB / "alert_routes.py").read_text(encoding="utf-8")
+    assert notifying_names(source) == []
+
+
+def test_the_alert_templates_spell_no_way_to_notify_anybody():
+    assert ALERT_TEMPLATES, "the scan would be vacuous"
+    offenders = []
+    for path in ALERT_TEMPLATES:
+        offenders += [f"{path.name}: {n}" for n in template_names(path.read_text("utf-8"))]
+    assert offenders == []
+
+
+def test_the_alert_and_gold_commands_spell_no_way_to_notify_anybody():
+    names = command_names(CLI.read_text(encoding="utf-8"))
+    assert names == []
+
+
+def test_the_scans_really_cover_the_files_they_are_for():
+    assert len(list(GOLD.glob("*.py"))) >= 4
+    assert any(p.name == "alerts.html" for p in ALERT_TEMPLATES)
+    assert any(p.name == "alert_detail.html" for p in ALERT_TEMPLATES)
+    cli_source = CLI.read_text(encoding="utf-8")
+    assert "gold_app.command" in cli_source
+    assert "alerts_app.command" in cli_source

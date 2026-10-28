@@ -116,6 +116,17 @@ def _existing_mode(path: Path) -> int | None:
         return None
 
 
+def find_work_tree(path: Path) -> Path | None:
+    """The root of the git work tree that `path` would be written into, if any: the nearest
+    folder above it (symbolic links and `..` resolved, folders that do not exist yet included)
+    that has a `.git` entry, a folder or, in a linked work tree, a file."""
+    folder = path.resolve().parent
+    for candidate in (folder, *folder.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
 def write_export(path: Path, text: str, *, force: bool) -> None:
     """Write `text` as UTF-8 bytes (no newline translation) so that the target is never left
     partial or empty.

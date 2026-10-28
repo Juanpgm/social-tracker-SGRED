@@ -51,5 +51,10 @@ __pycache__/
 dist/
 build/
 
+# Exports of the local gold set: they can hold real text from real sources
+gold_export*.yaml
+gold_export*.yml
+exports/
+
 # Local tooling registry
 .atl/
