@@ -1268,6 +1268,9 @@ def alerts_threshold_set(
 # ---- gold set and calibration ----
 
 _GOLD_LABELS = [label.value for label in LABEL_ORDER]
+# What the calibration measures: the cascade run on the bare text, so its numbers are those of the
+# CPU stages alone and not of the whole pipeline.
+CALIBRATION_CAVEAT = "no history, no catalog; CPU stages only"
 _MAX_GOLD_FILE_BYTES = 100 * 1024
 _NO_GOLD = "No gold examples yet."
 _TEXT_CHARS = 60
@@ -1529,6 +1532,7 @@ def _render_calibration(run: CalibrationRun, origin: str, unlabeled: int, curren
     lines = [f"gold set: {report.total} example(s) from {origin}"]
     if unlabeled:
         lines.append(f"note: {unlabeled} example(s) without an expected label were left out")
+    lines.append(f"measured with {CALIBRATION_CAVEAT}" + (" (but see below)" if run.asked else ""))
     lines.append(f"accuracy: {_pct(report.accuracy)} ({report.correct} of {report.total})")
     lines.append(
         f"escalation: {report.escalated} of {report.total} ({_pct(report.escalation_rate)}) "

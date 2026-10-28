@@ -40,6 +40,9 @@ Configuration comes from the process environment (no file is read). All variable
 | `SOCIAL_TRACKER_NEAR_DUPLICATE_CANDIDATES` | How many near-duplicate candidates are verified per item, the best-ranked first (1..1000). A lookup that hits the limit is counted in the report of the run. | `500` |
 | `SOCIAL_TRACKER_CLASSIFICATION_RETENTION_DAYS` | How long the verdict of an item that no longer exists is kept (1..3650); the hourly retention purge forgets the older ones. | `180` |
 | `SOCIAL_TRACKER_ALERT_RETENTION_DAYS` | How many days an alert is kept after its latest occurrence (0..3650); strictly older ones go. `0` keeps an alert only until it has been looked at (seen, dismissed) or withdrawn. See [Alerts](#alerts). | `180` |
+| `SOCIAL_TRACKER_ALERT_MAX_MEMBERS` | The items stored behind one alert (1..5000); past it a copy is only counted. See [Alerts](#alerts). | `500` |
+| `SOCIAL_TRACKER_ALERT_MAX_EVENTS` | The trail entries stored and shown per alert (10..2000); past it routine entries are only counted. | `200` |
+| `SOCIAL_TRACKER_TIMEZONE` | Your IANA time zone: the dates you type in filters are read in it (unless they carry an offset) and times are drawn in it. Storage and decisions stay UTC. | `America/Bogota` |
 | `SOCIAL_TRACKER_ALERT_DEDUP_HOURS` | Copies seen within this many hours of each other (inclusive) are one alert (1..720). | `24` |
 | `SOCIAL_TRACKER_ALERT_CRITICAL_WINDOW_HOURS` | How fresh an event must be (hours between its publication and the first sighting, inclusive) for a catalog contradiction to be critical (1..720). | `24` |
 | `SOCIAL_TRACKER_ALERT_CRITICAL_DELIBERATE` | Confidence from which `deliberate_disinformation` is critical (above 0, up to 1, at most four decimals). | `0.85` |
@@ -156,13 +159,13 @@ resets analysis and then makes its one pass.
 | `classify show ITEM_ID` | The verdict of one item: label, confidence, deciding stage, rationale, flags, when and why it was settled by the language-model stage (`llm`, `duplicate`, `invalid` or `parked`) and, if the model saw it, which model and prompt version. |
 | `classify stats` | Verdicts by label, out of scope by reason, the flags, near copies, duplicates waiting for their original (and, apart, the copies whose original is gone, which the next pass releases), the items parked as failed and the counts of the language-model stage (judged, invalid answers, waiting for a retry, parked, dropped). |
 | `classify calibrate [--file F] [--with-llm]` | Measure the CPU cascade against labeled texts (the local gold set, or `--file`): accuracy, precision and recall per label, confusion matrix, escalation rate and a sweep of the alert threshold. A report only; `--with-llm` (never the default) also puts the escalated texts to the local model. Exit status `3` when there is nothing to measure. See [Gold set and calibration](#gold-set-and-calibration). |
-| `alerts list [--severity S] [--label L] [--source ID] [--status S] [--tag T] [--since D] [--until D] [--limit N] [--offset N]` | The alerts, newest first (withdrawn ones only with `--status withdrawn`). Dates are days (`2026-03-01`, the `--until` day inclusive) or ISO moments, UTC. |
+| `alerts list [--severity S] [--label L] [--source ID] [--status S] [--tag T] [--since D] [--until D] [--when first_seen\|last_seen] [--hide-provisional] [--include-withdrawn] [--limit N] [--offset N]` | The alerts, newest first (withdrawn ones only with `--status withdrawn` or `--include-withdrawn`). Dates are days (`2026-03-01`, the `--until` day inclusive) or ISO moments, read in your time zone (`SOCIAL_TRACKER_TIMEZONE`) unless they carry an offset; `--when first_seen` makes the range apply to the first sighting instead of the last. `--hide-provisional` leaves out verdicts still waiting for the model. A rejected choice lists the valid ones. |
 | `alerts show ALERT_ID` | One alert: what it says, its evidence, the items behind it and its audit trail. |
 | `alerts seen ALERT_ID` / `alerts dismiss ALERT_ID` / `alerts reopen ALERT_ID` `--reason R [--actor A]` | Mark an alert (audited). `reopen` brings a dismissed alert back as seen. A repeat changes nothing. |
 | `alerts refresh` / `alerts rebuild` | Turn the new and changed verdicts into alerts now (the worker does it every pass) / evaluate every verdict again with the threshold in force. Both are idempotent; neither deletes an alert. |
-| `alerts stats` | Alerts by status and by severity. |
+| `alerts stats` | Alerts by status and by severity, the threshold and whether the alerts follow it, when they were last refreshed, how many the model downgraded and how many items the step failed on. |
 | `alerts threshold show` | The minimum confidence from which a risk verdict raises an alert. |
-| `alerts threshold set VALUE --reason R [--actor A]` | Set that threshold (audited). Existing alerts follow it only on the next `alerts rebuild`. |
+| `alerts threshold set VALUE --reason R [--actor A]` | Set that threshold (audited). `threshold set` applies it at once: every alert is evaluated again (a refresh would do it too, as it notices the change). |
 | `gold add --label L [--text-file F] [--item ITEM_ID] [--note N] [--credibility N] [--url U] [--actor A]` | Label a text for the gold set; give exactly one of `--text-file` and `--item`. |
 | `gold label [--text-file F] [--item ITEM_ID] [--label L] [--note N] [--credibility N] [--url U] [--actor A]` | The same, asking for the label (and the note) on the terminal when they are not given. |
 | `gold list [--label L] [--limit N] [--offset N]` | The labeled texts in the order they were added. |
@@ -302,17 +305,29 @@ ID` opts it into analysis.
 (`SOCIAL_TRACKER_DB_PATH`): a sources list with the collection state, add and edit forms that
 adapt to the source type, enable and disable, the system and per-source analysis switches, and a
 delete page that asks for confirmation and says that alerts and derived data are kept. A short
-guide per source type is at `/howto` and in [docs/howto.md](docs/howto.md). The worker status
-panel (GPU and model, stream lag) reads `n/a - no worker running` until the GPU workers exist
-(the collection worker has no GPU part). Next to it a read-only **Language model** panel shows
+guide per source type is at `/howto` and in [docs/howto.md](docs/howto.md). A **Worker** panel
+shows the stored time of the last worker pass and of the last alert refresh (the worker writes them
+at the end of every pass, with analysis on or off; the page asks the worker nothing, so "never"
+means no worker has passed yet). Next to it a read-only **Language model** panel shows
 the stored figures of the escalation (configured models, verdicts waiting, judgments started this
 hour of the cap, counts); it never asks the model server anything, so whether the server answers
 is `social-tracker llm status`.
 
-The **Alerts** page (`/alerts`, linked from every page, with a badge counting the new ones) lists
-the alerts newest first, 25 to a page: filters for severity, label, status, source, tag and a
-date range (a plain GET form, so a filtered page can be bookmarked), the occurrence count, the
-excerpt and **Mark seen**, **Dismiss** and **Reopen** buttons that update the row in place. The
+The **Alerts** page (`/alerts`, linked from every page, with a badge counting the new ones on every
+page) starts with the state of the monitor: whether analysis is on or off (when it is off it says
+that nothing is being analysed), the last worker pass and the last alert refresh in words, the
+alert threshold (read-only: change it with `alerts threshold set`, and it says when the alerts
+have not applied a change yet), how many alerts are withdrawn with a **Show withdrawn** link, how
+many the model downgraded and how many items the alert step gave up on. It lists the alerts newest
+first, 25 to a page: filters for severity, label, status, source (chosen by name, removed sources
+included), tag, a date range (read in `SOCIAL_TRACKER_TIMEZONE`, default America/Bogota, unless
+you give an offset, applying to the first or last sighting as you choose), hide provisional (off
+by default) and show withdrawn (a plain GET form, so a filtered page can be bookmarked). Each row
+shows the severity, the label with a **pending model** badge while the verdict waits for the
+model and a **downgraded by the model** badge when it lowered it, the confidence, the status, the
+occurrence count with the number of linked sources, the published and the fetched time side by
+side, the tags, the excerpt and **Mark seen**, **Dismiss** and **Reopen** buttons that update the
+row in place. A page number beyond what can exist shows the empty page, not an error. The
 detail page shows the evidence, the items behind the alert and its trail; it links nowhere
 outside this machine. A mark that cannot be applied (another tab already changed the alert, a busy
 database) redraws the row as it really is with a message; pressing a button twice is harmless.
@@ -774,7 +789,7 @@ verdict of an item still stored is kept as long as the item.
 What exists so far, all of it synthetic: a seeded corpus of 2,000 items whose mix is an assumption
 (`tests/classification/corpus.py`), in which 13.0 % of the items (21.9 % of the in-scope ones) are
 queued for the LLM, a corpus of 2,000 templated bulletins over 83 days in which no item is flagged
-as a copy, and 65 labeled Spanish examples (`tests/data/gold_examples.yaml`, one of them recorded as a known
+as a copy, and 66 labeled Spanish examples (`tests/data/gold_examples.yaml`: 65 that the cascade gets right and one recorded apart as a known
 gap) that state what the cascade should do and are the seed of the gold set. The escalation rate depends on the real mix
 (texts that cite an official body without a link are always queued for now), so read `classify
 stats` and a sample of `classify show` on your sources, then adjust `weights` (and the term lists)
@@ -927,7 +942,14 @@ threshold (default `0.5`, inclusive; `alerts threshold set` changes it, audited 
 a reason). `no_risk`, `unclassified` and `out_of_scope` never alert, whatever their confidence.
 The step runs in the worker after the classification and the language model of every pass, and
 by hand with `alerts refresh` (what is new or changed) or `alerts rebuild` (everything, with the
-threshold in force). It reads only what is stored; running it twice changes nothing.
+threshold in force). It reads only what is stored; running it twice changes nothing. A normal
+pass looks only at the verdicts written since it last looked (the store marks them), so a quiet
+tick of the worker costs one small query however many alerts exist; a changed threshold is
+applied by the next refresh (the threshold the alerts were last evaluated with is remembered, and
+`alerts threshold set` applies it at once). An item the step cannot evaluate backs off (30 seconds,
+doubling up to an hour) and is parked after 5 failures instead of being retried at every tick:
+`alerts stats` counts the retrying and the parked ones and `alerts rebuild` gives them another
+chance.
 
 | Severity | When (every number is configurable, see the variables above) |
 | --- | --- |
@@ -937,8 +959,13 @@ threshold in force). It reads only what is stored; running it twice changes noth
 | `low` | Anything else that qualifies (only possible when the threshold is under 0.5). |
 
 The age of an event is the time between the item's publication date and the moment this
-application FIRST saw it, never under zero: the first sighting is the one clock a feed cannot
-forge.
+application FIRST saw it, never under zero: the first sighting is the application's own clock,
+the publication date is not (the feed writes it and can write anything), so it is trusted only so
+far. A date that is missing or in the future (the collector put the fetch time in its place and
+flagged the item) means the age is unknown, and an unknown age is never fresh. A backdated date
+only makes an event look older, which lowers a critical contradiction of the catalogs to high; it
+never raises anything. And a contradiction needs a catalog with an answer to contradict: a catalog
+that is stale or incomplete is `unavailable`, so a lagging cache cannot make an alert critical.
 
 **What an alert holds.** Its label, severity, confidence and rationale, the source (id and a
 snapshot of its name, so deleting the source keeps the name and the pages say `source removed`),
@@ -952,16 +979,49 @@ Emergencias y Desastres de Cali, formerly DAGRD, with no link to it), `catalog_c
 
 **The excerpt** is at most 500 characters (a longer text is cut and ends with an ellipsis).
 Control characters, hidden characters (zero width, right-to-left overrides, line separators, lone
-surrogates) are removed, a link keeps only its scheme, host and path (credentials, query string
-and fragment go: that is where tokens live), and anything that looks like a cookie, an
-authorization header, a token, a password or a long hex key is replaced by `[redacted]`. It is
+surrogates) are removed, a link keeps only its scheme, host and path (credentials of any URL
+scheme, the query string, the fragment and path segments that look like a token go: that is where
+tokens live), and anything that looks like a secret is replaced by `[redacted]`: cookies and
+authorization headers, vendor keys (AWS, GitHub, OpenAI, Slack, Google, Stripe, SendGrid, JWT),
+`password`, `secret`, `api key`, `token` and `bearer` said in a sentence, and long random-looking
+tokens. The rules are tuned against false positives: ordinary Spanish prose, numbers,
+magnitudes, dates and hashtags come out as they went in. The rationale of the model and the
+strings of the evidence are redacted and cleaned the same way before they are stored. It is
 stored as plain text and escaped wherever it is drawn.
 
 **Copies are one alert.** The same content, or a near copy that points to an original, seen within
 24 hours (inclusive, either way round) of an alert's items joins that alert: the occurrence count
 goes up and the sources are linked. An item that bridges two alerts makes them one (the oldest
-stays, and the one that needs attention most decides the status). The severity of an alert is the
-highest of its active items, so merging a copy can raise it and never lower it.
+stays, and the one that needs attention most decides the status). The trail of the absorbed alert
+is copied under the one that stays with its original times and marked `from an absorbed alert`,
+so merging erases no audit entry, and an original is found whether it or its copies arrived first
+(items are looked at in the order they were fetched, and a copy that points to an item is found
+from the item). The severity of an alert is the highest of its active items, so it never lowers on
+a merge (a copy can only raise it) and follows the model's final verdict when the model settles a
+waiting one.
+
+**A decision never hides a worse alert.** When the severity rises (a stronger copy
+joined, the model upgraded a waiting verdict, a withdrawn alert came back stronger, two alerts
+became one) and a person had marked it `seen` or `dismissed`, the alert goes back to `new` with
+an audit entry by `system:alerts` ("severity rose from medium to critical"); the same or a lower
+severity keeps what the person decided.
+
+**What the model says never hides an alert.** When the language model settles a verdict lower
+than the provisional one an alert was raised on, or makes every item of an alert stop qualifying,
+the alert is not withdrawn: it stays in the default list, back to `new`, with a visible
+`downgraded by the model` badge and the model's rationale, until someone looks at it. A
+withdrawal by the threshold or by a reclassification of the cascade stays a withdrawal, but is
+never silent: the Alerts page counts the withdrawn ones in its header and **Show withdrawn**
+lists them (`alerts list --include-withdrawn` does too).
+
+**One alert cannot grow without bound.** An alert stores at most 500 items
+(`SOCIAL_TRACKER_ALERT_MAX_MEMBERS`) and 200 entries of trail (`SOCIAL_TRACKER_ALERT_MAX_EVENTS`).
+Past the cap a copy is only counted (the occurrence count stays true): a stronger copy takes the
+place of the weakest item, and the first and the leading items always stay. Merging a copy brings
+the alert up to date from the alert itself and reads no other item, so a flood of near copies
+costs the same per copy at the first and at the thousandth. Routine entries (`merged`, `updated`)
+beyond the cap are only counted; what a person decides is always written, and the detail page
+says `N more entries not shown`.
 
 **One item, one alert.** An item is a member of at most one alert however often it is reprocessed,
 reclassified or settled by the model, and two workers racing on it store one. When its verdict
@@ -969,8 +1029,9 @@ changes (the model upgrades or downgrades it, a copy takes its original's) the a
 no item of an alert qualifies any more (the verdict fell under the threshold or became `no_risk`)
 the alert is **withdrawn** with the reason, not deleted: it leaves the default list (`alerts list
 --status withdrawn`, or the Alerts page filter, shows it), and it comes back by itself, keeping the
-status the operator gave it, if a verdict qualifies again. A raised threshold withdraws on
-`alerts rebuild`, not on a plain refresh.
+status the operator gave it (unless it comes back more severe, see above), if a verdict qualifies
+again. A raised threshold withdraws on the next refresh, as a changed threshold is applied by the
+next refresh.
 
 **Statuses.** `new`, `seen`, `dismissed`. The moves are `new` to `seen`, `new` to `dismissed`,
 `seen` to `dismissed` and `dismissed` to `seen` (`alerts reopen`); anything else is refused, and
@@ -979,10 +1040,15 @@ an audit entry with the actor and the reason (the web UI uses the actor `web:loc
 
 **Retention.** An alert is kept `SOCIAL_TRACKER_ALERT_RETENTION_DAYS` (180) days after its latest
 occurrence and the hourly purge forgets the older ones (strictly older: at exactly 180 days it is
-still kept). With `0` an alert is kept only until it has been seen, dismissed or withdrawn. The
-excerpt and the evidence outlive the item they came from (the item is purged after
-`SOCIAL_TRACKER_RETENTION_DAYS`), and a forgotten alert is not raised again by the verdict of an
-item that still exists.
+still kept). With `0` an alert is kept only until it has been seen, dismissed or withdrawn; an
+alert with an item that still waits for the model is never purged by this rule (the model's
+answer may change what it means). The excerpt and the evidence outlive the item they came from
+(the item is purged after `SOCIAL_TRACKER_RETENTION_DAYS`). What the purge forgets is a verdict:
+an item stays forgotten while its verdict is the same one it was forgotten on (its label,
+confidence and the time the model settled it), for a year; a changed or upgraded verdict, even a
+lower one that still qualifies, clears the memory and raises the alert again. So an old feed
+entry listed again after its item was purged does not bring a forgotten alert back, and a model
+that upgrades the verdict later does.
 
 ```bash
 uv run social-tracker alerts threshold show
@@ -998,8 +1064,11 @@ The cascade is only as good as it is measured. The **gold set** is a list of tex
 labeled with the answer they want from the classifier (one of the six labels). It lives in the
 local database next to the collected items and **never in the repository**: the texts may be real
 content from real sources, so `gold export` writes them to a file only when you ask, and the file
-should stay out of version control. The synthetic seed in the repository
-(`tests/data/gold_examples.yaml`, the same 65 examples the tests use) holds no real content.
+should stay out of version control: `gold export -o FILE` refuses a path inside a git work tree
+(where `git add .` would commit it) unless you pass `--allow-repo-path`, and `gold_export*.yaml` and
+`exports/` are git-ignored. The synthetic seed in the repository
+(`tests/data/gold_examples.yaml`, the same 65 examples the tests use, plus one known gap listed
+apart) holds no real content.
 
 ```text
 uv run social-tracker gold add --label unintentional_rumor --text-file chain.txt --note "prediction chain"
@@ -1017,7 +1086,8 @@ same example: adding it again with the same label changes nothing, with another 
 until you `gold remove` it. The set holds at most 5,000 examples.
 
 `classify calibrate` runs the CPU cascade (the topic filter and the rules) over the set and prints
-a report: accuracy; precision, recall and F1 per label; the confusion matrix (rows are the label
+a report that starts with what it measured (`measured with no history, no catalog; CPU stages only`):
+accuracy; precision, recall and F1 per label; the confusion matrix (rows are the label
 you expected, columns the one the cascade gave); the share of texts that would go to the language
 model; and a sweep of the alert threshold from 0.30 to 0.95 in steps of 0.05 (the one in force is
 marked) with the alerts each value would raise, how many were right and how many risky texts it

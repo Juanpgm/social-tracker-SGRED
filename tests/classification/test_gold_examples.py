@@ -1,4 +1,5 @@
-"""The synthetic gold examples (`tests/data/gold_examples.yaml`): ~60 labeled Spanish texts that
+"""The synthetic gold examples (`tests/data/gold_examples.yaml`): 65 labeled Spanish texts (and
+one known gap, listed apart) that
 state what the cascade should do, as the seed of the gold set of unit 3d.
 
 Each example asserts the scope, the label (or the acceptable labels) and whether it is escalated.
@@ -62,7 +63,7 @@ def test_the_gold_file_is_what_it_claims_to_be():
     assert GOLD["version"] == 1
     ids = [e["id"] for e in EXAMPLES]
     assert len(ids) == len(set(ids))
-    assert 55 <= len(EXAMPLES) <= 80
+    assert len(EXAMPLES) == 65  # the README derives its count from this file: change both
     kinds = Counter(e["kind"] for e in EXAMPLES)
     for needed in (
         "official_report",

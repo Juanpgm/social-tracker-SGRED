@@ -135,7 +135,10 @@ never deletes one).
 **Severity.** `critical` for deliberate disinformation at 0.85 or more, or for a claim the
 official catalogs contradict about an event at most 24 hours old at 0.8 or more; `high` from 0.7,
 `medium` from 0.5, `low` otherwise. Copies seen within 24 hours are one alert with an occurrence
-count; its severity can rise and never falls.
+count; its severity never lowers on a merge and follows the model's final verdict when the model
+settles a verdict that was waiting for it. If the severity rises after you marked an alert `seen`
+or `dismissed`, it goes back to `new` so that the worse news is not hidden. A publication date
+that is missing or from the future counts as an unknown age, never a fresh one.
 
 **Statuses.** A new alert is `new`. Mark it `seen` or `dismiss` it, and `reopen` a dismissed one
 (`social-tracker alerts seen|dismiss|reopen ALERT_ID --reason "..."`, or the buttons on the page).
@@ -152,6 +155,12 @@ attributed to the Secretaria de Gestion del Riesgo de Emergencias y Desastres de
 DAGRD) with no link to it. Alerts are kept 180 days after their latest occurrence
 (`SOCIAL_TRACKER_ALERT_RETENTION_DAYS`).
 
+**Dates and the page.** Dates you type in the filters (and in `alerts list --since/--until`) are read
+in your time zone, `SOCIAL_TRACKER_TIMEZONE` (America/Bogota unless you set it), unless you add an
+offset such as `-05:00`; times are drawn in it too. The top of the Alerts page says whether
+analysis is on, when the worker last passed and the alerts were last refreshed, and the threshold;
+if analysis is off nothing is being analysed and no new alert will appear.
+
 ## Labeling texts and calibrating
 
 To see how well the classifier does, label some texts yourself: the **gold set**. It is stored in
@@ -161,7 +170,9 @@ the local database, never in the repository, and may hold real text, so do not c
   a text from a file; `--item ITEM_ID` takes a collected item instead (see
   `social-tracker items list --ids`). `social-tracker gold label --text-file text.txt` asks for the
   label and the note on the terminal.
-- `social-tracker gold list`, `gold show ID`, `gold remove ID` and `gold export -o gold.yaml`.
+- `social-tracker gold list`, `gold show ID`, `gold remove ID` and `gold export -o gold.yaml`
+  (it refuses a path inside a git work tree unless you pass `--allow-repo-path`: the file may hold
+  real text and must stay out of version control).
 - `social-tracker classify calibrate` measures the CPU cascade against the set: accuracy,
   precision and recall per label, the confusion matrix, how many texts would go to the model and
   which alert threshold would have worked best. It only reports: it changes nothing. Add

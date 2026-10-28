@@ -442,13 +442,20 @@ def _word(number: int) -> str:
 
 
 def test_the_readme_example_count_is_the_real_number_of_gold_examples(readme: str):
+    """The count is derived from the file, never typed: the examples the cascade is expected to
+    get right plus the known gaps recorded apart (which it gets wrong for a stated reason)."""
     import yaml
 
     gold = yaml.safe_load(
         (README.parent / "tests" / "data" / "gold_examples.yaml").read_text("utf-8")
     )
-    assert f"and {len(gold['examples'])} labeled Spanish examples" in classifying(readme)
-    assert len(gold["known_gaps"]) == 1  # "one of them recorded as a known gap"
+    right, gaps = len(gold["examples"]), len(gold["known_gaps"])
+    text = classifying(readme)
+    assert f"and {right + gaps} labeled Spanish examples" in text
+    assert (
+        f"{right} that the cascade gets right and {_word(gaps)} recorded apart as a known gap"
+        in text
+    )
 
 
 def test_the_dependency_audit_note_names_the_lock_file_it_audited(readme: str):
