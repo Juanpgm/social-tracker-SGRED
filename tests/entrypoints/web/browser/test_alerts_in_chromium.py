@@ -17,7 +17,7 @@ from social_tracker.classification.domain import Classification, Label, Signal, 
 from social_tracker.persistence.classification_repo import SqliteClassificationRepository
 from social_tracker.persistence.db import Database
 from social_tracker.persistence.items_repo import SqliteItemRepository
-from tests.entrypoints.web.browser.conftest import Live
+from tests.entrypoints.web.browser.conftest import Live, settled
 from tests.items.factories import NOW, make_item
 
 pytestmark = pytest.mark.browser
@@ -89,7 +89,7 @@ def test_a_double_click_is_one_request_and_one_audit_entry(page: Any, live: Live
     page.on("request", lambda r: sent.append(r.url) if r.method == "POST" else None)
     page.dblclick(f"#alert-{alert.id} button:has-text('Mark seen')")
     page.wait_for_selector(f"#alert-{alert.id} td:text-is('seen')")
-    page.wait_for_timeout(500)  # a late second request would have arrived by now
+    settled(page)  # no request is left in flight: a second one would have been seen
     assert len(sent) == 1
     assert trail_length(live, alert.id) == 2  # created, status_changed
 
@@ -183,7 +183,7 @@ def test_the_page_loads_nothing_from_outside(page: Any, live: Live):
     requested: list[str] = []
     page.on("request", lambda r: requested.append(r.url))
     open_alerts(page, live)
-    page.wait_for_timeout(300)
+    settled(page)
     assert requested
     assert all(url.startswith(live.url) for url in requested), requested
 
@@ -207,3 +207,21 @@ def test_the_server_going_away_says_so_in_the_status_region(page: Any, live: Liv
     live.stop()
     page.click(f"#alert-{alert.id} button:has-text('Mark seen')")
     page.wait_for_selector("#live-region:has-text('cannot be reached')")
+
+
+def test_the_header_and_the_new_filters_work_in_the_browser(page: Any, live: Live):
+    live.seed()
+    plant(live, "a")
+    raise_alerts(live)
+    open_alerts(page, live)
+    header = page.inner_text(".monitor")
+    assert "Analysis: off" in header
+    assert "last worker pass: never" in header
+    assert "nothing is being analysed" in header
+    page.check("#f-hide")
+    page.select_option("#f-when", "first_seen")
+    page.click("form.filters button[type=submit]")
+    page.wait_for_url(lambda url: "hide_provisional=1" in url and "when=first_seen" in url)
+    assert page.is_checked("#f-hide")
+    assert page.input_value("#f-when") == "first_seen"
+    assert page.problems == []

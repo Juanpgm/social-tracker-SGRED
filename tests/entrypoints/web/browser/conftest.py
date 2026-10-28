@@ -101,6 +101,19 @@ class Live:
         return [e for e in found if e.kind == kind]
 
 
+def flush(page: Any) -> None:
+    """The browser has run what the last action queued: two animation frames have been drawn."""
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+
+
+def settled(page: Any) -> None:
+    """Everything the page asked for has arrived and the browser has drawn since. It is the
+    condition that a fixed sleep used to stand in for ("a late second request would have arrived
+    by now"): there is no request left in flight to arrive."""
+    page.wait_for_load_state("networkidle")
+    flush(page)
+
+
 @pytest.fixture
 def live(tmp_path: Path) -> Iterator[Live]:
     env = {

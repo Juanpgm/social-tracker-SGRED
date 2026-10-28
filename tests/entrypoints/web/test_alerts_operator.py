@@ -482,3 +482,57 @@ def test_a_long_trail_ends_with_a_row_saying_how_many_entries_are_not_shown(web:
         conn.execute("UPDATE alerts SET events_dropped = 41 WHERE id = ?", (alert.id,))
     text = visible_text(web.client.get(f"/alerts/{alert.id}").text)
     assert "41 more entries not shown" in text
+
+
+# ---- storage failures and malformed queries ----
+
+
+def test_the_alerts_page_says_the_database_is_busy_when_it_cannot_be_read(web: Web, monkeypatch):
+    from social_tracker.alerts.service import AlertService
+    from social_tracker.shared.errors import StorageError
+
+    def broken(self):
+        raise StorageError("down")
+
+    monkeypatch.setattr(AlertService, "counts", broken)
+    response = web.client.get("/alerts")
+    assert response.status_code == 503
+    assert "busy or unavailable" in visible_text(response.text)
+    assert re.search(r'<span id="alerts-badge"[^>]* hidden', response.text)
+
+
+def test_a_damaged_telemetry_value_is_said_as_a_busy_database_not_a_crash(web: Web):
+    with Database(Path(web.env[DB_PATH_ENV])) as db, db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (SETTING_WORKER_LAST_PASS, "not a time"),
+        )
+    response = web.client.get("/")
+    assert response.status_code == 503  # a damaged stored value is a storage error, said plainly
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"hide_provisional": "2"},
+        {"hide_provisional": "yes"},
+        {"withdrawn": "true"},
+        {"withdrawn": "0"},
+        {"when": "FIRST_SEEN"},
+        {"since": "2026-13-45"},
+        {"until": "ayer"},
+        {"since": "2026-03-02", "until": "2026-03-01"},
+        {"source": "'; DROP TABLE alerts; --"},
+        {"since": "x" * 120},
+    ],
+)
+def test_a_malformed_filter_is_a_plain_refusal_never_a_crash(web: Web, query):
+    response = web.client.get("/alerts", params=query)
+    assert response.status_code == 400
+    assert "Traceback" not in response.text
+    assert "DROP" not in response.text
+
+
+def test_the_switches_of_the_filter_accept_only_one_or_nothing(web: Web):
+    for query in ({"hide_provisional": ""}, {"hide_provisional": "1"}, {"withdrawn": "1"}):
+        assert web.client.get("/alerts", params=query).status_code == 200

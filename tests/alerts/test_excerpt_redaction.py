@@ -4,6 +4,8 @@ replaced by `[redacted]`; ordinary Spanish prose, numbers, magnitudes, dates, ha
 links come out untouched."""
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from social_tracker.alerts.excerpt import REDACTED, make_excerpt, redact
 
@@ -23,6 +25,7 @@ KEYS = {
     "slack_r": "xox" + "r-123456789012-abcdefghijklmnop",
     "slack_s": "xox" + "s-123456789012-abcdefghijklmnop",
     "google": "AIz" + "aSyA1234567890abcdefghijklmnopqrstu",
+    "google_plain": "AIza" + "abcdefghijklmnopqrstuvwxyzabcdefghij",  # two classes: no other rule
     "google_oauth": "ya2" + "9.a0AfH6SMBx1234567890abcdefghijklmnop",
     "jwt": ".".join(
         [
@@ -183,3 +186,92 @@ def test_nothing_in_a_redacted_text_leaks_the_secret_of_the_pair_rule():
     out = make_excerpt("", "login: pwd=Sup3rS3cret!!")
     assert "Sup3rS3cret" not in out
     assert out.startswith("login: pwd=" + REDACTED)
+
+
+# ---- the edges of the rules ----
+
+
+@pytest.mark.parametrize(
+    ("path", "gone"),
+    [
+        ("0123456789abcdef", True),  # 16 hex digits with a digit and a letter
+        ("0123456789abcde", False),  # 15
+        ("aBcDeFgHiJkLm1nO", True),  # 16, three classes
+        ("aBcDeFgHiJkLm1n", False),  # 15
+        ("0123456789012345", False),  # 16 digits: a number, not a token
+        ("abcdefabcdefabcd", False),  # 16 hex letters and no digit: a word
+    ],
+)
+def test_a_path_segment_is_a_token_from_16_characters_with_digits_and_letters(path, gone):
+    out = make_excerpt("", f"https://x.example/r/{path}/done")
+    assert (path not in out) is gone
+
+
+@pytest.mark.parametrize(
+    ("value", "gone"),
+    [("abc123", True), ("abc12", False), ("abcde1x", True), ("simple", False)],
+)
+def test_a_spoken_secret_needs_six_characters_that_look_like_one(value, gone):
+    out = make_excerpt("", f"my password is {value} ok")
+    assert (value not in out) is gone
+
+
+def test_a_repetitive_run_of_three_classes_is_not_a_random_token():
+    text = "Ab1" * 9
+    assert make_excerpt("", text) == text
+
+
+def test_a_random_run_of_exactly_24_characters_goes_and_one_of_23_stays():
+    token = "kJ8x2VqP9mN4tR7zA1bC3dE5"
+    assert len(token) == 24
+    assert token not in make_excerpt("", token)
+    assert make_excerpt("", token[:23]) == token[:23]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.cali.gov.co/gestiondelriesgo/Publicaciones/Boletin2026Informe",
+        "https://example.org/Noticias/Colombia/Cali/Terremoto2026EnCaliUrgenteHoy",
+        "https://x.example/a/BcD/eF12/gH34/iJ56/kL78/mN90/oPqRsT",
+        "ftp://files.example/Reportes/2026/Marzo/Boletin01Final",
+    ],
+)
+def test_a_link_with_capitals_and_digits_in_its_path_is_not_taken_for_a_key(url):
+    assert make_excerpt("", f"ver {url} fin") == f"ver {url} fin"
+
+
+def test_a_secret_next_to_a_link_still_goes_and_the_link_stays():
+    token = "kJ8x2VqP9mN4tR7zA1bC3dE5"
+    out = make_excerpt("", f"https://x.example/Noticia2026/Cali {token} y mas")
+    assert token not in out
+    assert "https://x.example/Noticia2026/Cali" in out
+
+
+def test_a_base64_key_with_slashes_and_plus_signs_goes_when_it_is_not_in_a_link():
+    key = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLE7Key"
+    assert key not in make_excerpt("", f"secret aws {key} fin")
+
+
+# ---- prose is left alone, whatever the order of its words ----
+
+WORDS = [
+    "mañana", "habrá", "un", "temblor", "fuerte", "en", "Cali", "compartan", "este", "mensaje",
+    "URGENTE", "sismo", "de", "magnitud", "6.5", "a", "las", "14:32", "horas", "según", "la",
+    "Secretaría", "de", "Gestión", "del", "Riesgo", "evacuación", "inmediata", "#TerremotoCali",
+    "@GestionRiesgo", "2026-03-01", "https://www.cali.gov.co/gestiondelriesgo/Boletin2026",
+    "electroencefalografistas", "contraseña", "clave", "token", "secret", "bearer", "password",
+]  # fmt: skip
+
+
+@settings(max_examples=300, deadline=None)
+@given(st.lists(st.sampled_from(WORDS), min_size=1, max_size=18))
+def test_ordinary_sentences_come_out_as_they_went_in_unless_a_secret_word_has_a_value(words):
+    text = " ".join(words)
+    secret_words = {"token", "secret", "bearer", "password"}
+    risky = any(
+        words[i] in secret_words and i + 1 < len(words) and len(words[i + 1]) >= 6
+        for i in range(len(words))
+    )
+    if not risky:
+        assert make_excerpt("", text) == text

@@ -94,7 +94,11 @@ _VENDOR_RE = re.compile(
     )
 )
 # A long run of token characters; whether it is a secret is decided by `_random_token`.
-_TOKENISH_RE = re.compile(r"(?<![\w#@])[A-Za-z0-9+/_=-]{24,}(?!\w)")
+# A long run of token characters, or a whole link (which is left to `_link`: its path is not
+# a key just because it has capitals and digits).
+_TOKENISH_RE = re.compile(
+    r"(?P<link>[A-Za-z][A-Za-z0-9+.-]*://\S+)|(?P<run>(?<![\w#@])[A-Za-z0-9+/_=-]{24,}(?!\w))"
+)
 _CAMEL_WORDS_RE = re.compile(r"(?:[A-Z][a-z]+|[0-9]+)+")  # TerremotoEnCali2026: words, not a key
 _HEX_RE = re.compile(r"[0-9a-fA-F]{16,}")
 _MIN_PATH_TOKEN = 16
@@ -133,7 +137,16 @@ def _path_token(segment: str) -> bool:
         return False
     if _HEX_RE.fullmatch(segment):
         return any(c.isdigit() for c in segment) and any(c.isalpha() for c in segment)
-    return re.fullmatch(r"[A-Za-z0-9_-]+", segment) is not None and _classes(segment) == 3
+    return (
+        re.fullmatch(r"[A-Za-z0-9_-]+", segment) is not None
+        and _classes(segment) == 3
+        and _CAMEL_WORDS_RE.fullmatch(segment) is None
+    )
+
+
+def _run(match: re.Match[str]) -> str:
+    run = match.group("run")
+    return REDACTED if run is not None and _random_token(run) else match.group(0)
 
 
 def _bearer(match: re.Match[str]) -> str:
@@ -176,7 +189,7 @@ def redact(text: str) -> str:
     text = _VENDOR_RE.sub(REDACTED, text)
     text = _JWT_RE.sub(REDACTED, text)
     text = _LONG_HEX_RE.sub(REDACTED, text)
-    return _TOKENISH_RE.sub(lambda m: REDACTED if _random_token(m.group(0)) else m.group(0), text)
+    return _TOKENISH_RE.sub(_run, text)
 
 
 def make_excerpt(title: str, text: str) -> str:

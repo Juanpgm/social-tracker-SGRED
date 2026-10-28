@@ -327,6 +327,19 @@ def test_a_failing_item_waits_longer_each_time_and_is_parked_at_the_limit(repo, 
     assert repo.failure_counts(T0 + timedelta(days=30)) == (0, 1)
 
 
+def test_an_item_is_tried_again_exactly_when_its_backoff_ends(repo, db):
+    item = add_item(db, "a")
+    classify(db, item.id, RUMOR, 0.7)
+    repo.record_failure(item.id, T0, **BACKOFF)
+    ends = T0 + timedelta(seconds=30)
+    assert refs(repo, now=ends - timedelta(microseconds=1)) == []
+    assert ids(refs(repo, now=ends)) == [item.id]
+    assert repo.dirty_ids(after=None, limit=10, now=ends - timedelta(microseconds=1)) == []
+    assert ids(repo.dirty_ids(after=None, limit=10, now=ends)) == [item.id]
+    assert repo.failure_counts(ends - timedelta(microseconds=1)) == (1, 0)
+    assert repo.failure_counts(ends) == (0, 0)
+
+
 def test_the_backoff_is_capped(repo, db):
     item = add_item(db, "a")
     classify(db, item.id, RUMOR, 0.7)
@@ -365,8 +378,9 @@ def test_releasing_the_parked_gives_them_another_chance(repo, db):
     classify(db, item.id, RUMOR, 0.7)
     for _ in range(3):
         repo.record_failure(item.id, T0, **BACKOFF)
+    assert refs(repo, now=T0) == []  # parked
     assert repo.release_parked() == 1
-    assert ids(refs(repo, now=T0 + DAY)) == [item.id]
+    assert ids(refs(repo, now=T0)) == [item.id]  # at once, not after the old backoff
     assert repo.release_parked() == 0
 
 
@@ -581,3 +595,53 @@ def test_dropping_events_is_counted_on_the_alert(repo):
     repo.drop_events(alert.id, 4)
     assert repo.get(alert.id).events_dropped == 5
     repo.drop_events(alert_id_for("itm_none"), 2)  # an alert that is gone: harmless
+
+
+# ---- boundaries the mutation sweep found unpinned ----
+
+
+def test_a_limited_copy_of_a_trail_keeps_what_matters_before_the_routine_entries(repo):
+    kept = store(repo, "itm_a")
+    gone = store(repo, "itm_b", content_hash="2" * 64)
+    trail(repo, gone, 5)  # five routine entries first
+    for n, reason in enumerate(("seen by ana", "dismissed by ana")):
+        repo.add_event(
+            AlertEvent(
+                gone.id,
+                T0 + timedelta(minutes=30 + n),
+                AlertEventKind.STATUS_CHANGED,
+                "ana",
+                reason,
+            )
+        )
+    assert repo.copy_events(gone.id, kept.id, limit=3) == 4
+    copied = repo.events(kept.id)
+    assert [e.reason for e in copied if e.kind is AlertEventKind.STATUS_CHANGED] == [
+        "seen by ana",
+        "dismissed by ana",
+    ]
+    assert len(copied) == 3
+
+
+def test_the_memory_of_a_forget_is_kept_for_exactly_a_year(repo, db):
+    item = forget(repo, db)
+    forgotten_at = T0 + 2 * DAY
+    exactly = forgotten_at + timedelta(days=365)
+    repo.purge(before=None, handled=False, now=exactly)
+    assert repo.is_forgotten(item.id) is True  # exactly a year old is still kept
+    repo.purge(before=None, handled=False, now=exactly + timedelta(microseconds=1))
+    assert repo.is_forgotten(item.id) is False
+
+
+def test_each_failure_doubles_the_wait(repo, db):
+    item = add_item(db, "a")
+    classify(db, item.id, RUMOR, 0.7)
+    many = {**BACKOFF, "park_after": 10, "backoff_cap": timedelta(days=1)}
+    waits = []
+    for n in range(1, 6):
+        repo.record_failure(item.id, T0, **many)
+        waits.append(n)
+        expected = timedelta(seconds=30) * 2 ** (n - 1)
+        assert refs(repo, now=T0 + expected - timedelta(microseconds=1)) == []
+        assert ids(refs(repo, now=T0 + expected)) == [item.id]
+    assert waits == [1, 2, 3, 4, 5]

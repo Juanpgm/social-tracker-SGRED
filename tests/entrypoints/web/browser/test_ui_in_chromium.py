@@ -9,9 +9,10 @@ from contextlib import contextmanager
 from typing import Any
 
 import pytest
+from playwright.sync_api import expect
 
 from social_tracker.bootstrap import DB_PATH_ENV
-from tests.entrypoints.web.browser.conftest import Live
+from tests.entrypoints.web.browser.conftest import Live, flush, settled
 
 pytestmark = pytest.mark.browser
 
@@ -72,7 +73,7 @@ def test_a_double_click_on_enable_is_one_request_and_one_audit_event(page: Any, 
     sent = posts_to(page, "/enable")
     page.dblclick(ENABLE)
     page.wait_for_selector(DISABLE)
-    page.wait_for_timeout(500)  # a late second request would have arrived by now
+    settled(page)  # no request is left in flight: a second one would have been seen
     assert len(sent) == 1
     assert len(live.events("source_enabled")) == 1
     assert len(live.events("source_disabled")) == 0
@@ -86,7 +87,7 @@ def test_the_row_button_is_disabled_while_its_request_is_in_flight(page: Any, li
     page.click(ENABLE)
     page.wait_for_selector(f"{ENABLE}[disabled]")  # nothing else can be sent from this button
     page.locator(ENABLE).click(force=True, timeout=1000)  # a click on a disabled button is nothing
-    page.wait_for_timeout(300)
+    flush(page)  # the click has been handled; a request it started would be held by now
     assert len(held) == 1
     held[0].continue_()
     page.wait_for_selector(DISABLE)
@@ -221,7 +222,7 @@ def test_double_clicking_add_sends_the_form_once(page: Any, live: Live):
     sent = posts_to(page, "/sources/new/news_rss")
     page.dblclick("button[type=submit]")
     page.wait_for_url(lambda url: "notice=added" in url)
-    page.wait_for_timeout(300)
+    settled(page)
     assert len(sent) == 1
     assert len(live.events("source_added")) == 1
 
@@ -235,8 +236,7 @@ def test_the_add_button_is_given_back_after_going_back_in_history(page: Any, liv
     page.wait_for_url(lambda url: "notice=added" in url)
     page.go_back()
     page.wait_for_selector("form[data-once]")
-    page.wait_for_timeout(200)
-    assert page.locator("form[data-once] button[type=submit]").is_enabled()
+    expect(page.locator("form[data-once] button[type=submit]")).to_be_enabled()
 
 
 # ---- plumbing ----

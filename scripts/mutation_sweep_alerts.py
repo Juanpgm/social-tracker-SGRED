@@ -2,24 +2,29 @@
 
 Each mutant changes ONE operator or constant of the production code (a `>=` into a `>`, a window
 by one, a dropped guard); the targeted tests must fail. A mutant that leaves them green is a
-survivor: a boundary no test pins. The source is always restored, even on an interrupt.
+survivor: a boundary no test pins. The sweep works on COPIES of the source in temporary folders
+(see `scripts/mutation_copy.py`): the real tree is never written to, so an interrupt cannot leave
+it mutated.
 
     uv run python scripts/mutation_sweep_alerts.py            # every mutant
     uv run python scripts/mutation_sweep_alerts.py retention  # mutants named "...retention..."
+    uv run python scripts/mutation_sweep_alerts.py --jobs 6   # more copies at once (default 4)
+    uv run python scripts/mutation_sweep_alerts.py --check    # only look for stale patterns
 
+The second round of the alerts has its own sweep, `scripts/mutation_sweep_alerts_remediation.py`.
 The browser and web tests are left out of the sweep (they cost minutes and repeat what the service
 tests pin through the same code). Exit status: 0 when every mutant was killed, 1 when some
-survived, 2 when the targeted tests do not pass on the unmutated code.
+survived or their pattern is stale, 2 when the targeted tests do not pass on the unmutated copy.
 """
 
-import os
-import subprocess
+# ruff: noqa: E501 - a pattern is a piece of the source and keeps the line it has there
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src" / "social_tracker"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from mutation_copy import Mutant, m, run_sweep  # noqa: E402,F401  (the script folder is not a package)
+
 TESTS = [
     "tests/alerts",
     "tests/gold",
@@ -27,18 +32,6 @@ TESTS = [
     "tests/entrypoints/test_cli_alerts.py",
     "tests/entrypoints/test_cli_gold.py",
 ]
-
-
-@dataclass(frozen=True)
-class Mutant:
-    name: str
-    path: str
-    old: str
-    new: str
-
-
-def m(name: str, path: str, old: str, new: str) -> Mutant:
-    return Mutant(name, path, old, new)
 
 
 DOMAIN = "alerts/domain.py"
@@ -139,14 +132,14 @@ MUTANTS = [
     m(
         "the most severe leads",
         DOMAIN,
-        "-severity_rank(m.severity), -m.confidence",
-        "severity_rank(m.severity), -m.confidence",
+        "-severity_rank(member.severity), -member.confidence",
+        "severity_rank(member.severity), -member.confidence",
     ),  # fmt: skip
     m(
         "the most confident leads",
         DOMAIN,
-        "-severity_rank(m.severity), -m.confidence",
-        "-severity_rank(m.severity), m.confidence",
+        "-severity_rank(member.severity), -member.confidence",
+        "-severity_rank(member.severity), member.confidence",
     ),  # fmt: skip
     m(
         "merge window",
@@ -157,8 +150,8 @@ MUTANTS = [
     m(
         "bridging alerts",
         SERVICE,
-        "for other in targets[1:]:\n            self._absorb",
-        "for other in []:\n            self._absorb",
+        "if len(targets) > 1:\n            return self._bridge(",
+        "if False:\n            return self._bridge(",
     ),  # fmt: skip
     m(
         "bridging status",
@@ -172,26 +165,26 @@ MUTANTS = [
     m(
         "a withdrawn alert never comes back",
         SERVICE,
-        "if any(m.active for m in members):",
-        "if not any(m.active for m in members):",
+        "if keep_visible or any(m.active for m in members):",
+        "if keep_visible or not any(m.active for m in members):",
     ),  # fmt: skip
     m(
         "the age of an event",
         SERVICE,
-        "age = event_age(item.published_at, item.fetched_at)",
+        "age = event_age(\n            item.published_at, item.fetched_at, date_known=not _UNDATED.intersection(item.flags)\n        )",
         "age = timedelta(0)",
     ),  # fmt: skip
     m(
         "forgotten items",
         SERVICE,
-        "if item is None or self._alerts.is_forgotten(verdict.item_id):",
-        "if item is None:",
+        "        if sig.matches(verdict.label, verdict.confidence, verdict.settled_at):\n            return True\n",
+        "        if False:\n            return True\n",
     ),  # fmt: skip
     m(
         "pending ignores the forgotten",
         REPO,
-        "AND NOT EXISTS (SELECT 1 FROM alert_forgotten f WHERE f.item_id = c.item_id) ",
-        "",
+        '    "AND NOT EXISTS (SELECT 1 FROM alert_forgotten f WHERE f.item_id = c.item_id "\n    f"AND {_SAME_VERDICT})"',
+        '    ""',
     ),  # fmt: skip
     m("pending threshold inclusive", REPO, "c.confidence >= ?", "c.confidence > ?"),
     m("changed verdicts", REPO, "OR m.stage <> c.stage ", ""),
@@ -206,22 +199,27 @@ MUTANTS = [
     m(
         "purge is strict",
         REPO,
-        'conditions.append("last_seen_at < ?")',
-        'conditions.append("last_seen_at <= ?")',
+        'conditions.append("alerts.last_seen_at < ?")',
+        'conditions.append("alerts.last_seen_at <= ?")',
     ),  # fmt: skip
-    m("purge handled", REPO, "(status <> 'new' OR withdrawn_at IS NOT NULL)", "(status <> 'new')"),
+    m(
+        "purge handled",
+        REPO,
+        "((alerts.status <> 'new' OR alerts.withdrawn_at IS NOT NULL) AND NOT EXISTS",
+        "((alerts.status <> 'new') AND NOT EXISTS",
+    ),
     # ---- AL-4: the list ----
     m(
         "since inclusive",
         REPO,
-        'clauses.append("a.last_seen_at >= ?")',
-        'clauses.append("a.last_seen_at > ?")',
+        'clauses.append(f"{column} >= ?")',
+        'clauses.append(f"{column} > ?")',
     ),  # fmt: skip
     m(
         "until inclusive",
         REPO,
-        'clauses.append("a.last_seen_at <= ?")',
-        'clauses.append("a.last_seen_at < ?")',
+        'clauses.append(f"{column} <= ?")',
+        'clauses.append(f"{column} < ?")',
     ),  # fmt: skip
     m("withdrawn hidden", REPO, 'clauses.append("a.withdrawn_at IS NULL")', 'clauses.append("1")'),
     m(
@@ -260,7 +258,7 @@ MUTANTS = [
     m(
         "excerpt links",
         EXCERPT,
-        "text = _URL_RE.sub(lambda m: m.group(1) + m.group(2) + m.group(3), text)",
+        "text = _URL_RE.sub(_link, text)",
         "text = text",
     ),  # fmt: skip
     m(
@@ -333,54 +331,5 @@ MUTANTS = [
 ]
 
 
-def run_tests() -> bool:
-    """True when the targeted tests pass."""
-    done = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", *TESTS],
-        cwd=ROOT,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},  # no stale .pyc after a restore
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return done.returncode == 0
-
-
-def sweep(selected: list[Mutant]) -> list[Mutant]:
-    survivors = []
-    for mutant in selected:
-        path = SRC / mutant.path
-        original = path.read_bytes()
-        text = original.decode("utf-8")
-        newline = "\r\n" if "\r\n" in text else "\n"
-        normal = text.replace("\r\n", "\n")
-        if mutant.old not in normal:
-            print(f"STALE     {mutant.name}: pattern not found in {mutant.path}")
-            survivors.append(mutant)
-            continue
-        mutated = normal.replace(mutant.old, mutant.new, 1).replace("\n", newline)
-        try:
-            path.write_bytes(mutated.encode("utf-8"))
-            killed = not run_tests()
-        finally:
-            path.write_bytes(original)
-        print(f"{'killed  ' if killed else 'SURVIVED'}  {mutant.name}", flush=True)
-        if not killed:
-            survivors.append(mutant)
-    return survivors
-
-
-def main(argv: list[str]) -> int:
-    selected = [x for x in MUTANTS if not argv or any(a in x.name for a in argv)]
-    if not run_tests():
-        print("the targeted tests do not pass on the unmutated code")
-        return 2
-    survivors = sweep(selected)
-    print(f"\n{len(selected) - len(survivors)} of {len(selected)} mutants killed")
-    for mutant in survivors:
-        print(f"  survivor: {mutant.name}")
-    return 1 if survivors else 0
-
-
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(run_sweep(MUTANTS, TESTS, sys.argv[1:]))
