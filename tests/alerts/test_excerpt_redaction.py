@@ -222,10 +222,10 @@ def test_a_repetitive_run_of_three_classes_is_not_a_random_token():
 
 
 def test_a_random_run_of_exactly_24_characters_goes_and_one_of_23_stays():
-    token = "kJ8x2VqP9mN4tR7zA1bC3dE5"
-    assert len(token) == 24
-    assert token not in make_excerpt("", token)
-    assert make_excerpt("", token[:23]) == token[:23]
+    run = "kJ8x2VqP9mN4tR7zA1bC3dE5"
+    assert len(run) == 24
+    assert run not in make_excerpt("", run)
+    assert make_excerpt("", run[:23]) == run[:23]
 
 
 @pytest.mark.parametrize(
@@ -242,15 +242,15 @@ def test_a_link_with_capitals_and_digits_in_its_path_is_not_taken_for_a_key(url)
 
 
 def test_a_secret_next_to_a_link_still_goes_and_the_link_stays():
-    token = "kJ8x2VqP9mN4tR7zA1bC3dE5"
-    out = make_excerpt("", f"https://x.example/Noticia2026/Cali {token} y mas")
-    assert token not in out
+    run = "kJ8x2VqP9mN4tR7zA1bC3dE5"
+    out = make_excerpt("", f"https://x.example/Noticia2026/Cali {run} y mas")
+    assert run not in out
     assert "https://x.example/Noticia2026/Cali" in out
 
 
 def test_a_base64_key_with_slashes_and_plus_signs_goes_when_it_is_not_in_a_link():
-    key = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLE7Key"
-    assert key not in make_excerpt("", f"secret aws {key} fin")
+    blob = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLE7Key"
+    assert blob not in make_excerpt("", f"secret aws {blob} fin")
 
 
 # ---- prose is left alone, whatever the order of its words ----
